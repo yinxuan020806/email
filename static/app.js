@@ -733,8 +733,9 @@ function viewEmails(accountId) {
   $('emailFolder').value = 'inbox';
   $('ecSubject').textContent = t('email_select_hint');
   $('ecInfo').textContent = '';
-  $('ecBody').srcdoc = EMAIL_HEAD
-    + `<div style="color:#8e8e93;padding:24px;text-align:center;font-size:13px">${t('email_select_hint')}</div>`;
+  _setIframeContent(EMAIL_HEAD
+    + `<div style="color:#8e8e93;padding:24px;text-align:center;font-size:13px">${t('email_select_hint')}</div>`
+    + EMAIL_FOOT);
   $('btnReply').disabled = true;
   $('btnDelEmail').disabled = true;
   openModal('emailModal');
@@ -793,51 +794,77 @@ function renderEmailList() {
 }
 
 const EMAIL_HEAD =
-  '<base target="_blank"><meta charset="utf-8">'
-  + '<style>html,body{height:100%}'
+  '<!DOCTYPE html><html><head>'
+  + '<base target="_blank"><meta charset="utf-8">'
+  + '<meta name="viewport" content="width=device-width,initial-scale=1">'
+  + '<style>'
+  + 'html,body{margin:0;padding:0;min-height:100%}'
   + 'body{font-family:Segoe UI,Microsoft YaHei UI,sans-serif;'
-  + 'font-size:13px;padding:12px;margin:0;color:#1d1d1f;background:#fff;'
+  + 'font-size:13px;padding:12px;color:#1d1d1f;background:#fff;'
   + 'word-wrap:break-word;overflow-wrap:break-word;line-height:1.6}'
   + 'pre{white-space:pre-wrap;margin:0;font-family:inherit}'
-  + 'img{max-width:100%;height:auto}'
+  + 'img{max-width:100%;height:auto;border:0}'
   + 'a{color:#0078d4}'
   + 'table{max-width:100%;border-collapse:collapse}'
-  + '</style>';
+  + '</style>'
+  + '</head><body>';
+
+const EMAIL_FOOT = '</body></html>';
+
+// 用 Blob URL 渲染长邮件（解决 srcdoc 在 10KB+ HTML 上的渲染失败问题）
+function _setIframeContent(html) {
+  const iframe = $('ecBody');
+  // 释放上一次的 Blob URL，避免内存泄漏
+  if (iframe._blobUrl) {
+    try { URL.revokeObjectURL(iframe._blobUrl); } catch {}
+    iframe._blobUrl = null;
+  }
+  const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  iframe._blobUrl = url;
+  iframe.src = url;
+}
 
 function renderEmailBody(body, bodyType) {
-  const iframe = $('ecBody');
   if (!body) {
-    iframe.srcdoc = EMAIL_HEAD
-      + `<div style="color:#8e8e93;padding:24px;text-align:center;font-size:13px">${t('email_body_empty')}</div>`;
+    _setIframeContent(EMAIL_HEAD
+      + `<div style="color:#8e8e93;padding:24px;text-align:center;font-size:13px">${t('email_body_empty')}</div>`
+      + EMAIL_FOOT);
     return;
   }
-  // 显式 body_type 优先；缺省时回退到内容启发式判断
   const isHtml = bodyType
     ? String(bodyType).toLowerCase() === 'html'
     : /<html|<body|<div|<a\s|<p\s|<br|<table/i.test(body);
   if (isHtml) {
-    iframe.srcdoc = EMAIL_HEAD + body;
+    // 邮件本身是完整的 HTML 文档时直接用，避免重复 <html><body> 嵌套
+    const looksLikeFullDoc = /<html[\s>]/i.test(body);
+    const html = looksLikeFullDoc
+      ? body  // 邮件自带完整文档结构
+      : EMAIL_HEAD + body + EMAIL_FOOT;
+    _setIframeContent(html);
   } else {
     const escaped = body
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
-    iframe.srcdoc = EMAIL_HEAD + `<pre>${escaped}</pre>`;
+    _setIframeContent(EMAIL_HEAD + `<pre>${escaped}</pre>` + EMAIL_FOOT);
   }
 }
 
 function renderEmailLoading() {
-  $('ecBody').srcdoc = EMAIL_HEAD
-    + `<div style="color:#8e8e93;padding:24px;text-align:center">⏳ ${t('email_loading')}</div>`;
+  _setIframeContent(EMAIL_HEAD
+    + `<div style="color:#8e8e93;padding:24px;text-align:center">⏳ ${t('email_loading')}</div>`
+    + EMAIL_FOOT);
 }
 
 function renderEmailError(msg) {
   const escaped = String(msg || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
-  $('ecBody').srcdoc = EMAIL_HEAD
+  _setIframeContent(EMAIL_HEAD
     + '<div style="color:#c62828;padding:24px;font-size:13px">'
     + `<div style="margin-bottom:8px">⚠️ ${t('email_load_fail')}</div>`
     + `<div style="color:#8e8e93;font-family:Consolas,monospace;font-size:12px">${escaped}</div>`
-    + '</div>';
+    + '</div>'
+    + EMAIL_FOOT);
 }
 
 async function selectEmail(idx) {
