@@ -35,9 +35,27 @@
       btn_show: '显示', btn_hide: '隐藏', btn_copy: '复制',
       btn_view: '查看', btn_detail: '详情', btn_del: '删除',
       modal_import_title: '导入邮箱账号',
-      modal_import_hint: '格式：每行一个 邮箱----密码，支持 ----client_id----refresh_token',
-      modal_import_group: '导入到分组',
+      modal_import_hint: '支持的格式（点击展开）',
+      modal_import_formats:
+        'email----password\n' +
+        'email----password----组名\n' +
+        'email----password----client_id----refresh_token\n' +
+        'email----password----client_id----refresh_token----组名\n' +
+        'email----password----client_id----refresh_token$$--------组名\n\n' +
+        '· 行末附带组名时该账号自动归入指定分组（不存在则自动创建）\n' +
+        '· 多账号可用换行或 $$ 分隔',
+      modal_import_group: '默认分组（仅对未指定组名的账号生效）',
       modal_import_dedup: '跳过已存在（去重）',
+      modal_export_title: '导出账号',
+      modal_export_warn: '⚠ 导出文件包含所有账号的明文密码与 refresh_token，请妥善保管。',
+      modal_export_range: '导出范围',
+      modal_export_current: '当前分组',
+      modal_export_all: '全部分组',
+      modal_export_separator: '行分隔符',
+      modal_export_sep_newline: '换行（推荐）',
+      modal_export_sep_dollar: '$$ 分隔',
+      modal_export_include_group: '包含组名',
+      modal_export_password: '登录密码确认',
       btn_clipboard: '从剪贴板',
       btn_cancel: '取消', btn_confirm: '确定', btn_close: '关闭', btn_send: '发送', btn_save: '保存',
       modal_email_title: '邮件',
@@ -48,6 +66,7 @@
       email_select_acc: '选择账号查看邮件',
       email_loading: '加载中...',
       email_load_fail: '加载失败',
+      email_body_empty: '(此邮件无正文内容)',
       email_search: '搜索邮件...',
       modal_compose_title: '写邮件',
       compose_from: '发件人', compose_to: '收件人', compose_cc: '抄送',
@@ -136,7 +155,9 @@
       toast_del_ok: '已删除',
       toast_del_fail: '删除失败',
       toast_remark_saved: '备注已保存',
-      toast_export_started: '开始导出',
+      toast_export_started: '导出成功',
+      toast_export_failed: '导出失败：',
+      toast_groups_created: '新建 {n} 个分组',
       toast_group_created: '分组已创建',
       toast_group_renamed: '重命名成功',
       toast_group_deleted: '分组已删除',
@@ -186,9 +207,27 @@
       btn_show: 'Show', btn_hide: 'Hide', btn_copy: 'Copy',
       btn_view: 'View', btn_detail: 'Detail', btn_del: 'Delete',
       modal_import_title: 'Import Email Accounts',
-      modal_import_hint: 'Format: one per line, email----password, optional ----client_id----refresh_token',
-      modal_import_group: 'Import to group',
+      modal_import_hint: 'Supported formats (click to expand)',
+      modal_import_formats:
+        'email----password\n' +
+        'email----password----<group>\n' +
+        'email----password----client_id----refresh_token\n' +
+        'email----password----client_id----refresh_token----<group>\n' +
+        'email----password----client_id----refresh_token$$--------<group>\n\n' +
+        '· Trailing group name puts the account in that group (created if missing)\n' +
+        '· Multiple accounts can be split by newline or $$',
+      modal_import_group: 'Default group (only used if a row has no group)',
       modal_import_dedup: 'Skip duplicates',
+      modal_export_title: 'Export Accounts',
+      modal_export_warn: '⚠ Export contains plaintext passwords and refresh tokens. Keep it secure.',
+      modal_export_range: 'Range',
+      modal_export_current: 'Current group',
+      modal_export_all: 'All groups',
+      modal_export_separator: 'Line separator',
+      modal_export_sep_newline: 'Newline (recommended)',
+      modal_export_sep_dollar: '$$ separator',
+      modal_export_include_group: 'Include group name',
+      modal_export_password: 'Confirm login password',
       btn_clipboard: 'From Clipboard',
       btn_cancel: 'Cancel', btn_confirm: 'OK', btn_close: 'Close', btn_send: 'Send', btn_save: 'Save',
       modal_email_title: 'Mail',
@@ -199,6 +238,7 @@
       email_select_acc: 'Pick an account to view emails',
       email_loading: 'Loading...',
       email_load_fail: 'Load failed',
+      email_body_empty: '(This email has no body content)',
       email_search: 'Search emails...',
       modal_compose_title: 'Compose',
       compose_from: 'From', compose_to: 'To', compose_cc: 'Cc',
@@ -287,7 +327,9 @@
       toast_del_ok: 'Deleted',
       toast_del_fail: 'Delete failed',
       toast_remark_saved: 'Saved',
-      toast_export_started: 'Exporting...',
+      toast_export_started: 'Export OK',
+      toast_export_failed: 'Export failed: ',
+      toast_groups_created: '{n} new groups created',
       toast_group_created: 'Group created',
       toast_group_renamed: 'Renamed',
       toast_group_deleted: 'Group deleted',

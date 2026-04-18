@@ -168,6 +168,49 @@ class EmailClient:
             return emails, msg
         return self._imap.fetch_emails(folder, limit)
 
+    def fetch_email_body(
+        self, email_id: str, folder: str = "inbox"
+    ) -> Tuple[Optional[str], str, str]:
+        """单独拉取一封邮件的完整正文。
+
+        返回 (body, body_type, message)。失败时 body 为 None。
+        优先走 Graph（一次 GET）；失败回退 IMAP（性能差但能用）。
+        """
+        if self._graph is not None:
+            body, body_type, msg = self._graph.get_email_body(email_id)
+            if body is not None:
+                return body, body_type, msg
+            # Graph 失败时的回退说明
+            logger.info("Graph 拉取 body 失败，尝试 IMAP 回退: %s", msg)
+
+        # IMAP 路径：fetch_emails 时已经拉到 body，这里走 search uid + RFC822 拿完整内容
+        try:
+            from core.mail_parser import get_email_body_with_type
+            from core.folder_map import imap_folder_for
+            import email as email_mod
+        except ImportError:
+            return None, "", "无法导入 IMAP 解析模块"
+
+        ok, conn_msg = self._imap.connect()
+        if not ok:
+            return None, "", conn_msg
+        try:
+            actual = imap_folder_for(self._imap.email_addr, folder)
+            self._imap._connection.select(actual)
+            eid = email_id.encode() if isinstance(email_id, str) else email_id
+            status, data = self._imap._connection.fetch(eid, "(RFC822)")
+            if status != "OK" or not data or not data[0]:
+                return None, "", "IMAP 获取邮件失败"
+            raw = data[0][1] if isinstance(data[0], tuple) else b""
+            msg_obj = email_mod.message_from_bytes(raw)
+            body, body_type = get_email_body_with_type(msg_obj)
+            return body, body_type, "获取成功"
+        except Exception as exc:
+            logger.exception("IMAP fetch_email_body 异常")
+            return None, "", f"IMAP 错误: {exc}"
+        finally:
+            self._imap.disconnect()
+
     def mark_as_read(
         self, email_id: str, folder: str = "inbox", is_read: bool = True
     ) -> Tuple[bool, str]:

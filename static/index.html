@@ -108,10 +108,23 @@
 <div class="modal-bg" id="importModal"><div class="modal">
   <div class="modal-h"><h3 data-i18n="modal_import_title">导入邮箱账号</h3><button class="modal-close" data-close="importModal">×</button></div>
   <div class="modal-body">
-    <p style="font-size:13px;color:var(--text2);margin-bottom:12px" data-i18n="modal_import_hint">格式：每行一个 邮箱----密码</p>
-    <div class="form-group"><textarea id="importText" rows="8" placeholder="example@outlook.com----password123"></textarea></div>
+    <details class="import-help">
+      <summary data-i18n="modal_import_hint">支持的格式（点击展开）</summary>
+      <pre class="import-help-pre" data-i18n="modal_import_formats">email----password
+email----password----组名
+email----password----client_id----refresh_token
+email----password----client_id----refresh_token----组名
+email----password----client_id----refresh_token$$--------组名
+
+· 行末附带组名时该账号自动归入指定分组（不存在则自动创建）
+· 多账号可用换行或 $$ 分隔</pre>
+    </details>
+    <div class="form-group"><textarea id="importText" rows="8" spellcheck="false" autocomplete="off" placeholder="example@outlook.com----password123----组名"></textarea></div>
     <div class="form-row">
-      <div class="form-group"><label data-i18n="modal_import_group">导入到分组</label><select id="importGroup"></select></div>
+      <div class="form-group">
+        <label data-i18n="modal_import_group">默认分组（仅对未指定组名的账号生效）</label>
+        <select id="importGroup"></select>
+      </div>
       <div class="form-group" style="display:flex;align-items:flex-end;padding-bottom:0">
         <label class="form-check"><input type="checkbox" id="importDedup" checked> <span data-i18n="modal_import_dedup">跳过已存在（去重）</span></label>
       </div>
@@ -121,6 +134,42 @@
     <button class="btn btn-o" id="btnImportClipboard" data-i18n="btn_clipboard">从剪贴板</button>
     <button class="btn btn-o" data-close="importModal" data-i18n="btn_cancel">取消</button>
     <button class="btn btn-p" id="btnDoImport" data-i18n="btn_import">导入</button>
+  </div>
+</div></div>
+
+<!-- Export Modal -->
+<div class="modal-bg" id="exportModal"><div class="modal" style="width:480px">
+  <div class="modal-h"><h3 data-i18n="modal_export_title">导出账号</h3><button class="modal-close" data-close="exportModal">×</button></div>
+  <div class="modal-body">
+    <p class="export-warn" data-i18n="modal_export_warn">⚠ 导出文件包含所有账号的明文密码与 refresh_token，请妥善保管。</p>
+    <div class="form-group">
+      <label data-i18n="modal_export_range">导出范围</label>
+      <select id="exportScope">
+        <option value="current" data-i18n="modal_export_current">当前分组</option>
+        <option value="all" data-i18n="modal_export_all">全部分组</option>
+      </select>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label data-i18n="modal_export_separator">行分隔符</label>
+        <select id="exportSeparator">
+          <option value="newline" data-i18n="modal_export_sep_newline">换行（推荐）</option>
+          <option value="dollar" data-i18n="modal_export_sep_dollar">$$ 分隔</option>
+        </select>
+      </div>
+      <div class="form-group" style="display:flex;align-items:flex-end;padding-bottom:0">
+        <label class="form-check"><input type="checkbox" id="exportIncludeGroup" checked> <span data-i18n="modal_export_include_group">包含组名</span></label>
+      </div>
+    </div>
+    <div class="form-group">
+      <label data-i18n="modal_export_password">登录密码确认</label>
+      <input id="exportPassword" type="password" autocomplete="current-password" placeholder="">
+    </div>
+    <div id="exportErr" style="font-size:12px;color:var(--danger);min-height:16px"></div>
+  </div>
+  <div class="modal-foot">
+    <button class="btn btn-o" data-close="exportModal" data-i18n="btn_cancel">取消</button>
+    <button class="btn btn-p" id="btnDoExport" data-i18n="btn_export">导出</button>
   </div>
 </div></div>
 

@@ -20,6 +20,38 @@ const S = {
   ready: false
 };
 
+// ───────── SPA 路由 ─────────
+// 把"用户当前在哪"反映到地址栏，刷新/分享 URL 时能保持状态。
+function pushPath(path, replace = false) {
+  const cur = window.location.pathname;
+  if (cur === path) return;
+  try {
+    if (replace) history.replaceState({ path }, '', path);
+    else history.pushState({ path }, '', path);
+  } catch { /* file:// 等环境忽略 */ }
+}
+
+function applyPath(path) {
+  // 已登录态：根据 path 切换主区视图
+  if (!S.user) {
+    if (path === '/register') setAuthMode('register');
+    else setAuthMode('login');
+    return;
+  }
+  if (path === '/dashboard') showView('dashboard');
+  else if (path === '/settings') showView('settings');
+  else if (path === '/oauth') showView('oauth');
+  else {
+    // /login /register 在已登录时回首页
+    if (path === '/login' || path === '/register') {
+      pushPath('/', true);
+    }
+    selectGroup(S.currentGroup || '全部');
+  }
+}
+
+window.addEventListener('popstate', () => applyPath(window.location.pathname));
+
 // ───────── DOM helpers ─────────
 const $ = (id) => document.getElementById(id);
 const el = (tag, attrs = {}, children = []) => {
@@ -153,6 +185,9 @@ function setAuthMode(mode) {
   $('authSub').textContent = t(isReg ? 'auth_sub_register' : 'auth_sub_login');
   $('authPassword').setAttribute('autocomplete', isReg ? 'new-password' : 'current-password');
   $('authErr').textContent = '';
+  if (!S.user) {
+    pushPath(isReg ? '/register' : '/login', true);
+  }
 }
 
 function showAuthModal(mode) {
@@ -164,6 +199,7 @@ function showAuthModal(mode) {
   $('authErr').textContent = '';
   if (!S.registerEnabled) $('tabRegister').style.display = 'none';
   openModal('authModal');
+  pushPath(mode === 'register' ? '/register' : '/login', true);
   setTimeout(() => $('authUsername').focus(), 60);
 }
 
@@ -212,6 +248,7 @@ async function submitAuth() {
     S.user = { username: data.username };
     closeModal('authModal');
     showMain();
+    pushPath('/', true);
     toast(t(isReg ? 'toast_register_ok' : 'toast_login_ok'), 'success');
     await init();
   } catch (e) {
@@ -304,6 +341,7 @@ function selectGroup(name) {
   if (name === '全部') $('navAll').classList.add('active');
   renderGroups();
   showTableView();
+  pushPath('/');
   loadAccounts();
 }
 
@@ -504,6 +542,9 @@ async function doImport() {
     const r = await api.post('/api/accounts/import', { text, group, skip_duplicate: dedup });
     let msg = `OK: ${r.success} | FAIL: ${r.fail}`;
     if (r.skipped) msg += ` | SKIP: ${r.skipped}`;
+    if (r.groups_created && r.groups_created.length) {
+      msg += ` | ${t('toast_groups_created', { n: r.groups_created.length })}: ${r.groups_created.join(', ')}`;
+    }
     toast(msg, r.success > 0 ? 'success' : 'warning');
     if (r.success > 0) {
       closeModal('importModal');
@@ -514,17 +555,66 @@ async function doImport() {
 }
 
 // ───────── Export ─────────
-async function exportAccounts() {
-  const url = '/api/accounts/export' +
-    (S.currentGroup !== '全部' ? '?group=' + encodeURIComponent(S.currentGroup) : '');
-  const r = await request(url);
-  const blob = await r.blob();
-  const a = el('a', {
-    href: URL.createObjectURL(blob),
-    download: 'accounts_export.txt'
-  });
-  document.body.appendChild(a); a.click(); a.remove();
-  toast(t('toast_export_started'), 'info');
+function showExportModal() {
+  $('exportPassword').value = '';
+  $('exportErr').textContent = '';
+  // 默认范围：当前如果不在"全部"，默认导出当前分组；否则全部
+  $('exportScope').value = (S.currentGroup && S.currentGroup !== '全部') ? 'current' : 'all';
+  $('exportSeparator').value = 'newline';
+  $('exportIncludeGroup').checked = true;
+  openModal('exportModal');
+  setTimeout(() => $('exportPassword').focus(), 60);
+}
+
+async function doExport() {
+  const pwd = $('exportPassword').value;
+  const errEl = $('exportErr');
+  errEl.textContent = '';
+  if (!pwd) {
+    errEl.textContent = t('auth_err_password_required');
+    return;
+  }
+  const scope = $('exportScope').value;
+  const includeGroup = $('exportIncludeGroup').checked;
+  const separator = $('exportSeparator').value;
+  const groupParam = (scope === 'current' && S.currentGroup && S.currentGroup !== '全部')
+    ? S.currentGroup : null;
+
+  const btn = $('btnDoExport');
+  btn.disabled = true;
+  const oldText = btn.textContent;
+  btn.textContent = '...';
+  try {
+    const r = await request('/api/accounts/export', {
+      method: 'POST',
+      body: JSON.stringify({
+        password: pwd,
+        group: groupParam,
+        include_group: includeGroup,
+        separator,
+      }),
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!r.ok) {
+      const msg = await parseError(r);
+      errEl.textContent = msg || t('toast_export_failed');
+      return;
+    }
+    const blob = await r.blob();
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const a = el('a', {
+      href: URL.createObjectURL(blob),
+      download: `accounts_export_${ts}.txt`,
+    });
+    document.body.appendChild(a); a.click(); a.remove();
+    closeModal('exportModal');
+    toast(t('toast_export_started'), 'success');
+  } catch (e) {
+    errEl.textContent = (e && e.message) || t('toast_export_failed');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = oldText;
+  }
 }
 
 // ───────── Move group ─────────
@@ -645,7 +735,35 @@ function renderEmailList() {
   });
 }
 
-function selectEmail(idx) {
+function renderEmailBody(body, bodyType) {
+  // 在 sandbox iframe 中渲染邮件正文，杜绝 XSS；自动按 body_type 处理 html/text。
+  const head = '<base target="_blank"><meta charset="utf-8">'
+    + '<style>body{font-family:Segoe UI,Microsoft YaHei UI,sans-serif;'
+    + 'font-size:13px;padding:12px;margin:0;color:#1d1d1f;background:#fff;'
+    + 'word-wrap:break-word;overflow-wrap:break-word}'
+    + 'pre{white-space:pre-wrap;margin:0;font-family:inherit}'
+    + 'img{max-width:100%;height:auto}</style>';
+  const iframe = $('ecBody');
+  if (!body) {
+    iframe.srcdoc = head + `<div style="color:#8e8e93;padding:16px;text-align:center">${t('email_body_empty')}</div>`;
+    return;
+  }
+  // 显式 body_type 优先；缺省时回退到内容启发式判断
+  const isHtml = bodyType
+    ? bodyType === 'html'
+    : /<html|<body|<div|<a\s|<p\s|<br/i.test(body);
+  if (isHtml) {
+    iframe.srcdoc = head + body;
+  } else {
+    const escaped = body
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+    iframe.srcdoc = head + `<pre>${escaped}</pre>`;
+  }
+}
+
+async function selectEmail(idx) {
   const e = S.emails[idx];
   if (!e) return;
   S.currentEmail = e;
@@ -653,21 +771,37 @@ function selectEmail(idx) {
   const d = e.date ? new Date(e.date) : null;
   $('ecInfo').textContent = `${t('compose_from')}: ${e.sender || ''}\n${t('d_created')}: ${d ? d.toLocaleString() : ''}`;
 
-  // 邮件正文统一在 sandbox iframe 中渲染，杜绝 XSS。
-  // 注入 <base target="_blank"> 让所有链接在新窗口打开。
-  const body = e.body || '';
-  const isHtml = /<html|<body|<div|<a\s/i.test(body);
-  const head = '<base target="_blank"><meta charset="utf-8">';
-  const iframe = $('ecBody');
-  if (isHtml) {
-    iframe.srcdoc = head + body;
-  } else {
-    const escaped = body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    iframe.srcdoc = head + `<pre style="font-family:Segoe UI,Microsoft YaHei UI,sans-serif;white-space:pre-wrap;font-size:13px;padding:12px;margin:0;">${escaped}</pre>`;
-  }
+  // 1. 立即用列表里的 body 渲染（即使是空）
+  renderEmailBody(e.body || '', e.body_type);
 
   $('btnReply').disabled = false;
   $('btnDelEmail').disabled = false;
+
+  // 2. 列表 body 为空时，再异步去拿完整正文（按需拉取）
+  const account = S.emailAccount;
+  if (account && (!e.body || e.body.length < 50) && e.uid) {
+    try {
+      $('ecBody').srcdoc = '<base target="_blank"><meta charset="utf-8">'
+        + `<div style="color:#8e8e93;padding:16px;text-align:center">${t('email_loading')}</div>`;
+      const folder = $('emailFolder').value;
+      const r = await api.get(
+        `/api/accounts/${account.id}/emails/body?email_id=${encodeURIComponent(e.uid)}&folder=${folder}`
+      );
+      // 用户可能同时切到了别的邮件
+      if (S.currentEmail !== e) return;
+      if (r && r.success && r.body) {
+        e.body = r.body;
+        e.body_type = r.body_type || 'text';
+        renderEmailBody(e.body, e.body_type);
+      } else {
+        renderEmailBody(e.body || '', e.body_type);
+      }
+    } catch (err) {
+      if (S.currentEmail === e) {
+        renderEmailBody(e.body || '', e.body_type);
+      }
+    }
+  }
 
   if (!e.is_read) {
     e.is_read = true;
@@ -865,15 +999,20 @@ function showView(view) {
   if (view === 'dashboard') {
     $('pageTitle').textContent = t('page_title_dashboard');
     $('pageSub').textContent = t('page_sub_dashboard');
+    pushPath('/dashboard');
     renderDashboard();
   } else if (view === 'settings') {
     $('pageTitle').textContent = t('page_title_settings');
     $('pageSub').textContent = t('page_sub_settings');
+    pushPath('/settings');
     renderSettings();
   } else if (view === 'oauth') {
     $('pageTitle').textContent = t('page_title_oauth');
     $('pageSub').textContent = t('page_sub_oauth');
+    pushPath('/oauth');
     renderOAuth();
+  } else {
+    pushPath('/');
   }
 }
 
@@ -1094,7 +1233,11 @@ $('addGroupBtn').addEventListener('click', addGroup);
 $('searchInp').addEventListener('input', filterAccounts);
 $('selAll').addEventListener('change', (e) => toggleSelAll(e.target.checked));
 $('btnImport').addEventListener('click', showImportModal);
-$('btnExport').addEventListener('click', exportAccounts);
+$('btnExport').addEventListener('click', showExportModal);
+$('btnDoExport').addEventListener('click', doExport);
+$('exportPassword').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') doExport();
+});
 $('btnMove').addEventListener('click', showMoveGroup);
 $('btnBatchCheck').addEventListener('click', batchCheck);
 $('btnBatchSend').addEventListener('click', showBatchSend);
@@ -1144,6 +1287,8 @@ async function init() {
     S.registerEnabled = !!j.register_enabled;
   } catch { /* ignore */ }
 
+  const initialPath = window.location.pathname;
+
   try {
     const r = await fetch('/api/auth/me', { credentials: 'include' });
     if (r.ok) {
@@ -1151,11 +1296,14 @@ async function init() {
       S.user = { username: data.username };
       showMain();
       await init();
+      // 根据 URL 切换初始视图
+      applyPath(initialPath);
       return;
     }
   } catch { /* ignore */ }
-  // 未登录
-  showAuthModal('login');
+  // 未登录：根据 URL 决定登录还是注册模式
+  const mode = (initialPath === '/register' && S.registerEnabled) ? 'register' : 'login';
+  showAuthModal(mode);
 })();
 
 })();

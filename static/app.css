@@ -205,3 +205,12 @@ body{font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif;background
 .auth-tab.active{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
 .auth-modal .modal-body{padding:24px}
 .auth-modal .modal-foot{padding:0 24px 24px;border-top:none}
+
+/* Import / Export 帮助文本 */
+.import-help{margin-bottom:14px;border:1px solid var(--border);border-radius:8px;background:var(--bg2);padding:8px 14px}
+.import-help summary{cursor:pointer;font-size:13px;color:var(--text2);font-weight:500;outline:none;user-select:none}
+.import-help summary:hover{color:var(--text)}
+.import-help[open] summary{margin-bottom:8px;color:var(--text)}
+.import-help-pre{font-family:'Consolas','Courier New',monospace;font-size:12px;color:var(--text2);background:var(--inp-bg);border-radius:6px;padding:10px 12px;white-space:pre-wrap;word-break:break-all;line-height:1.5;margin:0}
+.export-warn{font-size:12px;color:var(--warning);background:rgba(255,149,0,.08);border:1px solid rgba(255,149,0,.2);border-radius:6px;padding:8px 12px;margin-bottom:14px}
+[data-theme="dark"] .export-warn{background:rgba(210,153,34,.1);border-color:rgba(210,153,34,.3)}

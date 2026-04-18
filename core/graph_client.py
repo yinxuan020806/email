@@ -87,7 +87,8 @@ class GraphClient:
                 "from": "From", "subject": "Subject", "date": "ReceivedDateTime",
                 "body": "Body", "preview": "BodyPreview", "id": "Id",
                 "is_read": "IsRead", "att": "HasAttachments", "addr_field": "Address",
-                "name_field": "Name", "email_field": "EmailAddress", "content": "Content",
+                "name_field": "Name", "email_field": "EmailAddress",
+                "content": "Content", "ctype": "ContentType",
             }
         else:
             url = f"{GRAPH_BASE}/mailFolders/{folder_name}/messages"
@@ -99,10 +100,18 @@ class GraphClient:
                 "from": "from", "subject": "subject", "date": "receivedDateTime",
                 "body": "body", "preview": "bodyPreview", "id": "id",
                 "is_read": "isRead", "att": "hasAttachments", "addr_field": "address",
-                "name_field": "name", "email_field": "emailAddress", "content": "content",
+                "name_field": "name", "email_field": "emailAddress",
+                "content": "content", "ctype": "contentType",
             }
 
-        resp = self._req("GET", url, headers=headers, params=params, timeout=30)
+        # Graph 默认 body 是 HTML；如想拿 text 可以加 Prefer 头部
+        # 不过 sandbox iframe 直接渲染 HTML 是首选。
+        request_headers = dict(headers)
+        request_headers["Prefer"] = 'outlook.body-content-type="html"'
+
+        resp = self._req(
+            "GET", url, headers=request_headers, params=params, timeout=30
+        )
         if resp is None:
             return [], "网络错误"
         if resp.status_code != 200:
@@ -117,18 +126,86 @@ class GraphClient:
                 date = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
             except (ValueError, TypeError):
                 date = None
-            body = (m.get(field["body"]) or {}).get(field["content"], "") or m.get(field["preview"], "")
+
+            body_obj = m.get(field["body"]) or {}
+            body_content = body_obj.get(field["content"], "") or ""
+            body_type = (body_obj.get(field["ctype"], "") or "").lower()
+            preview = m.get(field["preview"], "") or ""
+
+            # 当 body.content 为空但有 preview 时，用 preview 兜底（避免前端白屏）
+            if not body_content and preview:
+                body_content = preview
+                if not body_type:
+                    body_type = "text"
+            if not body_type:
+                body_type = "html" if "<" in body_content else "text"
+
             emails.append({
                 "uid": m.get(field["id"], ""),
-                "subject": m.get(field["subject"], "(无主题)"),
+                "subject": m.get(field["subject"], "") or "(无主题)",
                 "sender": sender,
                 "sender_email": from_info.get(field["addr_field"], ""),
                 "date": date,
-                "body": body,
+                "body": body_content,
+                "body_type": body_type,
+                "preview": preview,
                 "is_read": m.get(field["is_read"], True),
                 "has_attachments": m.get(field["att"], False),
             })
         return emails, "获取成功"
+
+    def get_email_body(self, email_id: str) -> Tuple[Optional[str], str, str]:
+        """单独拉取一封邮件的完整 body，用于列表 body 为空时的二次获取。
+
+        返回 (body_html_or_text, body_type, message)。失败时 body 为 None。
+        """
+        headers = self._headers()
+        if headers is None:
+            tok, msg = self.tm.get()
+            return None, "", msg
+
+        if self.tm.api_type == "outlook":
+            url = f"{OUTLOOK_BASE}/messages/{email_id}"
+            select_fields = "Id,Subject,Body,BodyPreview"
+            ctype_key, content_key, body_key, preview_key = (
+                "ContentType",
+                "Content",
+                "Body",
+                "BodyPreview",
+            )
+        else:
+            url = f"{GRAPH_BASE}/messages/{email_id}"
+            select_fields = "id,subject,body,bodyPreview"
+            ctype_key, content_key, body_key, preview_key = (
+                "contentType",
+                "content",
+                "body",
+                "bodyPreview",
+            )
+
+        request_headers = dict(headers)
+        request_headers["Prefer"] = 'outlook.body-content-type="html"'
+
+        resp = self._req(
+            "GET", url, headers=request_headers,
+            params={"$select": select_fields}, timeout=30,
+        )
+        if resp is None:
+            return None, "", "网络错误"
+        if resp.status_code != 200:
+            return None, "", f"API 错误: {resp.status_code} - {resp.text[:200]}"
+
+        m = resp.json()
+        body_obj = m.get(body_key) or {}
+        body_content = body_obj.get(content_key, "") or ""
+        body_type = (body_obj.get(ctype_key, "") or "").lower()
+        preview = m.get(preview_key, "") or ""
+        if not body_content and preview:
+            body_content = preview
+            body_type = body_type or "text"
+        if not body_type:
+            body_type = "html" if "<" in body_content else "text"
+        return body_content, body_type, "获取成功"
 
     def mark_as_read(self, email_id: str, is_read: bool = True) -> Tuple[bool, str]:
         headers = self._headers()

@@ -15,7 +15,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-MAX_BODY_BYTES = 5000  # 给前端的正文长度上限，避免巨型 HTML 邮件拉爆传输
+MAX_BODY_BYTES = 200_000  # 给前端的正文长度上限，避免巨型 HTML 邮件拉爆传输
 
 
 def decode_str(value: Optional[str]) -> str:
@@ -46,28 +46,51 @@ def extract_email_address(sender: str) -> str:
 
 
 def get_email_body(msg: Message) -> str:
-    """提取纯文本正文，截断到 MAX_BODY_BYTES。"""
-    body = ""
+    """提取纯文本正文（兼容旧调用），截断到 MAX_BODY_BYTES。"""
+    body, _ = get_email_body_with_type(msg)
+    return body
+
+
+def get_email_body_with_type(msg: Message) -> tuple[str, str]:
+    """提取邮件正文 + 类型标签 ("html" / "text")。
+
+    优先返回 text/plain；如果没有 plain 部分则回退到 text/html。
+    避免空白：只要任何一种 body 非空都会被采用。
+    """
+    text_body = ""
+    html_body = ""
+
+    def _decode(part: Message) -> str:
+        try:
+            charset = part.get_content_charset() or "utf-8"
+            payload = part.get_payload(decode=True)
+            if payload:
+                return payload.decode(charset, errors="ignore")
+        except (LookupError, UnicodeDecodeError, AttributeError):
+            return ""
+        return ""
+
     if msg.is_multipart():
         for part in msg.walk():
-            if part.get_content_type() == "text/plain":
-                try:
-                    charset = part.get_content_charset() or "utf-8"
-                    payload = part.get_payload(decode=True)
-                    if payload:
-                        body = payload.decode(charset, errors="ignore")
-                        break
-                except (LookupError, UnicodeDecodeError, AttributeError):
-                    continue
+            ctype = part.get_content_type()
+            if ctype == "text/plain" and not text_body:
+                text_body = _decode(part)
+            elif ctype == "text/html" and not html_body:
+                html_body = _decode(part)
+            if text_body and html_body:
+                break
     else:
-        try:
-            charset = msg.get_content_charset() or "utf-8"
-            payload = msg.get_payload(decode=True)
-            if payload:
-                body = payload.decode(charset, errors="ignore")
-        except (LookupError, UnicodeDecodeError, AttributeError):
-            pass
-    return body[:MAX_BODY_BYTES]
+        decoded = _decode(msg)
+        if msg.get_content_type() == "text/html":
+            html_body = decoded
+        else:
+            text_body = decoded
+
+    if text_body:
+        return text_body[:MAX_BODY_BYTES], "text"
+    if html_body:
+        return html_body[:MAX_BODY_BYTES], "html"
+    return "", "text"
 
 
 def has_attachments(msg: Message) -> bool:

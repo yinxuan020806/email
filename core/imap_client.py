@@ -30,7 +30,7 @@ from core.log_utils import mask_email
 from core.mail_parser import (
     decode_str,
     extract_email_address,
-    get_email_body,
+    get_email_body_with_type,
     has_attachments,
 )
 from core.oauth_token import TokenManager
@@ -189,13 +189,16 @@ class IMAPClient:
                 except (TypeError, ValueError):
                     date = None
                 sender = decode_str(msg_obj.get("From", ""))
+                body_text, body_type = get_email_body_with_type(msg_obj)
                 parsed.append({
                     "uid": uid,
                     "subject": decode_str(msg_obj.get("Subject", "")),
                     "sender": sender,
                     "sender_email": extract_email_address(sender),
                     "date": date,
-                    "body": get_email_body(msg_obj),
+                    "body": body_text,
+                    "body_type": body_type,
+                    "preview": body_text[:200],
                     "is_read": "\\Seen" in flags,
                     "has_attachments": has_attachments(msg_obj),
                 })

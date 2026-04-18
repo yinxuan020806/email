@@ -45,7 +45,10 @@ SORTABLE_COLUMNS = {
     "last_check",
 }
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+
+# 审计日志保留天数（超过自动清理）
+AUDIT_RETENTION_DAYS = 90
 
 
 def get_app_dir() -> str:
@@ -112,15 +115,35 @@ class DatabaseManager:
 
             current_version = cur.execute("PRAGMA user_version").fetchone()[0]
 
-            # v3：多用户 schema 重构。如果检测到旧版本，直接删除旧表（旧数据不迁移）。
+            # v3 之前是单用户 schema，v3 起加 owner_id；结构差异较大无法在线迁移。
+            # 升级前先把旧表 RENAME 成 backup_v{N}_{ts}_xxx，然后重建。
+            # 这样万一升级出问题用户至少能从备份表里恢复出原始 password / refresh_token。
             if current_version != 0 and current_version < SCHEMA_VERSION:
-                logger.info(
-                    "检测到旧数据库 (v%d)，升级到 v%d：清空旧表重建",
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                logger.warning(
+                    "检测到旧数据库 (v%d)，升级到 v%d。旧表将重命名为 backup_v%d_%s_*，"
+                    "如果升级后无问题可手动 DROP 这些备份表。",
                     current_version,
                     SCHEMA_VERSION,
+                    current_version,
+                    ts,
                 )
                 for tbl in ("accounts", "groups", "settings"):
-                    cur.execute(f"DROP TABLE IF EXISTS {tbl}")
+                    exists = cur.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                        (tbl,),
+                    ).fetchone()
+                    if not exists:
+                        continue
+                    backup_name = f"backup_v{current_version}_{ts}_{tbl}"
+                    try:
+                        cur.execute(
+                            f"ALTER TABLE {tbl} RENAME TO {backup_name}"
+                        )
+                        logger.warning("已备份: %s -> %s", tbl, backup_name)
+                    except sqlite3.OperationalError as exc:
+                        logger.exception("备份 %s 失败，回退到 DROP: %s", tbl, exc)
+                        cur.execute(f"DROP TABLE IF EXISTS {tbl}")
 
             cur.execute(
                 """
@@ -193,6 +216,25 @@ class DatabaseManager:
                 )
                 """
             )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    user_id INTEGER,
+                    username TEXT,
+                    action TEXT NOT NULL,
+                    target TEXT,
+                    ip TEXT,
+                    user_agent TEXT,
+                    success INTEGER DEFAULT 1,
+                    detail TEXT
+                )
+                """
+            )
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action)")
 
             cur.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -300,6 +342,85 @@ class DatabaseManager:
         with self._connect() as conn:
             cur = conn.execute("SELECT COUNT(*) FROM users")
             return cur.fetchone()[0]
+
+    # ── Audit Log ─────────────────────────────────────────────────
+
+    def log_audit(
+        self,
+        action: str,
+        user_id: Optional[int] = None,
+        username: Optional[str] = None,
+        target: Optional[str] = None,
+        ip: Optional[str] = None,
+        user_agent: Optional[str] = None,
+        success: bool = True,
+        detail: Optional[str] = None,
+    ) -> None:
+        """写入审计日志。失败仅记 logger，不抛异常打断主流程。"""
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO audit_log
+                        (user_id, username, action, target, ip, user_agent, success, detail)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        user_id,
+                        username,
+                        action,
+                        target,
+                        ip,
+                        (user_agent or "")[:200],
+                        1 if success else 0,
+                        (detail or "")[:500],
+                    ),
+                )
+        except sqlite3.Error:
+            logger.exception("写入审计日志失败 action=%s", action)
+
+    def list_audit(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        user_id: Optional[int] = None,
+        action: Optional[str] = None,
+    ) -> List[dict]:
+        sql = "SELECT id, ts, user_id, username, action, target, ip, success, detail FROM audit_log WHERE 1=1"
+        params: list = []
+        if user_id is not None:
+            sql += " AND user_id = ?"
+            params.append(user_id)
+        if action:
+            sql += " AND action = ?"
+            params.append(action)
+        sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
+        params.extend([max(1, min(limit, 500)), max(0, offset)])
+        with self._connect() as conn:
+            cur = conn.execute(sql, params)
+            rows = cur.fetchall()
+        return [
+            {
+                "id": r[0],
+                "ts": str(r[1]),
+                "user_id": r[2],
+                "username": r[3],
+                "action": r[4],
+                "target": r[5],
+                "ip": r[6],
+                "success": bool(r[7]),
+                "detail": r[8],
+            }
+            for r in rows
+        ]
+
+    def cleanup_old_audit(self, retention_days: int = AUDIT_RETENTION_DAYS) -> int:
+        cutoff = (datetime.now() - timedelta(days=retention_days)).isoformat(
+            sep=" ", timespec="seconds"
+        )
+        with self._connect() as conn:
+            cur = conn.execute("DELETE FROM audit_log WHERE ts < ?", (cutoff,))
+            return cur.rowcount
 
     # ── Account CRUD ──────────────────────────────────────────────
 

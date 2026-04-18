@@ -57,7 +57,13 @@ from core.auth import (  # noqa: E402
 from core.email_client import EmailClient  # noqa: E402
 from core.models import Account  # noqa: E402
 from core.oauth2_helper import OAuth2Helper, TOKEN_URL  # noqa: E402
-from database.db_manager import ALLOWED_SETTING_KEYS, DatabaseManager  # noqa: E402
+from core.rate_limit import login_limiter  # noqa: E402
+from core.security_check import emit_warnings  # noqa: E402
+from database.db_manager import (  # noqa: E402
+    ALLOWED_SETTING_KEYS,
+    DatabaseManager,
+    get_data_dir,
+)
 
 logging.basicConfig(
     level=os.getenv("EMAIL_WEB_LOG_LEVEL", "INFO"),
@@ -95,6 +101,28 @@ db = DatabaseManager()
 SESSION_COOKIE = "email_web_session"
 COOKIE_TTL = int(os.getenv("EMAIL_WEB_COOKIE_TTL", str(7 * 24 * 3600)))
 DISABLE_REGISTER = os.getenv("EMAIL_WEB_DISABLE_REGISTER", "").strip() in {"1", "true", "yes"}
+
+# SPA 路由前缀：未匹配到 /api、/static 时如果是这些路径，返回 index.html
+SPA_PATHS = {"/login", "/register", "/dashboard", "/settings", "/oauth"}
+
+
+def _client_ip(request: Request) -> str:
+    """获取客户端真实 IP，支持反代场景的 X-Forwarded-For。"""
+    xff = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    if xff:
+        return xff
+    real = request.headers.get("x-real-ip", "").strip()
+    if real:
+        return real
+    return request.client.host if request.client else "unknown"
+
+
+def _is_https(request: Request) -> bool:
+    """判断当前请求是否为 HTTPS（识别反向代理场景）。"""
+    if request.url.scheme == "https":
+        return True
+    proto = request.headers.get("x-forwarded-proto", "").lower()
+    return "https" in proto
 
 
 # ── 鉴权依赖 ────────────────────────────────────────────────────
@@ -220,6 +248,14 @@ class DeleteEmailRequest(BaseModel):
     folder: str = "inbox"
 
 
+class ExportRequest(BaseModel):
+    """导出账号需要二次密码确认。"""
+    password: str = Field(min_length=1, max_length=256)
+    group: Optional[str] = None
+    include_group: bool = True   # True 时每行末尾追加 ----组名（便于回导入恢复）
+    separator: str = "newline"   # "newline" 一行一个；"dollar" 用 $$ 拼接成单行
+
+
 # ── Helpers ─────────────────────────────────────────────────────
 
 
@@ -267,42 +303,138 @@ def create_client(owner_id: int, acc: Account) -> EmailClient:
     )
 
 
+def _looks_like_group_name(s: str) -> bool:
+    """判断一段字符串是否更像分组名而非 token/email/密码。
+
+    经验规则：
+    - 长度 1-64
+    - 不含 @ / / + / = 这种 email/base64 标志字符
+    - 字符集为字母数字 + 中文 + 常见符号（_-.中文空格）
+    """
+    if not s:
+        return False
+    s = s.strip()
+    if not s or len(s) > 64:
+        return False
+    if any(c in s for c in "@/+="):
+        return False
+    # 任何可见字符都允许，但典型 token 通常很长或含特殊字符；这里再做一次严格判断
+    # 拒绝包含太多奇异字符的串
+    bad = sum(1 for c in s if not (c.isalnum() or c in "_-. \u4e00-\u9fff" or "\u4e00" <= c <= "\u9fff"))
+    if bad > 2:
+        return False
+    return True
+
+
+def _parse_one_account(fields: List[str]) -> Optional[dict]:
+    """从切好的 ``----`` 字段列表组装一条账号。
+
+    字段语义按字段数判定：
+
+    - 2 段：email, password
+    - 3 段：email, password, group  (client_id 不可能单独存在)
+    - 4 段：email, password, client_id, refresh_token
+    - 5+ 段：email, password, client_id, refresh_token, ...group
+      （从尾部向前找第一个像组名的非空字段）
+
+    "像组名"的判定见 ``_looks_like_group_name``。
+    """
+    fields = [f.strip() for f in fields]
+    if not fields or "@" not in fields[0]:
+        return None
+    data: dict = {"email": fields[0], "password": ""}
+    if len(fields) >= 2:
+        data["password"] = fields[1]
+
+    n = len(fields)
+    if n == 3:
+        if fields[2] and _looks_like_group_name(fields[2]):
+            data["group"] = fields[2]
+    elif n >= 4:
+        if fields[2]:
+            data["client_id"] = fields[2]
+        if fields[3]:
+            data["refresh_token"] = fields[3]
+        if n >= 5:
+            for f in reversed(fields[4:]):
+                if _looks_like_group_name(f):
+                    data["group"] = f.strip()
+                    break
+    return data
+
+
 def parse_import_text(text: str) -> List[dict]:
+    """解析批量导入文本。
+
+    支持的格式（每行 / 每段 / 多段一行均可）::
+
+        email----password
+        email----password----组名
+        email----password----client_id----refresh_token
+        email----password----client_id----refresh_token----组名
+        email----password----client_id----refresh_token$$--------组名   <- 用户工具常见格式
+
+    分隔符：
+    - ``\\n`` 行间
+    - ``$$`` 段间（同一行内可多账号 / 也可附加元数据）
+
+    解析策略：每行先按 ``$$`` 切段，遇到不以 email 开头的段视为
+    "上一个账号的元数据扩展"，把字段拼接到上一个账号后面，再做组名启发式判断。
+    """
     accounts: list[dict] = []
     text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
-    if "$$" in text:
-        parts = text.split("$$")
-    elif "\n" in text:
-        parts = text.split("\n")
-    else:
-        parts = re.split(
-            r"\$(?=[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})", text
-        )
-    for part in parts:
-        part = part.strip().rstrip("$")
-        if not part or "----" not in part:
+    if not text:
+        return accounts
+
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
             continue
-        p = part.split("----")
-        if len(p) < 2:
-            continue
-        data = {"email": p[0].strip(), "password": p[1].strip()}
-        if len(p) >= 3 and p[2].strip():
-            data["client_id"] = p[2].strip()
-        if len(p) >= 4 and p[3].strip():
-            data["refresh_token"] = p[3].strip()
-        if data["email"] and "@" in data["email"]:
-            accounts.append(data)
+
+        if "$$" in line:
+            segments = [s for s in line.split("$$") if s.strip()]
+        else:
+            segments = [line]
+
+        # 在一行内累积：以 email 开头的段是新账号，其它段追加到上一个
+        pending: Optional[List[str]] = None
+        line_accounts: list[List[str]] = []
+        for seg in segments:
+            seg = seg.strip().rstrip("$")
+            if not seg:
+                continue
+            fields = seg.split("----")
+            head = fields[0].strip() if fields else ""
+            if "@" in head:
+                if pending is not None:
+                    line_accounts.append(pending)
+                pending = fields
+            else:
+                if pending is None:
+                    # 没有上下文的"裸元数据"，跳过
+                    continue
+                pending.extend(fields)
+        if pending is not None:
+            line_accounts.append(pending)
+
+        for fields in line_accounts:
+            if "----" not in "----".join(fields):
+                # 极端情况下 segment 只有一段
+                continue
+            data = _parse_one_account(fields)
+            if data:
+                accounts.append(data)
+
     return accounts
 
 
 def _set_session_cookie(response: Response, token: str, request: Request) -> None:
-    secure = request.url.scheme == "https"
     response.set_cookie(
         key=SESSION_COOKIE,
         value=token,
         max_age=COOKIE_TTL,
         httponly=True,
-        secure=secure,
+        secure=_is_https(request),
         samesite="lax",
         path="/",
     )
@@ -315,9 +447,23 @@ def _clear_session_cookie(response: Response) -> None:
 # ── Root & Health ───────────────────────────────────────────────
 
 
+def _serve_index() -> FileResponse:
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+
+
 @app.get("/")
 async def root() -> FileResponse:
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+    return _serve_index()
+
+
+# SPA 前端路由：/login、/register、/dashboard、/settings、/oauth 都返回 index.html
+@app.get("/login")
+@app.get("/register")
+@app.get("/dashboard")
+@app.get("/settings")
+@app.get("/oauth")
+async def spa_routes() -> FileResponse:
+    return _serve_index()
 
 
 @app.get("/api/health")
@@ -334,7 +480,12 @@ def health() -> dict:
 
 @app.post("/api/auth/register")
 def register(req: RegisterRequest, request: Request, response: Response) -> dict:
+    ip = _client_ip(request)
+    ua = request.headers.get("user-agent", "")
+
     if DISABLE_REGISTER:
+        db.log_audit("register", username=req.username, ip=ip, user_agent=ua,
+                     success=False, detail="注册已禁用")
         raise HTTPException(status.HTTP_403_FORBIDDEN, "注册已禁用")
 
     username = normalize_username(req.username)
@@ -346,6 +497,8 @@ def register(req: RegisterRequest, request: Request, response: Response) -> dict
         raise HTTPException(status.HTTP_400_BAD_REQUEST, msg)
 
     if db.get_user_by_username(username):
+        db.log_audit("register", username=username, ip=ip, user_agent=ua,
+                     success=False, detail="用户名已存在")
         raise HTTPException(status.HTTP_409_CONFLICT, "用户名已存在")
 
     user_id = db.create_user(username, hash_password(req.password))
@@ -354,29 +507,71 @@ def register(req: RegisterRequest, request: Request, response: Response) -> dict
 
     token = db.create_session(user_id, ttl_seconds=COOKIE_TTL)
     _set_session_cookie(response, token, request)
+    db.log_audit("register", user_id=user_id, username=username,
+                 ip=ip, user_agent=ua, success=True)
     return {"ok": True, "username": username}
 
 
 @app.post("/api/auth/login")
 def login(req: LoginRequest, request: Request, response: Response) -> dict:
+    ip = _client_ip(request)
+    ua = request.headers.get("user-agent", "")
     username = normalize_username(req.username)
+
+    allowed, retry_after = login_limiter.check(username, ip)
+    if not allowed:
+        db.log_audit("login", username=username, ip=ip, user_agent=ua,
+                     success=False, detail=f"已锁定，剩余 {retry_after}s")
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"登录失败次数过多，请 {retry_after // 60} 分钟后再试",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     user = db.get_user_by_username(username)
     if not user or not verify_password(req.password, user["password_hash"]):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户名或密码错误")
+        locked, lock_secs = login_limiter.record_failure(username, ip)
+        remaining = login_limiter.remaining_attempts(username, ip)
+        detail = (
+            f"已锁定 {lock_secs // 60} 分钟" if locked
+            else (f"剩余 {remaining} 次" if remaining is not None else "")
+        )
+        db.log_audit("login", username=username, ip=ip, user_agent=ua,
+                     success=False, detail=detail)
+        if locked:
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                f"登录失败次数过多，已锁定 {lock_secs // 60} 分钟",
+                headers={"Retry-After": str(lock_secs)},
+            )
+        msg = "用户名或密码错误"
+        if remaining is not None and remaining <= 2:
+            msg += f"（剩余 {remaining} 次尝试）"
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, msg)
 
+    login_limiter.record_success(username, ip)
     token = db.create_session(user["id"], ttl_seconds=COOKIE_TTL)
     _set_session_cookie(response, token, request)
+    db.log_audit("login", user_id=user["id"], username=user["username"],
+                 ip=ip, user_agent=ua, success=True)
     return {"ok": True, "username": user["username"]}
 
 
 @app.post("/api/auth/logout")
 def logout(
+    request: Request,
     response: Response,
     session_token: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
 ) -> dict:
+    ip = _client_ip(request)
+    ua = request.headers.get("user-agent", "")
+    user_info = db.get_session_user(session_token or "")
     if session_token:
         db.delete_session(session_token)
     _clear_session_cookie(response)
+    if user_info:
+        db.log_audit("logout", user_id=user_info["id"],
+                     username=user_info["username"], ip=ip, user_agent=ua)
     return {"ok": True}
 
 
@@ -388,12 +583,18 @@ def me(user: dict = CurrentUser) -> dict:
 @app.post("/api/auth/change-password")
 def change_password(
     req: ChangePasswordRequest,
+    request: Request,
     response: Response,
     user: dict = CurrentUser,
     session_token: Optional[str] = Cookie(default=None, alias=SESSION_COOKIE),
 ) -> dict:
+    ip = _client_ip(request)
+    ua = request.headers.get("user-agent", "")
     full = db.get_user_by_id(user["id"])
     if not full or not verify_password(req.old_password, full["password_hash"]):
+        db.log_audit("change_password", user_id=user["id"],
+                     username=user["username"], ip=ip, user_agent=ua,
+                     success=False, detail="原密码错误")
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "原密码错误")
 
     ok, msg = validate_password(req.new_password)
@@ -406,6 +607,8 @@ def change_password(
     if session_token:
         db.delete_session(session_token)
     _clear_session_cookie(response)
+    db.log_audit("change_password", user_id=user["id"],
+                 username=user["username"], ip=ip, user_agent=ua, success=True)
     return {"ok": True}
 
 
@@ -429,7 +632,9 @@ def list_accounts(
 # ⚠️ 注意：以下静态路径必须在 /{account_id} 之前声明，否则会被吞掉。
 
 @app.post("/api/accounts/import")
-def import_accounts(req: ImportRequest, user: dict = CurrentUser) -> dict:
+def import_accounts(
+    req: ImportRequest, request: Request, user: dict = CurrentUser
+) -> dict:
     accounts = parse_import_text(req.text)
     if not accounts:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "未识别到有效账号")
@@ -440,16 +645,21 @@ def import_accounts(req: ImportRequest, user: dict = CurrentUser) -> dict:
             existing.add(a.email.lower())
 
     success = fail = skipped = 0
+    groups_created: set[str] = set()
     for data in accounts:
         email = data["email"]
         if req.skip_duplicate and email.lower() in existing:
             skipped += 1
             continue
+        # 单条账号自带的 group 优先级 > 表单选的全局 group
+        target_group = (data.get("group") or req.group or "默认分组").strip() or "默认分组"
+        if target_group != "默认分组":
+            groups_created.add(target_group)
         ok, _msg = db.add_account(
             user["id"],
             email,
             data["password"],
-            req.group,
+            target_group,
             client_id=data.get("client_id"),
             refresh_token=data.get("refresh_token"),
         )
@@ -458,21 +668,68 @@ def import_accounts(req: ImportRequest, user: dict = CurrentUser) -> dict:
             existing.add(email.lower())
         else:
             fail += 1
-    return {"success": success, "fail": fail, "skipped": skipped}
+    db.log_audit(
+        "import_accounts", user_id=user["id"], username=user["username"],
+        ip=_client_ip(request), user_agent=request.headers.get("user-agent", ""),
+        target=req.group,
+        detail=f"success={success},fail={fail},skipped={skipped},"
+               f"groups={','.join(sorted(groups_created))[:200]}",
+    )
+    return {
+        "success": success, "fail": fail, "skipped": skipped,
+        "groups_created": sorted(groups_created),
+    }
 
 
 @app.post("/api/accounts/delete")
-def delete_accounts(req: DeleteAccountsRequest, user: dict = CurrentUser) -> dict:
+def delete_accounts(
+    req: DeleteAccountsRequest, request: Request, user: dict = CurrentUser
+) -> dict:
     deleted = db.delete_accounts(user["id"], req.ids)
+    db.log_audit(
+        "delete_accounts", user_id=user["id"], username=user["username"],
+        ip=_client_ip(request), user_agent=request.headers.get("user-agent", ""),
+        target=",".join(map(str, req.ids[:20])) + ("..." if len(req.ids) > 20 else ""),
+        detail=f"deleted={deleted},requested={len(req.ids)}",
+    )
     return {"deleted": deleted, "requested": len(req.ids)}
 
 
+# GET /api/accounts/export 已废弃，保留路由以兼容旧前端但要求 POST。
+# 新版必须用 POST + 当前账户密码二次确认。
 @app.get("/api/accounts/export")
+def export_accounts_legacy(user: dict = CurrentUser) -> Response:
+    raise HTTPException(
+        status.HTTP_405_METHOD_NOT_ALLOWED,
+        "GET 已禁用：请使用 POST /api/accounts/export 并提供登录密码以确认导出",
+    )
+
+
+@app.post("/api/accounts/export")
 def export_accounts(
-    group: Optional[str] = None, user: dict = CurrentUser
+    req: ExportRequest, request: Request, user: dict = CurrentUser
 ) -> PlainTextResponse:
-    if group and group != "全部":
-        accs = db.get_accounts_by_group(user["id"], group)
+    """导出全部账号明文密码 — 必须二次输入登录密码确认。
+
+    输出格式（``include_group=True`` 默认）::
+
+        email----password----组名
+        email----password----client_id----refresh_token----组名
+
+    回导入时会自动还原分组归属。
+    """
+    ip = _client_ip(request)
+    ua = request.headers.get("user-agent", "")
+    full = db.get_user_by_id(user["id"])
+    if not full or not verify_password(req.password, full["password_hash"]):
+        db.log_audit(
+            "export_accounts", user_id=user["id"], username=user["username"],
+            ip=ip, user_agent=ua, success=False, detail="二次密码错误",
+        )
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "登录密码错误，导出取消")
+
+    if req.group and req.group != "全部":
+        accs = db.get_accounts_by_group(user["id"], req.group)
     else:
         accs = db.get_all_accounts(user["id"])
     lines: list[str] = []
@@ -480,11 +737,21 @@ def export_accounts(
         parts = [a.email, a.password or ""]
         if a.client_id:
             parts.append(a.client_id)
-            if a.refresh_token:
-                parts.append(a.refresh_token)
+            parts.append(a.refresh_token or "")
+        if req.include_group:
+            parts.append(a.group_name or "默认分组")
         lines.append("----".join(parts))
+
+    sep = "$$\n" if req.separator == "dollar" else "\n"
+    body = sep.join(lines)
+
+    db.log_audit(
+        "export_accounts", user_id=user["id"], username=user["username"],
+        ip=ip, user_agent=ua, target=req.group or "全部",
+        detail=f"count={len(accs)},include_group={req.include_group},sep={req.separator}",
+    )
     return PlainTextResponse(
-        "\n".join(lines),
+        body,
         headers={"Content-Disposition": 'attachment; filename="accounts_export.txt"'},
     )
 
@@ -632,6 +899,25 @@ def delete_email_api(
     return {"success": ok, "message": msg}
 
 
+@app.get("/api/accounts/{account_id}/emails/body")
+def get_email_body_api(
+    account_id: int,
+    email_id: str = Query(..., min_length=1, max_length=2000),
+    folder: str = Query("inbox", pattern="^(inbox|junk|sent|drafts|deleted)$"),
+    user: dict = CurrentUser,
+) -> dict:
+    """单独拉取一封邮件的完整正文（用于列表 body 为空时按需获取）。"""
+    acc = get_account_or_404(user["id"], account_id)
+    client = create_client(user["id"], acc)
+    try:
+        body, body_type, msg = client.fetch_email_body(email_id, folder)
+    finally:
+        client.disconnect()
+    if body is None:
+        return {"success": False, "message": msg, "body": "", "body_type": "text"}
+    return {"success": True, "message": msg, "body": body, "body_type": body_type or "text"}
+
+
 # ── Batch (SSE) ─────────────────────────────────────────────────
 
 
@@ -685,8 +971,18 @@ def batch_check(req: BatchCheckRequest, user: dict = CurrentUser) -> StreamingRe
 
 
 @app.post("/api/batch/send")
-def batch_send(req: BatchSendRequest, user: dict = CurrentUser) -> StreamingResponse:
+def batch_send(
+    req: BatchSendRequest, request: Request, user: dict = CurrentUser
+) -> StreamingResponse:
     owner_id = user["id"]
+    ip = _client_ip(request)
+    ua = request.headers.get("user-agent", "")
+
+    db.log_audit(
+        "batch_send_start", user_id=owner_id, username=user["username"],
+        ip=ip, user_agent=ua, target=req.to[:100],
+        detail=f"accounts={len(req.account_ids)}",
+    )
 
     def generate():
         total = len(req.account_ids)
@@ -711,9 +1007,31 @@ def batch_send(req: BatchSendRequest, user: dict = CurrentUser) -> StreamingResp
                 "type": "progress", "current": i + 1, "total": total,
                 "email": acc.email, "success": ok, "message": msg,
             })
+        db.log_audit(
+            "batch_send_done", user_id=owner_id, username=user["username"],
+            ip=ip, user_agent=ua, target=req.to[:100],
+            detail=f"success={sc},fail={fc}",
+        )
         yield _sse({"type": "done", "success": sc, "fail": fc})
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+# ── Audit Log ───────────────────────────────────────────────────
+
+
+@app.get("/api/audit")
+def list_audit_log(
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    only_self: bool = Query(True),
+    action: Optional[str] = Query(None, max_length=64),
+    user: dict = CurrentUser,
+) -> dict:
+    """普通用户只能看自己的审计；预留 only_self=False 供未来超管用。"""
+    user_id = user["id"] if only_self else None
+    items = db.list_audit(limit=limit, offset=offset, user_id=user_id, action=action)
+    return {"items": items, "limit": limit, "offset": offset}
 
 
 # ── Dashboard ───────────────────────────────────────────────────
@@ -837,14 +1155,29 @@ def main() -> None:
     scheme = "https" if ssl_keyfile and ssl_certfile else "http"
 
     print("=" * 50)
-    print(f"  邮箱管家 Web v3.0 (多用户)")
+    print(f"  邮箱管家 Web v3.1 (多用户 + 审计)")
     print(f"  访问: {scheme}://{host}:{port}")
     print(f"  注册: {'已禁用' if DISABLE_REGISTER else '开放（首次访问可注册账号）'}")
     if scheme == "https":
         print(f"  TLS:  启用 (cert={ssl_certfile})")
     elif host not in {"127.0.0.1", "localhost", "::1"}:
-        print(f"  ⚠️  HTTP 明文传输；公网/内网建议设置 EMAIL_WEB_SSL_KEY/CERT")
+        print(f"  [WARN] HTTP 明文传输；公网/内网建议设置 EMAIL_WEB_SSL_KEY/CERT 或经由反代")
     print("=" * 50)
+
+    # 启动时打印安全警告（POSIX 平台权限检查 + 主密钥共目录提示）
+    try:
+        emit_warnings(get_data_dir())
+    except Exception:
+        logger.exception("启动安全检查失败（忽略）")
+
+    # 清理过期会话与老审计日志
+    try:
+        n_sess = db.cleanup_expired_sessions()
+        n_audit = db.cleanup_old_audit()
+        if n_sess or n_audit:
+            logger.info("启动清理: 过期会话=%d, 老审计=%d", n_sess, n_audit)
+    except Exception:
+        logger.exception("启动清理失败（忽略）")
 
     uvicorn.run(
         app,
@@ -852,6 +1185,8 @@ def main() -> None:
         port=port,
         ssl_keyfile=ssl_keyfile,
         ssl_certfile=ssl_certfile,
+        proxy_headers=True,        # 信任反代头
+        forwarded_allow_ips="*",   # 让 X-Forwarded-* 生效（如需更严，改成具体 IP）
     )
 
 

@@ -14,10 +14,14 @@ def test_health(client):
 
 
 def test_export_route_not_shadowed_by_int_param(client):
-    """/api/accounts/export 不能被 /{account_id} 路由吞掉。"""
+    """/api/accounts/export 不能被 /{account_id} 路由吞掉。
+
+    自 v3.1 起 GET 已禁用（要求 POST + 二次密码），但路由本身必须存在，
+    否则会被 /{account_id} 把 'export' 当成整数解析失败返回 422。
+    """
     r = client.get("/api/accounts/export")
-    assert r.status_code == 200
-    assert "attachment" in r.headers.get("content-disposition", "")
+    # 405 = 路由命中但方法不允许（正确）；422 = 被吞了（错）
+    assert r.status_code == 405
 
 
 def test_get_nonexistent_account_returns_404(client):
