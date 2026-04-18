@@ -889,13 +889,16 @@ def get_emails(
     acc = get_account_or_404(user["id"], account_id)
     client = create_client(user["id"], acc)
     try:
-        emails, msg = client.fetch_emails(folder=folder, limit=limit)
+        # with_body 直接透传到 GraphClient.fetch_emails，让 Graph 服务端就不返回 body
+        # 比"先拉再丢"省了 ~MB 级的传输 + Graph 服务端处理
+        emails, msg = client.fetch_emails(folder=folder, limit=limit, with_body=with_body)
     finally:
         client.disconnect()
     for e in emails:
         if e.get("date"):
             e["date"] = e["date"].isoformat()
         if not with_body:
+            # IMAP 路径仍可能返回完整 body（无视参数），做一道清理保证带宽节省
             full_body = e.get("body") or ""
             if not e.get("preview"):
                 e["preview"] = full_body[:200]

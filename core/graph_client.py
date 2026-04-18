@@ -70,7 +70,15 @@ class GraphClient:
             return "正常", "Token 有效"
         return "异常", f"API 错误: {resp.status_code}"
 
-    def fetch_emails(self, folder: str = "inbox", limit: int = 50) -> Tuple[list[dict], str]:
+    def fetch_emails(
+        self, folder: str = "inbox", limit: int = 50, with_body: bool = False,
+    ) -> Tuple[list[dict], str]:
+        """拉取邮件列表。
+
+        ``with_body=False``（默认）时 ``$select`` 不含 body 字段，Graph 服务器端
+        不会返回 body，传输从 ~MB 级降到 ~KB 级，列表加载快得多。
+        点击具体邮件时由 :meth:`get_email_body` 按需拉完整正文。
+        """
         headers = self._headers()
         if headers is None:
             tok, msg = self.tm.get()
@@ -79,9 +87,11 @@ class GraphClient:
         folder_name = graph_folder_for(self.tm.api_type, folder)
         if self.tm.api_type == "outlook":
             url = f"{OUTLOOK_BASE}/mailfolders/{folder_name}/messages"
+            base_select = "Id,Subject,From,ReceivedDateTime,BodyPreview,IsRead,HasAttachments"
+            select_fields = base_select + (",Body" if with_body else "")
             params = {
                 "$top": limit, "$orderby": "ReceivedDateTime desc",
-                "$select": "Id,Subject,From,ReceivedDateTime,BodyPreview,Body,IsRead,HasAttachments",
+                "$select": select_fields,
             }
             field = {
                 "from": "From", "subject": "Subject", "date": "ReceivedDateTime",
@@ -92,9 +102,11 @@ class GraphClient:
             }
         else:
             url = f"{GRAPH_BASE}/mailFolders/{folder_name}/messages"
+            base_select = "id,subject,from,receivedDateTime,bodyPreview,isRead,hasAttachments"
+            select_fields = base_select + (",body" if with_body else "")
             params = {
                 "$top": limit, "$orderby": "receivedDateTime desc",
-                "$select": "id,subject,from,receivedDateTime,bodyPreview,body,isRead,hasAttachments",
+                "$select": select_fields,
             }
             field = {
                 "from": "from", "subject": "subject", "date": "receivedDateTime",
@@ -107,7 +119,8 @@ class GraphClient:
         # Graph 默认 body 是 HTML；如想拿 text 可以加 Prefer 头部
         # 不过 sandbox iframe 直接渲染 HTML 是首选。
         request_headers = dict(headers)
-        request_headers["Prefer"] = 'outlook.body-content-type="html"'
+        if with_body:
+            request_headers["Prefer"] = 'outlook.body-content-type="html"'
 
         resp = self._req(
             "GET", url, headers=request_headers, params=params, timeout=30

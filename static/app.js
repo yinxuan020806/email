@@ -911,6 +911,9 @@ async function selectEmail(idx) {
   if (e._fullBody) {
     renderEmailBody(e._fullBody.body, e._fullBody.type);
     maybeMarkRead(e);
+    // 命中也要继续预加载下一封，让顺序阅读体验持续顺滑
+    prefetchEmailBody(idx + 1);
+    prefetchEmailBody(idx + 2);
     return;
   }
 
@@ -946,6 +949,9 @@ async function selectEmail(idx) {
     }
   }
   maybeMarkRead(e);
+  // 后台预加载下 1-2 封，用户继续往下点时几乎瞬间显示
+  prefetchEmailBody(idx + 1);
+  prefetchEmailBody(idx + 2);
 }
 
 function maybeMarkRead(e) {
@@ -955,6 +961,25 @@ function maybeMarkRead(e) {
   api.post(`/api/accounts/${S.emailAccount.id}/emails/mark-read`, {
     email_id: e.uid, folder: $('emailFolder').value, is_read: true,
   }).catch(() => {});
+}
+
+// 后台静默预加载某封邮件的完整 body 到缓存。用户再切到该邮件时瞬间显示。
+function prefetchEmailBody(idx) {
+  const e = S.emails[idx];
+  if (!e || e._fullBody || !e.uid || !S.emailAccount) return;
+  if (e._prefetching) return;
+  e._prefetching = true;
+  const folder = $('emailFolder').value;
+  const account = S.emailAccount;
+  api.get(
+    `/api/accounts/${account.id}/emails/body?email_id=${encodeURIComponent(e.uid)}&folder=${folder}`
+  ).then((r) => {
+    if (r && r.success) {
+      e._fullBody = { body: r.body || '', type: r.body_type || 'text' };
+    }
+  }).catch(() => {}).finally(() => {
+    e._prefetching = false;
+  });
 }
 
 // ───────── Compose ─────────

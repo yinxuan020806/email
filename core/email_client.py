@@ -158,14 +158,16 @@ class EmailClient:
             # Graph 失败再试 IMAP（XOAUTH2）
         return self._imap.check_status()
 
-    def fetch_emails(self, folder: str = "inbox", limit: int = 50) -> Tuple[list[dict], str]:
-        # OAuth 账号优先走 Graph：Thunderbird scope 下 GET 可用
+    def fetch_emails(
+        self, folder: str = "inbox", limit: int = 50, with_body: bool = False,
+    ) -> Tuple[list[dict], str]:
+        """拉取邮件列表；``with_body=False`` 时不带正文（更快）。"""
         if self._graph is not None:
-            emails, msg = self._graph.fetch_emails(folder, limit)
+            emails, msg = self._graph.fetch_emails(folder, limit, with_body=with_body)
             if emails:
                 return emails, msg
-            # 空列表可能是真的没邮件，也可能 Graph 出错；保留消息，前端不再二次请求
             return emails, msg
+        # IMAP 暂时不支持 with_body 区分（需要改成 BODY.PEEK[HEADER]，工程量大）
         return self._imap.fetch_emails(folder, limit)
 
     def fetch_email_body(
