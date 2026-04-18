@@ -17,7 +17,9 @@ const S = {
   user: null,
   registerEnabled: true,
   authMode: 'login',
-  ready: false
+  ready: false,
+  // 全部邮箱总数 + 各分组邮箱数（来自 /api/dashboard）
+  counts: { total: 0, byGroup: {} },
 };
 
 // ───────── SPA 路由 ─────────
@@ -316,22 +318,60 @@ async function loadGroups() {
   renderGroups();
 }
 
+async function loadCounts() {
+  try {
+    const d = await api.get('/api/dashboard');
+    S.counts = { total: d.total || 0, byGroup: d.groups || {} };
+  } catch {
+    /* 仪表盘接口失败时保持上次的计数即可 */
+  }
+  renderCounts();
+}
+
+function renderCounts() {
+  // "全部邮箱"按钮上的徽标
+  const navAll = $('navAll');
+  let badge = navAll.querySelector('.nav-count');
+  if (!badge) {
+    badge = el('span', { class: 'nav-count' });
+    navAll.appendChild(badge);
+  }
+  badge.textContent = String(S.counts.total || 0);
+
+  // 各分组的徽标
+  document.querySelectorAll('.grp-item').forEach((item) => {
+    const name = item.dataset.group;
+    if (!name) return;
+    let b = item.querySelector('.grp-count');
+    if (!b) {
+      b = el('span', { class: 'grp-count' });
+      // 插入到 ⋯ 之前
+      const ctx = item.querySelector('.grp-ctx');
+      if (ctx) item.insertBefore(b, ctx);
+      else item.appendChild(b);
+    }
+    b.textContent = String(S.counts.byGroup[name] || 0);
+  });
+}
+
 function renderGroups() {
   const list = $('groupList');
   clear(list);
   for (const g of S.groups) {
     const item = el('div', {
       class: 'grp-item' + (S.currentGroup === g.name ? ' active' : ''),
+      dataset: { group: g.name },
       onclick: () => selectGroup(g.name),
-      oncontextmenu: (e) => showGroupCtx(e, g.name)
+      oncontextmenu: (e) => showGroupCtx(e, g.name),
     });
-    item.appendChild(document.createTextNode('📁 ' + g.name));
+    item.appendChild(el('span', { class: 'grp-name' }, '📁 ' + g.name));
     item.appendChild(el('span', {
       class: 'grp-ctx',
       onclick: (e) => { e.stopPropagation(); showGroupCtx(e, g.name); }
     }, '⋯'));
     list.appendChild(item);
   }
+  renderCounts();
 }
 
 function selectGroup(name) {
@@ -388,6 +428,8 @@ async function loadAccounts() {
   S.selected.clear();
   $('selAll').checked = false;
   renderAccounts();
+  // 顺带刷新侧边栏计数（账号变更时数字会跟着动）
+  loadCounts();
 }
 
 function filterAccounts() {
@@ -426,12 +468,19 @@ function renderAccounts() {
     tr.appendChild(el('td', {}, cb));
     tr.appendChild(el('td', {}, String(i + 1)));
 
-    const tdEmail = el('td', {
+    const emailCell = el('div', { class: 'email-cell' });
+    const emailText = el('span', {
+      class: 'email-t',
       title: a.email,
-      style: 'cursor:pointer',
-      onclick: () => showDetail(a.id)
+      onclick: () => showDetail(a.id),
     }, a.email);
-    tr.appendChild(tdEmail);
+    emailCell.appendChild(emailText);
+    emailCell.appendChild(el('button', {
+      class: 'email-copy',
+      title: t('btn_copy'),
+      onclick: (e) => { e.stopPropagation(); copyText(a.email); },
+    }, t('btn_copy')));
+    tr.appendChild(el('td', {}, emailCell));
 
     const pwdCell = el('div', { class: 'pwd-cell' });
     const pwdSpan = el('span', { class: 'pwd-t' }, '••••••');
