@@ -754,6 +754,11 @@ async function loadEmails() {
     S.emails = [...S.allEmails];
     S.currentEmail = null;
     renderEmailList();
+    // 列表加载完后立刻在后台预加载前 3 封 body
+    // 用户首次点击大概率落在第 1-3 封，命中即瞬间显示
+    for (let i = 0; i < Math.min(3, S.emails.length); i++) {
+      prefetchEmailBody(i);
+    }
   } catch {
     clear(list);
     list.appendChild(el('div', { class: 'empty-state', style: 'color:var(--danger)' }, t('email_load_fail')));

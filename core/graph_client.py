@@ -17,7 +17,7 @@ import certifi
 import requests
 
 from core.folder_map import graph_folder_for
-from core.oauth_token import TokenManager
+from core.oauth_token import SESSION, TokenManager
 
 
 logger = logging.getLogger(__name__)
@@ -47,7 +47,8 @@ class GraphClient:
 
     def _req(self, method: str, url: str, **kwargs) -> Optional[requests.Response]:
         try:
-            return requests.request(
+            # 用 module-level Session 复用 TLS 连接，避免每次握手 (~100-300ms)
+            return SESSION.request(
                 method, url, timeout=kwargs.pop("timeout", 30),
                 verify=certifi.where(), **kwargs,
             )
