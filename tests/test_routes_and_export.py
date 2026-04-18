@@ -44,6 +44,39 @@ def test_oauth_path_returns_index(client):
     assert "<html" in r.text.lower()
 
 
+def test_index_injects_static_version(client):
+    """index.html 中的 __STATIC_VERSION__ 占位符应被替换为实际版本号。"""
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "__STATIC_VERSION__" not in r.text, "占位符必须被替换，否则缓存破坏失效"
+    # 应该有 ?v=数字 的查询串
+    import re
+    matches = re.findall(r'app\.(?:js|css)\?v=(\d+)', r.text)
+    assert matches, "未在 index.html 中找到 ?v=数字 的版本化 URL"
+    # 同一次响应里所有静态资源版本号应一致
+    assert len(set(matches)) == 1
+
+
+def test_index_has_no_cache_headers(client):
+    """index.html 必须设置 no-cache 头，避免 CDN/浏览器缓存住入口页。"""
+    r = client.get("/")
+    cc = r.headers.get("cache-control", "").lower()
+    assert "no-cache" in cc or "no-store" in cc
+
+
+def test_static_assets_served_with_version(client):
+    """带 ?v=xxx query 访问静态资源应能正常返回（FastAPI StaticFiles 忽略 query）。"""
+    # 先取实际版本
+    idx = client.get("/").text
+    import re
+    m = re.search(r'app\.js\?v=(\d+)', idx)
+    assert m
+    version = m.group(1)
+    r = client.get(f"/static/app.js?v={version}")
+    assert r.status_code == 200
+    assert len(r.content) > 1000
+
+
 # ── 二次密码导出 ────────────────────────────────────────────
 
 

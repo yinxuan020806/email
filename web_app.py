@@ -447,12 +447,56 @@ def _clear_session_cookie(response: Response) -> None:
 # ── Root & Health ───────────────────────────────────────────────
 
 
-def _serve_index() -> FileResponse:
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+_INDEX_CACHE: dict = {"path": None, "version": "0", "html": None, "mtime": 0.0}
+
+
+def _compute_static_version() -> str:
+    """以 static 目录下关键资源的最大 mtime 作为版本号。
+
+    每次重新部署 docker（COPY static），文件 mtime 变更，version 自动更新，
+    浏览器与 Cloudflare 都能识别为新 URL。
+    """
+    files = ("app.js", "app.css", "i18n.js", "index.html")
+    mtimes = []
+    for f in files:
+        p = os.path.join(STATIC_DIR, f)
+        if os.path.exists(p):
+            mtimes.append(int(os.path.getmtime(p)))
+    return str(max(mtimes)) if mtimes else "0"
+
+
+def _serve_index() -> Response:
+    """返回 index.html，自动注入 ``__STATIC_VERSION__`` 占位符。
+
+    同时设置 no-cache 头，避免 Cloudflare / 浏览器缓存住入口页让用户拉到旧 JS。
+    """
+    path = os.path.join(STATIC_DIR, "index.html")
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = 0.0
+
+    if _INDEX_CACHE["path"] != path or _INDEX_CACHE["mtime"] != mtime:
+        version = _compute_static_version()
+        with open(path, "r", encoding="utf-8") as fp:
+            html = fp.read().replace("__STATIC_VERSION__", version)
+        _INDEX_CACHE.update({
+            "path": path, "version": version, "html": html, "mtime": mtime,
+        })
+
+    return Response(
+        content=_INDEX_CACHE["html"],
+        media_type="text/html; charset=utf-8",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @app.get("/")
-async def root() -> FileResponse:
+async def root() -> Response:
     return _serve_index()
 
 
@@ -462,7 +506,7 @@ async def root() -> FileResponse:
 @app.get("/dashboard")
 @app.get("/settings")
 @app.get("/oauth")
-async def spa_routes() -> FileResponse:
+async def spa_routes() -> Response:
     return _serve_index()
 
 
