@@ -106,31 +106,12 @@ bash /tmp/email-bootstrap.sh
 
 ## 进阶：完全自动化（GitHub Actions）
 
-> 不强求；按需开启。
+仓库已经包含 [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml)，  
+配完 4 个 secrets 即可实现 **push → 服务器自动部署**。
 
-如果未来想做到 push 之后服务器自动拉，可以加 `.github/workflows/deploy.yml`：
+详细步骤见 → [`docs/github-actions-setup.md`](github-actions-setup.md)
 
-```yaml
-name: deploy
-on:
-  push:
-    branches: [main]
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - name: SSH 部署
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_KEY }}
-          port: ${{ secrets.SSH_PORT }}
-          script: cd /www/wwwroot/email && bash scripts/deploy.sh
-```
-
-需要在 GitHub 仓库 → Settings → Secrets 里配 4 个 secrets。  
-**国内服务器 + GitHub Actions 偶尔会因网络抖动失败，建议保留手动 `bash scripts/deploy.sh` 作为兜底。**
+> **国内服务器 + GitHub Actions 偶尔会因网络抖动失败**，手动 `bash scripts/deploy.sh` 永远是兜底。两种方式可以并存。
 
 ---
 

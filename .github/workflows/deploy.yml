@@ -1,0 +1,49 @@
+name: deploy
+
+# 触发条件：
+#   - push 到 main 分支
+#   - 也可在 Actions 页手动 "Run workflow"
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'README.md'
+      - '*.png'
+  workflow_dispatch:
+    inputs:
+      no_cache:
+        description: '强制不使用缓存重建（修改 requirements.txt 时勾上）'
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: SSH → bash scripts/deploy.sh
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: SSH deploy
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host:     ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          port:     ${{ secrets.SSH_PORT }}
+          key:      ${{ secrets.SSH_KEY }}
+          # 严格模式 + 失败即退出
+          script_stop: true
+          # 调试输出（出问题时排查用）
+          debug: false
+          script: |
+            set -euo pipefail
+            cd /www/wwwroot/email
+            if [ "${{ github.event.inputs.no_cache }}" = "true" ]; then
+                bash scripts/deploy.sh --no-cache
+            else
+                bash scripts/deploy.sh
+            fi

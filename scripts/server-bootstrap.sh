@@ -156,7 +156,13 @@ echo
 bash scripts/deploy.sh
 
 echo
-ok "服务器接管完成！以后只需："
+ok "服务器接管完成！以后日常更新只需："
 echo "    cd $APP_DIR && bash scripts/deploy.sh"
 echo
 echo "回滚：cd $APP_DIR && git log --oneline -10 && git checkout <hash> && bash scripts/deploy.sh"
+echo
+echo "${Y}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"
+echo "${Y}（可选）想做到 git push 后 GitHub Actions 自动部署？${N}"
+echo "    再跑一次：cd $APP_DIR && cat docs/github-actions-setup.md"
+echo "    跟着 Step 1~3 配 4 个 GitHub Secrets 即可。"
+echo "${Y}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${N}"

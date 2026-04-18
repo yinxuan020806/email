@@ -129,6 +129,8 @@ docker compose up -d
 >
 > 🔁 **日常更新（git push → 一键部署）**速查：[`docs/redeploy-quickstart.md`](docs/redeploy-quickstart.md)。
 >
+> 🤖 **完全自动化（push 后 GitHub Actions 自动 SSH 部署）**：[`docs/github-actions-setup.md`](docs/github-actions-setup.md)。
+>
 > 📋 **某次实际部署后的交接摘要**（架构、路径、Tunnel、权限坑、重部署命令模板）见 [`docs/redeploy-handover.md`](docs/redeploy-handover.md)。
 
 ---
