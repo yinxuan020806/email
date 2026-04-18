@@ -121,9 +121,15 @@ bash /tmp/email-bootstrap.sh
 | --- | --- |
 | 部署后健康检查 timeout | `docker compose logs --tail=200` 看具体报错 |
 | 容器反复重启，日志写 `Permission denied` `.master.key` | `chown -R 10001:10001 /www/wwwroot/email/data` |
-| `git pull` 报 `Your local changes would be overwritten` | 服务器上意外编辑了仓库文件；用 `git stash` 或 `git checkout --` 还原 |
+| `git pull` 报 `Your local changes would be overwritten by docker-compose.yml` | 已自动处理：`deploy.sh` 会把它标记为 `skip-worktree`。手动也可：`git update-index --skip-worktree docker-compose.yml` |
+| `git pull` 报其它文件冲突 | 服务器上意外编辑了仓库文件；用 `git stash` 或 `git checkout --` 还原 |
 | pip 装包慢/超时 | 在 `Dockerfile` 加 `RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple` |
 | 浏览器打开域名 502 | `systemctl status cloudflared` 看 Tunnel；详见 [deploy-tencent-baota.md §11](deploy-tencent-baota.md) |
+
+> **关于 `docker-compose.yml`**：服务器上的版本通常含真实 token / 端口，与仓库里的模板不同。  
+> `deploy.sh` 第一次跑会自动 `git update-index --skip-worktree docker-compose.yml`，  
+> 之后 `git pull` 不会动这个文件，你的本地配置会被永久保留。  
+> 如要从仓库同步新版本：`git update-index --no-skip-worktree docker-compose.yml && git checkout -- docker-compose.yml`，再手动改回 token。
 
 ---
 

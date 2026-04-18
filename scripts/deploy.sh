@@ -66,8 +66,17 @@ if [[ "$RESTART_ONLY" == "1" ]]; then
 else
     # ── 2. 拉取最新代码 ─────────────────────────────
     if [[ -d .git ]]; then
+        # docker-compose.yml 在服务器上常被改（填真实 token / 端口），
+        # 让 git 忽略它的本地修改，避免每次 pull 冲突
+        if [[ -f docker-compose.yml ]] && git ls-files --error-unmatch docker-compose.yml >/dev/null 2>&1; then
+            CURRENT_FLAGS=$(git ls-files -v docker-compose.yml | head -c 1)
+            if [[ "$CURRENT_FLAGS" != "S" ]]; then
+                info "标记 docker-compose.yml 为 skip-worktree（保留本地真实配置）"
+                git update-index --skip-worktree docker-compose.yml
+            fi
+        fi
+
         info "git pull --ff-only ..."
-        # 防止本地修改阻塞 pull：仅展示，不强制
         if ! git diff --quiet || ! git diff --cached --quiet; then
             warn "工作区有未提交修改，请先确认后再运行；仅展示差异，不会 reset。"
             git status --short || true
