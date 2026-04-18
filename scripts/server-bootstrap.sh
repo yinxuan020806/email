@@ -141,6 +141,13 @@ git fetch origin
 info "强制对齐到 origin/main（data/ 已 .gitignore，不会动）"
 git checkout -f -B main origin/main
 
+# ── 6.5 关键 git 配置：避免后续 pull 冲突 ──────
+info "git config core.fileMode false（避免 chmod 改动被识别为 modified）"
+git config core.fileMode false
+
+info "git update-index --skip-worktree docker-compose.yml（保留服务器上的真实配置）"
+git update-index --skip-worktree docker-compose.yml 2>/dev/null || true
+
 # ── 7. 还原 compose（保留现网真实环境变量） ─────
 info "用备份恢复 docker-compose.yml（保留你的真实 token / 端口配置）"
 cp "$COMPOSE_BAK" docker-compose.yml
