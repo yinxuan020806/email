@@ -173,17 +173,38 @@ class EmailClient:
     ) -> Tuple[Optional[str], str, str]:
         """单独拉取一封邮件的完整正文。
 
-        返回 (body, body_type, message)。失败时 body 为 None。
-        优先走 Graph（一次 GET）；失败回退 IMAP（性能差但能用）。
+        策略（按可靠性优先）：
+        1. OAuth 账号优先 Graph（一次 HTTP GET，最快）
+        2. Graph 拿到的 body 太短/为空 → 用 ``internetMessageId`` 走 IMAP 反查
+           （IMAP 拿的是原始 RFC822，body 几乎一定能解出）
+        3. 普通账号直接走 IMAP 用 UID fetch RFC822
         """
+        MIN_BODY = 80  # 阈值：低于此长度认为 Graph 没拿到完整 body，启动 IMAP 兜底
+
         if self._graph is not None:
-            body, body_type, msg = self._graph.get_email_body(email_id)
+            body, body_type, internet_msg_id, msg = self._graph.get_email_body(email_id)
+
+            if body and len(body) >= MIN_BODY:
+                return body, body_type, msg
+
+            logger.info(
+                "Graph body 不足 (len=%s)，尝试 IMAP Message-Id 反查 mid=%s",
+                len(body or ""), (internet_msg_id or "")[:80],
+            )
+            if internet_msg_id:
+                imap_body, imap_type, imap_msg = self._imap.fetch_body_by_message_id(
+                    internet_msg_id, folder,
+                )
+                if imap_body:
+                    return imap_body, imap_type, imap_msg
+                logger.info("IMAP 反查也失败: %s", imap_msg)
+
+            # 都拿不到完整 body 时，至少把 Graph 拿到的（哪怕是 preview）返回
             if body is not None:
                 return body, body_type, msg
-            # Graph 失败时的回退说明
-            logger.info("Graph 拉取 body 失败，尝试 IMAP 回退: %s", msg)
+            return None, "", msg
 
-        # IMAP 路径：fetch_emails 时已经拉到 body，这里走 search uid + RFC822 拿完整内容
+        # 普通账号：直接 IMAP UID fetch
         try:
             from core.mail_parser import get_email_body_with_type
             from core.folder_map import imap_folder_for

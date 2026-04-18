@@ -94,3 +94,72 @@ def test_email_body_endpoint_handles_failure(client):
     body = r.json()
     assert body["success"] is False
     assert "Token expired" in body["message"]
+
+
+# ── EmailClient.fetch_email_body Graph→IMAP 兜底 ─────────────
+
+
+def test_fetch_email_body_falls_back_to_imap_when_graph_empty():
+    """Graph 返回空 body 但 internet_msg_id 有值时，应用 IMAP 反查。"""
+    from core.email_client import EmailClient
+    from unittest.mock import MagicMock
+
+    client = EmailClient.__new__(EmailClient)
+    client.email_addr = "x@outlook.com"
+    client.password = ""
+    client.account_id = 1
+    client._token_manager = MagicMock()
+    client._graph = MagicMock()
+    client._imap = MagicMock()
+
+    client._graph.get_email_body.return_value = ("", "html", "<msgid@x>", "ok")
+    client._imap.fetch_body_by_message_id.return_value = (
+        "<p>recovered from imap</p>", "html", "got",
+    )
+
+    body, body_type, msg = client.fetch_email_body("graph-id-xxx", "inbox")
+    assert body == "<p>recovered from imap</p>"
+    assert body_type == "html"
+    client._imap.fetch_body_by_message_id.assert_called_once_with("<msgid@x>", "inbox")
+
+
+def test_fetch_email_body_uses_graph_when_long_enough():
+    """Graph body 足够长时不应触发 IMAP fallback（性能考虑）。"""
+    from core.email_client import EmailClient
+    from unittest.mock import MagicMock
+
+    client = EmailClient.__new__(EmailClient)
+    client.email_addr = "x@outlook.com"
+    client.password = ""
+    client.account_id = 1
+    client._token_manager = MagicMock()
+    client._graph = MagicMock()
+    client._imap = MagicMock()
+
+    long_body = "<p>" + "x" * 200 + "</p>"
+    client._graph.get_email_body.return_value = (long_body, "html", "<id>", "ok")
+
+    body, body_type, msg = client.fetch_email_body("graph-id", "inbox")
+    assert body == long_body
+    client._imap.fetch_body_by_message_id.assert_not_called()
+
+
+def test_fetch_email_body_returns_short_body_when_imap_also_fails():
+    """Graph 返回短 body 且 IMAP 反查也失败时，至少返回 Graph 的短 body。"""
+    from core.email_client import EmailClient
+    from unittest.mock import MagicMock
+
+    client = EmailClient.__new__(EmailClient)
+    client.email_addr = "x@outlook.com"
+    client.password = ""
+    client.account_id = 1
+    client._token_manager = MagicMock()
+    client._graph = MagicMock()
+    client._imap = MagicMock()
+
+    client._graph.get_email_body.return_value = ("short", "text", "<id>", "ok")
+    client._imap.fetch_body_by_message_id.return_value = (None, "", "not found")
+
+    body, body_type, msg = client.fetch_email_body("graph-id", "inbox")
+    # 至少把 Graph 拿到的短 body 返回，而不是 None（避免前端永远显示 loading）
+    assert body == "short"

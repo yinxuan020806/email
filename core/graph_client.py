@@ -154,33 +154,40 @@ class GraphClient:
             })
         return emails, "获取成功"
 
-    def get_email_body(self, email_id: str) -> Tuple[Optional[str], str, str]:
+    def get_email_body(
+        self, email_id: str
+    ) -> Tuple[Optional[str], str, str, str]:
         """单独拉取一封邮件的完整 body，用于列表 body 为空时的二次获取。
 
-        返回 (body_html_or_text, body_type, message)。失败时 body 为 None。
+        返回 ``(body_html_or_text, body_type, internet_message_id, message)``。
+        失败时 body 为 None。
+        ``internet_message_id`` 是 RFC 5322 的全局唯一 Message-Id（含尖括号），
+        用于在 Graph 拿不到 body 时用 IMAP search 反查。
         """
         headers = self._headers()
         if headers is None:
             tok, msg = self.tm.get()
-            return None, "", msg
+            return None, "", "", msg
 
         if self.tm.api_type == "outlook":
             url = f"{OUTLOOK_BASE}/messages/{email_id}"
-            select_fields = "Id,Subject,Body,BodyPreview"
-            ctype_key, content_key, body_key, preview_key = (
+            select_fields = "Id,Subject,Body,BodyPreview,InternetMessageId"
+            ctype_key, content_key, body_key, preview_key, msgid_key = (
                 "ContentType",
                 "Content",
                 "Body",
                 "BodyPreview",
+                "InternetMessageId",
             )
         else:
             url = f"{GRAPH_BASE}/messages/{email_id}"
-            select_fields = "id,subject,body,bodyPreview"
-            ctype_key, content_key, body_key, preview_key = (
+            select_fields = "id,subject,body,bodyPreview,internetMessageId"
+            ctype_key, content_key, body_key, preview_key, msgid_key = (
                 "contentType",
                 "content",
                 "body",
                 "bodyPreview",
+                "internetMessageId",
             )
 
         request_headers = dict(headers)
@@ -191,21 +198,34 @@ class GraphClient:
             params={"$select": select_fields}, timeout=30,
         )
         if resp is None:
-            return None, "", "网络错误"
+            logger.warning("Graph get_email_body 网络错误 url=%s", url)
+            return None, "", "", "网络错误"
         if resp.status_code != 200:
-            return None, "", f"API 错误: {resp.status_code} - {resp.text[:200]}"
+            logger.warning(
+                "Graph get_email_body 失败 status=%d body=%s",
+                resp.status_code, resp.text[:300],
+            )
+            return None, "", "", f"API 错误: {resp.status_code} - {resp.text[:200]}"
 
         m = resp.json()
         body_obj = m.get(body_key) or {}
         body_content = body_obj.get(content_key, "") or ""
         body_type = (body_obj.get(ctype_key, "") or "").lower()
         preview = m.get(preview_key, "") or ""
+        internet_msg_id = m.get(msgid_key, "") or ""
+
+        logger.info(
+            "Graph get_email_body api=%s id=%s body_len=%d type=%s preview_len=%d msgid=%s",
+            self.tm.api_type, email_id[:30],
+            len(body_content), body_type, len(preview), internet_msg_id[:80],
+        )
+
         if not body_content and preview:
             body_content = preview
             body_type = body_type or "text"
         if not body_type:
             body_type = "html" if "<" in body_content else "text"
-        return body_content, body_type, "获取成功"
+        return body_content, body_type, internet_msg_id, "获取成功"
 
     def mark_as_read(self, email_id: str, is_read: bool = True) -> Tuple[bool, str]:
         headers = self._headers()

@@ -210,6 +210,68 @@ class IMAPClient:
         finally:
             self.disconnect()
 
+    def fetch_body_by_message_id(
+        self, internet_message_id: str, folder: str = "inbox"
+    ) -> Tuple[Optional[str], str, str]:
+        """通过 RFC 5322 Message-Id 在 IMAP 中反查邮件并提取正文。
+
+        Outlook OAuth 账号的列表 ID 是 Graph ID 而非 IMAP UID，无法直接 fetch。
+        但 Graph 的 ``internetMessageId`` 与 IMAP 的 Message-Id header 一致，
+        可用 ``SEARCH HEADER Message-Id <xxx>`` 找到对应的 IMAP UID 再拉 RFC822。
+        """
+        if not internet_message_id:
+            return None, "", "internet_message_id 为空"
+        ok, msg = self.connect()
+        if not ok:
+            return None, "", msg
+        try:
+            actual = imap_folder_for(self.email_addr, folder)
+            sel_status, _ = self._connection.select(actual)
+            if sel_status != "OK":
+                return None, "", f"无法打开文件夹 {actual}"
+
+            # 去掉外层尖括号便于 search 命令正确处理
+            mid = internet_message_id.strip()
+            if mid.startswith("<") and mid.endswith(">"):
+                mid_inner = mid[1:-1]
+            else:
+                mid_inner = mid
+
+            # 大多数 IMAP 服务器接受不带尖括号的 ID
+            for query_value in (mid_inner, mid):
+                try:
+                    status, data = self._connection.search(
+                        None, "HEADER", "Message-Id", query_value
+                    )
+                except (imaplib.IMAP4.error, OSError):
+                    continue
+                if status != "OK" or not data or not data[0]:
+                    continue
+                ids = data[0].split()
+                if not ids:
+                    continue
+                uid = ids[-1]
+                status, fetched = self._connection.fetch(uid, "(RFC822)")
+                if status != "OK" or not fetched or not fetched[0]:
+                    continue
+                raw = fetched[0][1] if isinstance(fetched[0], tuple) else b""
+                if not raw:
+                    continue
+                msg_obj = email.message_from_bytes(raw)
+                body, body_type = get_email_body_with_type(msg_obj)
+                if body:
+                    logger.info(
+                        "IMAP 按 Message-Id 反查命中 mid=%s body_len=%d",
+                        internet_message_id[:80], len(body),
+                    )
+                    return body, body_type, "获取成功"
+            return None, "", "IMAP 未找到对应邮件"
+        except (imaplib.IMAP4.error, OSError) as exc:
+            logger.exception("IMAP fetch_body_by_message_id 异常")
+            return None, "", f"IMAP 错误: {exc}"
+        finally:
+            self.disconnect()
+
     def mark_as_read(self, email_id: str, folder: str, is_read: bool = True) -> Tuple[bool, str]:
         ok, msg = self.connect()
         if not ok:
