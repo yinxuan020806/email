@@ -94,10 +94,8 @@ body{font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif;background
 .pwd-cell .pwd-t{flex:1;overflow:hidden;text-overflow:ellipsis;font-family:'Consolas','Courier New',monospace}
 .pwd-cell button{border:none;background:transparent;color:var(--accent);cursor:pointer;font-size:11px;padding:2px 4px;white-space:nowrap}
 .email-cell{display:flex;align-items:center;gap:4px}
-.email-cell .email-t{flex:1;overflow:hidden;text-overflow:ellipsis;cursor:pointer;white-space:nowrap}
+.email-cell .email-t{flex:1;overflow:hidden;text-overflow:ellipsis;cursor:copy;white-space:nowrap;user-select:none}
 .email-cell .email-t:hover{color:var(--accent);text-decoration:underline}
-.email-cell .email-copy{border:none;background:transparent;color:var(--accent);cursor:pointer;font-size:11px;padding:2px 4px;white-space:nowrap;opacity:0;transition:.15s}
-.tbl tr:hover .email-cell .email-copy{opacity:1}
 .op-btns{display:flex;gap:4px}
 .op-btns button{padding:4px 10px;border-radius:4px;border:1px solid var(--border);background:var(--card);color:var(--text);font-size:11px;cursor:pointer;transition:.15s;white-space:nowrap}
 .op-btns button:hover{border-color:var(--accent);color:var(--accent)}

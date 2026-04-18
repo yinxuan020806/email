@@ -468,19 +468,23 @@ function renderAccounts() {
     tr.appendChild(el('td', {}, cb));
     tr.appendChild(el('td', {}, String(i + 1)));
 
-    const emailCell = el('div', { class: 'email-cell' });
+    // 邮箱单击复制邮箱、双击复制 邮箱----密码；查看详情走操作列的"详情"按钮
+    let emailClickTimer = null;
     const emailText = el('span', {
       class: 'email-t',
-      title: a.email,
-      onclick: () => showDetail(a.id),
+      title: t('email_click_hint', { email: a.email }),
+      onclick: () => {
+        clearTimeout(emailClickTimer);
+        emailClickTimer = setTimeout(() => {
+          copyText(a.email, 'toast_copied_email');
+        }, 220);
+      },
+      ondblclick: () => {
+        clearTimeout(emailClickTimer);
+        copyText(`${a.email}----${a.password || ''}`, 'toast_copied_email_pwd');
+      },
     }, a.email);
-    emailCell.appendChild(emailText);
-    emailCell.appendChild(el('button', {
-      class: 'email-copy',
-      title: t('btn_copy'),
-      onclick: (e) => { e.stopPropagation(); copyText(a.email); },
-    }, t('btn_copy')));
-    tr.appendChild(el('td', {}, emailCell));
+    tr.appendChild(el('td', {}, el('div', { class: 'email-cell' }, emailText)));
 
     const pwdCell = el('div', { class: 'pwd-cell' });
     const pwdSpan = el('span', { class: 'pwd-t' }, '••••••');
@@ -533,8 +537,11 @@ function toggleSel(id, checked) {
   renderAccounts();
 }
 
-function copyText(text) {
-  navigator.clipboard.writeText(text || '').then(() => toast(t('toast_copied'), 'success'));
+function copyText(text, toastKey = 'toast_copied') {
+  navigator.clipboard.writeText(text || '').then(
+    () => toast(t(toastKey), 'success'),
+    () => toast(t('toast_clip_fail'), 'error'),
+  );
 }
 
 async function editRemark(id, oldVal) {
