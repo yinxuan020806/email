@@ -811,18 +811,48 @@ const EMAIL_HEAD =
 
 const EMAIL_FOOT = '</body></html>';
 
-// 用 Blob URL 渲染长邮件（解决 srcdoc 在 10KB+ HTML 上的渲染失败问题）
+// 三层兜底渲染邮件正文：
+//   1. 优先 document.open/write/close（同 origin、无网络、无 srcdoc 长度限制）
+//   2. 失败 → Blob URL（绕过 srcdoc 大小限制）
+//   3. 都失败 → srcdoc（最朴素的方式）
+// iframe 必须有 sandbox="allow-same-origin"（但仍不带 allow-scripts）才能让前两种工作。
 function _setIframeContent(html) {
   const iframe = $('ecBody');
-  // 释放上一次的 Blob URL，避免内存泄漏
+
   if (iframe._blobUrl) {
     try { URL.revokeObjectURL(iframe._blobUrl); } catch {}
     iframe._blobUrl = null;
   }
-  const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  iframe._blobUrl = url;
-  iframe.src = url;
+
+  // 1. document.write — 同步，最稳
+  try {
+    // 必须先把 src/srcdoc 清掉，否则 contentDocument 可能是异步加载状态
+    iframe.removeAttribute('srcdoc');
+    iframe.removeAttribute('src');
+    const doc = iframe.contentDocument || iframe.contentWindow.document;
+    if (doc) {
+      doc.open();
+      doc.write(html);
+      doc.close();
+      return;
+    }
+  } catch (err) {
+    console.warn('[email] document.write 失败，回退 Blob URL:', err);
+  }
+
+  // 2. Blob URL
+  try {
+    const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    iframe._blobUrl = url;
+    iframe.src = url;
+    return;
+  } catch (err) {
+    console.warn('[email] Blob URL 失败，回退 srcdoc:', err);
+  }
+
+  // 3. srcdoc
+  iframe.srcdoc = html;
 }
 
 function renderEmailBody(body, bodyType) {
@@ -898,6 +928,12 @@ async function selectEmail(idx) {
     );
     // 用户已经切到下一封 → 丢弃本次结果
     if (S.currentEmail !== e) return;
+    console.log('[email body fetched]', {
+      success: r && r.success,
+      len: r && r.body ? r.body.length : 0,
+      type: r && r.body_type,
+      preview: r && r.body ? r.body.substring(0, 200) : '',
+    });
     if (r && r.success) {
       e._fullBody = { body: r.body || '', type: r.body_type || 'text' };
       renderEmailBody(e._fullBody.body, e._fullBody.type);
