@@ -65,35 +65,42 @@ cd /www/wwwroot/email && bash scripts/deploy.sh
 
 ---
 
-## 服务器侧首次"接入 git"流程
+## 服务器侧首次"接入 git"流程（一次性）
 
-> 已经按旧教程把代码 zip 上传到服务器、还没用过 git 的话，按这一步把它转成 git 仓库。  
-> **整个过程不会动 `data/` 和你已经填好的 `docker-compose.yml`**。
+仓库里已经准备好了自动化脚本 `scripts/server-bootstrap.sh`，它会：
+
+1. 生成专用 deploy key（仅对这一个仓库可读）
+2. 配置 SSH 走 `ssh.github.com:443` 端口（绕开国内 22 端口被墙）
+3. 暂停打印公钥，提示你把它加到 GitHub Deploy Keys
+4. 自动备份 `docker-compose.yml` 与 `data/`
+5. `git init` + remote + 强制对齐到 `origin/main`
+6. 用备份恢复你的真实 `docker-compose.yml`（不会丢现有 token / 端口配置）
+7. 调用 `scripts/deploy.sh` 完成首次构建 + 健康检查
+
+**鸡生蛋问题**：还没 git clone 怎么拿到这个脚本？两种办法：
+
+**办法一（推荐，不依赖网络）**：在宝塔终端贴下面这段「自包含 here-doc」，会把 bootstrap 脚本写到 `/tmp/` 并执行：
 
 ```bash
-cd /www/wwwroot/email
-
-# 1) 备份现有的 compose 与 data（保险起见）
-cp docker-compose.yml /root/docker-compose.yml.bak.$(date +%s)
-tar czf /root/email-data-backup-$(date +%Y%m%d).tgz data/
-
-# 2) 初始化 git 并拉远端
-git init
-git remote add origin git@github.com:<user>/<repo>.git    # 或 https://github.com/.../.git
-git fetch origin
-
-# 3) 强制对齐到远端 main 分支（保留 data/ 因为已 .gitignore）
-#    docker-compose.yml 在仓库里有版本——下面会用本地备份覆盖回 token 配置
-git checkout -f -B main origin/main
-
-# 4) 用备份恢复你的真实 token（仓库里那份只是模板）
-cp /root/docker-compose.yml.bak.* docker-compose.yml
-
-# 5) 跑一次部署
-bash scripts/deploy.sh
+# 见 docs/redeploy-quickstart.md → "服务器一次性 bootstrap" 章节，
+# 或直接让 AI 帮你贴
 ```
 
-之后每次更新就只剩 `git pull && bash scripts/deploy.sh`（或直接 `bash scripts/deploy.sh`，脚本内部会先 pull）。
+**办法二（私有仓库 + 一次性 PAT）**：
+
+```bash
+# 用一次性 GitHub Personal Access Token（仅 repo:read 权限即可）下载脚本
+TOKEN='ghp_xxxxxxxxxxxxxxxxxxxxxxxx'
+curl -fsSL -H "Authorization: token $TOKEN" \
+    https://raw.githubusercontent.com/yinxuan020806/email/main/scripts/server-bootstrap.sh \
+    -o /tmp/email-bootstrap.sh
+bash /tmp/email-bootstrap.sh
+# 跑完后撤销 PAT
+```
+
+跑完之后：
+- `scripts/server-bootstrap.sh` 这一脚本就再也用不上
+- 日常更新只剩：`cd /www/wwwroot/email && bash scripts/deploy.sh`
 
 ---
 

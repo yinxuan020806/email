@@ -15,6 +15,8 @@
   → Docker 容器 email-web（FastAPI + 静态前端 + SQLite 数据卷）
 ```
 
+> **日常更新看这里**：[`docs/redeploy-quickstart.md`](redeploy-quickstart.md) — git push 后只需在服务器跑 `bash scripts/deploy.sh`。
+
 - **公网入口域名（示例）**：`https://mail.<你的域名>`（本次为 `mail.evuzdnd.cn`）。
 - **服务器无需备案即可 HTTPS**：流量经 Cloudflare，不依赖国内 ICP 备案的 80/443。
 - **宝塔面板**：仅用于上传文件、终端、计划任务；应用本身不依赖 Nginx 站点。
@@ -40,10 +42,12 @@
 
 - **镜像构建**：仓库自带 `Dockerfile` + `docker-compose.yml`。
 - **端口**：`127.0.0.1:8000:8000`（只监听本机，由 Tunnel 访问，勿把 8000 直接暴露公网）。
-- **环境变量**：
+- **环境变量**（v3.0 起改为账密登录，原 `EMAIL_WEB_TOKEN` 共享 token 已废弃）：
   - `EMAIL_WEB_HOST=0.0.0.0`、`EMAIL_WEB_PORT=8000`
-  - `EMAIL_WEB_TOKEN`：**强随机字符串**（`openssl rand -hex 32`），设置后所有 `/api/*` 需 `Authorization: Bearer <token>`。
-  - `EMAIL_DATA_DIR`：容器内默认 `/data`，与卷 `./data:/data` 对应。
+  - `EMAIL_WEB_DISABLE_REGISTER=1`：注册自己账号后建议设上，禁止陌生人再注册
+  - `EMAIL_WEB_COOKIE_TTL=604800`：会话 cookie 有效期（秒），可选
+  - `EMAIL_DATA_DIR`：容器内默认 `/data`，与卷 `./data:/data` 对应
+  - 旧服务器若仍带 `EMAIL_WEB_TOKEN` 也无害，新代码会忽略它
 - **国内构建加速（可选）**：在 `Dockerfile` 里为 `pip install` 增加清华源，例如：
   - `RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt`
 - **权限坑（重要）**：容器内进程用户为 **uid 10001**。若宿主机 `data/` 为 root 且 `chmod 700`，容器会无法写入 `.master.key`。修复：
@@ -74,7 +78,7 @@
 
 ### 5.1 必须做
 
-- [ ] **轮换 `EMAIL_WEB_TOKEN`**：部署过程若出现在聊天/截图中，应在服务器上重新生成并 `docker compose up -d`。
+- [ ] **应用账号密码**：用强密码（≥12 位混合）；首批账号建好后设 `EMAIL_WEB_DISABLE_REGISTER=1` 并 `docker compose up -d` 关闭注册。
 - [ ] **备份**：定期备份 **`data/.master.key` + `data/emails.db`**（两者必须成对；缺任一无法解密）。
 - [ ] **腾讯云防火墙**：至少放行 SSH + 宝塔端口；**不必**为应用单独开放 8000（经 Tunnel 访问）。
 
@@ -88,16 +92,19 @@
 
 ## 6. 重新部署时可复用的命令模板（在服务器上执行）
 
+> 已经做过 `scripts/server-bootstrap.sh` 接管的话，更新只剩一行：
+>
+> ```bash
+> cd /www/wwwroot/email && bash scripts/deploy.sh
+> ```
+
+如果是从零开始（换机/重装）：
+
 ```bash
 # 进入项目
 cd /www/wwwroot/email
 
-# 生成新 Token 并写入 compose（按你编辑器方式改也行）
-NEW=$(openssl rand -hex 32)
-sed -i "s|EMAIL_WEB_TOKEN: \".*\"|EMAIL_WEB_TOKEN: \"$NEW\"|" docker-compose.yml
-echo "请保存新 Token: $NEW"
-
-# 数据目录权限（首次或换机后）
+# 数据目录权限（首次或换机后；容器内 uid=10001）
 mkdir -p data
 chown -R 10001:10001 data
 
@@ -146,10 +153,11 @@ curl -s http://127.0.0.1:8000/api/health
 
 单独保存在密码管理器或加密笔记中：
 
-- 当前 **`EMAIL_WEB_TOKEN`**（轮换后的值）
+- 应用层 **登录用户名 / 密码**（v3.0 起为账密登录）
 - Cloudflare **`cloudflared service install`** 完整命令或 token
 - 宝塔面板地址、用户名、密码（若使用）
 - SSH 端口与密钥说明
+- GitHub Deploy Key 私钥位置（默认 `/root/.ssh/email_deploy`）
 
 ---
 
