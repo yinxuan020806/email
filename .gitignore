@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# 用户数据 - 包含真实邮箱密码与主密钥
+data/
+*.db
+*.db-wal
+*.db-shm
+.master.key
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.windsurfrules
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Virtual Environment
+venv/
+.venv/
+.env
+
+# 日志
+*.log
+logs/
+
+# Playwright / 测试残留
+.playwright-mcp/
+test-*.png
+
+# 部署过程产物（截图、临时上传包）
+*.zip
+*.tar.gz
+/app-*.png
+/baota-*.png
+/cf-*.png
+/page*.png
+/step*.png
+/xterm-*.png
+
+# Cursor / AI 工具元数据（保留 .cursor/rules，因为它是项目规范）
+.cursor/projects/
+mcps/
+agent-transcripts/
+terminals/

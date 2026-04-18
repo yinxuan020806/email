@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title data-i18n="app_title">邮箱管家</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body data-theme="light">
+<div class="app">
+  <aside class="sb" id="sidebar">
+    <div class="sb-logo"><span>📧</span><span data-i18n="app_title">邮箱管家</span></div>
+    <div class="sb-line"></div>
+    <button class="nav-btn active" id="navAll" data-view="table" data-group="全部" data-i18n="nav_all">📋 全部邮箱</button>
+    <div class="sb-sec">
+      <div class="sb-sec-h"><span data-i18n="nav_groups">分组</span><button id="addGroupBtn" title="+">+</button></div>
+      <div class="grp-list" id="groupList"></div>
+    </div>
+    <div class="sb-space"></div>
+    <button class="nav-btn" id="navOauth" data-view="oauth" data-i18n="nav_oauth">🗝 手动授权</button>
+    <button class="nav-btn" id="navDash" data-view="dashboard" data-i18n="nav_dash">📈 仪表盘</button>
+    <button class="nav-btn" id="navSettings" data-view="settings" data-i18n="nav_settings">⚙ 设置</button>
+    <div class="sb-user" id="sbUser">
+      <span class="sb-user-icon">👤</span>
+      <span class="sb-user-name" id="sbUserName">-</span>
+    </div>
+    <button class="sb-logout-btn" id="logoutBtn">
+      <span class="sb-logout-ico">⎋</span>
+      <span data-i18n="btn_logout">退出登录</span>
+    </button>
+    <div class="sb-bottom">
+      <button class="icon-btn" id="themeBtn" title="theme">☀️</button>
+      <button class="lang-btn" id="langBtn" data-i18n="btn_lang">中/EN</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="toolbar" id="toolbarArea">
+      <div><h2 id="pageTitle" data-i18n="page_title_default">邮箱管理</h2><div class="sub" id="pageSub" data-i18n="page_sub_default">管理您的所有邮箱账号</div></div>
+      <div class="toolbar-r" id="toolbarRight">
+        <input class="search-inp" id="searchInp" data-i18n-ph="search_placeholder" placeholder="搜索邮箱地址...">
+      </div>
+    </div>
+    <div class="action-bar" id="actionBar">
+      <button class="btn btn-p" id="btnImport" data-i18n="btn_import">导入邮箱</button>
+      <button class="btn btn-o" id="btnExport" data-i18n="btn_export">导出备份</button>
+      <button class="btn btn-o" id="btnMove" data-i18n="btn_move">移动分组</button>
+      <button class="btn btn-s" id="btnBatchCheck" data-i18n="btn_batch_check">批量检测</button>
+      <button class="btn btn-w" id="btnBatchSend" data-i18n="btn_batch_send">批量发信</button>
+      <button class="btn btn-d" id="btnDelete" data-i18n="btn_delete">批量删除</button>
+      <span class="rec-cnt" id="recCnt"></span>
+    </div>
+    <div class="content" id="contentArea">
+      <div id="tableView">
+        <table class="tbl" id="accTbl"><thead><tr>
+          <th style="width:40px"><input type="checkbox" id="selAll"></th>
+          <th style="width:50px" data-i18n="col_index">序号</th>
+          <th data-i18n="col_email">邮箱地址</th>
+          <th data-i18n="col_password">密码</th>
+          <th data-i18n="col_group">分组</th>
+          <th style="width:80px" data-i18n="col_status">状态</th>
+          <th style="width:60px" data-i18n="col_type">类型</th>
+          <th style="width:50px" data-i18n="col_aws">AWS</th>
+          <th data-i18n="col_remark">备注</th>
+          <th style="width:160px" data-i18n="col_op">操作</th>
+        </tr></thead><tbody id="accBody"></tbody></table>
+      </div>
+      <div id="dashView" style="display:none"></div>
+      <div id="settingsView" style="display:none"></div>
+      <div id="oauthView" style="display:none"></div>
+    </div>
+  </main>
+</div>
+
+<!-- Auth (Login / Register) Modal -->
+<div class="modal-bg" id="authModal"><div class="modal auth-modal" style="width:400px">
+  <div class="auth-brand">
+    <div class="auth-logo">📧</div>
+    <h3 class="auth-title" data-i18n="app_title">邮箱管家</h3>
+    <p class="auth-sub" id="authSub" data-i18n="auth_sub_login">登录到您的账号</p>
+  </div>
+  <div class="auth-tabs">
+    <button class="auth-tab active" id="tabLogin" data-mode="login" data-i18n="auth_tab_login">登录</button>
+    <button class="auth-tab" id="tabRegister" data-mode="register" data-i18n="auth_tab_register">注册</button>
+  </div>
+  <div class="modal-body">
+    <div class="form-group">
+      <label data-i18n="auth_username">用户名</label>
+      <input id="authUsername" type="text" autocomplete="username" maxlength="32" autofocus>
+    </div>
+    <div class="form-group">
+      <label data-i18n="auth_password">密码</label>
+      <input id="authPassword" type="password" autocomplete="current-password" maxlength="128">
+    </div>
+    <div class="form-group" id="authPassword2Group" style="display:none">
+      <label data-i18n="auth_password2">确认密码</label>
+      <input id="authPassword2" type="password" autocomplete="new-password" maxlength="128">
+    </div>
+    <div id="authErr" style="font-size:12px;color:var(--danger);min-height:16px"></div>
+  </div>
+  <div class="modal-foot" style="justify-content:center">
+    <button class="btn btn-p" id="authSubmit" style="width:100%" data-i18n="auth_btn_login">登录</button>
+  </div>
+</div></div>
+
+<!-- Import Modal -->
+<div class="modal-bg" id="importModal"><div class="modal">
+  <div class="modal-h"><h3 data-i18n="modal_import_title">导入邮箱账号</h3><button class="modal-close" data-close="importModal">×</button></div>
+  <div class="modal-body">
+    <p style="font-size:13px;color:var(--text2);margin-bottom:12px" data-i18n="modal_import_hint">格式：每行一个 邮箱----密码</p>
+    <div class="form-group"><textarea id="importText" rows="8" placeholder="example@outlook.com----password123"></textarea></div>
+    <div class="form-row">
+      <div class="form-group"><label data-i18n="modal_import_group">导入到分组</label><select id="importGroup"></select></div>
+      <div class="form-group" style="display:flex;align-items:flex-end;padding-bottom:0">
+        <label class="form-check"><input type="checkbox" id="importDedup" checked> <span data-i18n="modal_import_dedup">跳过已存在（去重）</span></label>
+      </div>
+    </div>
+  </div>
+  <div class="modal-foot">
+    <button class="btn btn-o" id="btnImportClipboard" data-i18n="btn_clipboard">从剪贴板</button>
+    <button class="btn btn-o" data-close="importModal" data-i18n="btn_cancel">取消</button>
+    <button class="btn btn-p" id="btnDoImport" data-i18n="btn_import">导入</button>
+  </div>
+</div></div>
+
+<!-- Email View Modal -->
+<div class="modal-bg" id="emailModal"><div class="modal modal-lg">
+  <div class="modal-h"><h3 id="emailModalTitle" data-i18n="modal_email_title">邮件</h3><button class="modal-close" data-close="emailModal">×</button></div>
+  <div class="modal-body" style="padding:0">
+    <div class="email-layout">
+      <div class="email-sidebar">
+        <div class="email-toolbar">
+          <div style="display:flex;gap:6px">
+            <select id="emailFolder" style="flex:1;padding:6px 10px;border:1px solid var(--inp-bd);border-radius:4px;background:var(--inp-bg);color:var(--text);font-size:12px">
+              <option value="inbox" data-i18n="folder_inbox">收件箱</option>
+              <option value="junk" data-i18n="folder_junk">垃圾邮件</option>
+              <option value="sent" data-i18n="folder_sent">已发送</option>
+              <option value="drafts" data-i18n="folder_drafts">草稿箱</option>
+              <option value="deleted" data-i18n="folder_deleted">已删除</option>
+            </select>
+            <button class="btn btn-o" id="btnRefreshEmails" style="padding:6px 10px;font-size:11px" data-i18n="btn_refresh">刷新</button>
+          </div>
+          <input class="search-inp" id="emailSearch" data-i18n-ph="email_search" placeholder="搜索邮件..." style="width:100%;padding:6px 10px;font-size:12px">
+          <div class="email-toolbar-r">
+            <button class="btn btn-p" id="btnCompose" data-i18n="btn_compose">写邮件</button>
+            <button class="btn btn-o" id="btnReply" disabled data-i18n="btn_reply">回复</button>
+            <button class="btn btn-o" id="btnDelEmail" disabled data-i18n="btn_del">删除</button>
+          </div>
+        </div>
+        <div class="email-list" id="emailList"><div class="empty-state" data-i18n="email_select_acc">选择账号查看邮件</div></div>
+      </div>
+      <div class="email-content">
+        <h3 id="ecSubject" data-i18n="email_select_hint">选择一封邮件查看</h3>
+        <div class="ec-info" id="ecInfo"></div>
+        <iframe id="ecBody" class="ec-body" sandbox="allow-popups allow-popups-to-escape-sandbox" title="email" srcdoc="&nbsp;"></iframe>
+      </div>
+    </div>
+  </div>
+</div></div>
+
+<!-- Compose Modal -->
+<div class="modal-bg" id="composeModal"><div class="modal">
+  <div class="modal-h"><h3 id="composeTitle" data-i18n="modal_compose_title">写邮件</h3><button class="modal-close" data-close="composeModal">×</button></div>
+  <div class="modal-body">
+    <div class="form-group"><label data-i18n="compose_from">发件人</label><input id="compFrom" readonly style="background:var(--hover)"></div>
+    <div class="form-group"><label data-i18n="compose_to">收件人</label><input id="compTo" data-i18n-ph="compose_to_hint" placeholder="多个用逗号分隔"></div>
+    <div class="form-group"><label data-i18n="compose_cc">抄送</label><input id="compCc" data-i18n-ph="compose_cc_hint" placeholder="可选"></div>
+    <div class="form-group"><label data-i18n="compose_subject">主题</label><input id="compSubject"></div>
+    <div class="form-group"><label data-i18n="compose_body">正文</label><textarea id="compBody" rows="8"></textarea></div>
+    <div id="compStatus" style="font-size:12px;color:var(--text2)"></div>
+  </div>
+  <div class="modal-foot">
+    <button class="btn btn-o" data-close="composeModal" data-i18n="btn_cancel">取消</button>
+    <button class="btn btn-p" id="btnDoSend" data-i18n="btn_send">发送</button>
+  </div>
+</div></div>
+
+<!-- Batch Send Modal -->
+<div class="modal-bg" id="batchSendModal"><div class="modal">
+  <div class="modal-h"><h3 id="batchSendTitle" data-i18n="modal_batch_send_title">批量发送邮件</h3><button class="modal-close" data-close="batchSendModal">×</button></div>
+  <div class="modal-body">
+    <p style="font-size:13px;color:var(--text2);margin-bottom:12px" id="batchSendInfo"></p>
+    <div class="form-group"><label data-i18n="compose_to">收件人</label><input id="bsTo" data-i18n-ph="batch_to_hint" placeholder="所有账号将发送到此地址"></div>
+    <div class="form-group"><label data-i18n="compose_subject">主题</label><input id="bsSubject"></div>
+    <div class="form-group"><label data-i18n="compose_body">正文</label><textarea id="bsBody" rows="6"></textarea></div>
+    <div class="progress-bar" id="bsProgress" style="display:none"><div class="progress-fill" id="bsProgressFill"></div></div>
+    <div class="progress-log" id="bsLog" style="display:none"></div>
+  </div>
+  <div class="modal-foot">
+    <button class="btn btn-o" data-close="batchSendModal" data-i18n="btn_close">关闭</button>
+    <button class="btn btn-p" id="btnDoBatchSend" data-i18n="btn_send">发送</button>
+  </div>
+</div></div>
+
+<!-- Batch Check Modal -->
+<div class="modal-bg" id="batchCheckModal"><div class="modal">
+  <div class="modal-h"><h3 data-i18n="modal_batch_check_title">批量检测</h3><button class="modal-close" data-close="batchCheckModal">×</button></div>
+  <div class="modal-body">
+    <p style="font-size:13px;color:var(--text2)" id="bcInfo" data-i18n="batch_checking">正在检测...</p>
+    <div class="progress-bar"><div class="progress-fill" id="bcProgressFill"></div></div>
+    <div id="bcStatus" style="font-size:13px;margin:8px 0"></div>
+    <div class="progress-log" id="bcLog"></div>
+  </div>
+  <div class="modal-foot">
+    <button class="btn btn-p" id="bcDoneBtn" data-close="batchCheckModal" style="display:none" data-i18n="btn_confirm">完成</button>
+  </div>
+</div></div>
+
+<!-- Detail Modal -->
+<div class="modal-bg" id="detailModal"><div class="modal">
+  <div class="modal-h"><h3 data-i18n="modal_detail_title">账号详情</h3><button class="modal-close" data-close="detailModal">×</button></div>
+  <div class="modal-body" id="detailBody"></div>
+  <div class="modal-foot">
+    <button class="btn btn-o" id="btnCopyDetail" data-i18n="btn_copy_all">复制全部</button>
+    <button class="btn btn-p" data-close="detailModal" data-i18n="btn_close">关闭</button>
+  </div>
+</div></div>
+
+<!-- Move Group Modal -->
+<div class="modal-bg" id="moveModal"><div class="modal" style="width:380px">
+  <div class="modal-h"><h3 data-i18n="modal_move_title">移动分组</h3><button class="modal-close" data-close="moveModal">×</button></div>
+  <div class="modal-body">
+    <div class="form-group"><label data-i18n="move_to">移动到</label><select id="moveGroupSel"></select></div>
+  </div>
+  <div class="modal-foot">
+    <button class="btn btn-o" data-close="moveModal" data-i18n="btn_cancel">取消</button>
+    <button class="btn btn-p" id="btnDoMove" data-i18n="btn_confirm">确定</button>
+  </div>
+</div></div>
+
+<div class="ctx-menu" id="ctxMenu" style="display:none"></div>
+<div class="toast-box" id="toastBox"></div>
+
+<script src="/static/i18n.js"></script>
+<script src="/static/app.js" defer></script>
+</body>
+</html>

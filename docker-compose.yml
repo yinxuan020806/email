@@ -1,0 +1,26 @@
+services:
+  email-web:
+    build: .
+    image: email-web:latest
+    container_name: email-web
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"   # 默认仅本机访问；如要内网访问改成 "8000:8000"
+    volumes:
+      - ./data:/data            # 持久化数据库与主密钥（请妥善备份）
+    environment:
+      EMAIL_WEB_HOST: 0.0.0.0
+      EMAIL_WEB_PORT: 8000
+      EMAIL_WEB_LOG_LEVEL: INFO
+      # ── 多用户登录 ─────────────────────────────────
+      # 自 v3.0 起改为账密登录，没有共享 Token 概念。首次访问页面自助注册账号。
+      # 注册并创建好需要的账号后，强烈建议关闭注册（避免陌生人注册抢资源）：
+      # EMAIL_WEB_DISABLE_REGISTER: "1"
+      # 会话 cookie 有效期（秒），默认 7 天
+      # EMAIL_WEB_COOKIE_TTL: "604800"
+      # ── HTTPS（推荐由 nginx/caddy/Cloudflare Tunnel 反代时省略）──
+      # EMAIL_WEB_SSL_KEY:  /data/server.key
+      # EMAIL_WEB_SSL_CERT: /data/server.crt
+      # ── OAuth 自托管 ───────────────────────────────
+      # EMAIL_OAUTH_CLIENT_ID: "your-azure-app-client-id"
+      # EMAIL_OAUTH_REDIRECT_URI: "https://your.domain/oauth/callback"
