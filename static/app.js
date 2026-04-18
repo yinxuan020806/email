@@ -733,7 +733,8 @@ function viewEmails(accountId) {
   $('emailFolder').value = 'inbox';
   $('ecSubject').textContent = t('email_select_hint');
   $('ecInfo').textContent = '';
-  $('ecBody').srcdoc = '&nbsp;';
+  $('ecBody').srcdoc = EMAIL_HEAD
+    + `<div style="color:#8e8e93;padding:24px;text-align:center;font-size:13px">${t('email_select_hint')}</div>`;
   $('btnReply').disabled = true;
   $('btnDelEmail').disabled = true;
   openModal('emailModal');
@@ -791,32 +792,52 @@ function renderEmailList() {
   });
 }
 
+const EMAIL_HEAD =
+  '<base target="_blank"><meta charset="utf-8">'
+  + '<style>html,body{height:100%}'
+  + 'body{font-family:Segoe UI,Microsoft YaHei UI,sans-serif;'
+  + 'font-size:13px;padding:12px;margin:0;color:#1d1d1f;background:#fff;'
+  + 'word-wrap:break-word;overflow-wrap:break-word;line-height:1.6}'
+  + 'pre{white-space:pre-wrap;margin:0;font-family:inherit}'
+  + 'img{max-width:100%;height:auto}'
+  + 'a{color:#0078d4}'
+  + 'table{max-width:100%;border-collapse:collapse}'
+  + '</style>';
+
 function renderEmailBody(body, bodyType) {
-  // 在 sandbox iframe 中渲染邮件正文，杜绝 XSS；自动按 body_type 处理 html/text。
-  const head = '<base target="_blank"><meta charset="utf-8">'
-    + '<style>body{font-family:Segoe UI,Microsoft YaHei UI,sans-serif;'
-    + 'font-size:13px;padding:12px;margin:0;color:#1d1d1f;background:#fff;'
-    + 'word-wrap:break-word;overflow-wrap:break-word}'
-    + 'pre{white-space:pre-wrap;margin:0;font-family:inherit}'
-    + 'img{max-width:100%;height:auto}</style>';
   const iframe = $('ecBody');
   if (!body) {
-    iframe.srcdoc = head + `<div style="color:#8e8e93;padding:16px;text-align:center">${t('email_body_empty')}</div>`;
+    iframe.srcdoc = EMAIL_HEAD
+      + `<div style="color:#8e8e93;padding:24px;text-align:center;font-size:13px">${t('email_body_empty')}</div>`;
     return;
   }
   // 显式 body_type 优先；缺省时回退到内容启发式判断
   const isHtml = bodyType
-    ? bodyType === 'html'
-    : /<html|<body|<div|<a\s|<p\s|<br/i.test(body);
+    ? String(bodyType).toLowerCase() === 'html'
+    : /<html|<body|<div|<a\s|<p\s|<br|<table/i.test(body);
   if (isHtml) {
-    iframe.srcdoc = head + body;
+    iframe.srcdoc = EMAIL_HEAD + body;
   } else {
     const escaped = body
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
-    iframe.srcdoc = head + `<pre>${escaped}</pre>`;
+    iframe.srcdoc = EMAIL_HEAD + `<pre>${escaped}</pre>`;
   }
+}
+
+function renderEmailLoading() {
+  $('ecBody').srcdoc = EMAIL_HEAD
+    + `<div style="color:#8e8e93;padding:24px;text-align:center">⏳ ${t('email_loading')}</div>`;
+}
+
+function renderEmailError(msg) {
+  const escaped = String(msg || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  $('ecBody').srcdoc = EMAIL_HEAD
+    + '<div style="color:#c62828;padding:24px;font-size:13px">'
+    + `<div style="margin-bottom:8px">⚠️ ${t('email_load_fail')}</div>`
+    + `<div style="color:#8e8e93;font-family:Consolas,monospace;font-size:12px">${escaped}</div>`
+    + '</div>';
 }
 
 async function selectEmail(idx) {
@@ -826,46 +847,51 @@ async function selectEmail(idx) {
   $('ecSubject').textContent = e.subject || '(no subject)';
   const d = e.date ? new Date(e.date) : null;
   $('ecInfo').textContent = `${t('compose_from')}: ${e.sender || ''}\n${t('d_created')}: ${d ? d.toLocaleString() : ''}`;
-
-  // 1. 立即用列表里的 body 渲染（即使是空）
-  renderEmailBody(e.body || '', e.body_type);
-
   $('btnReply').disabled = false;
   $('btnDelEmail').disabled = false;
 
-  // 2. 列表 body 为空时，再异步去拿完整正文（按需拉取）
-  const account = S.emailAccount;
-  if (account && (!e.body || e.body.length < 50) && e.uid) {
-    try {
-      $('ecBody').srcdoc = '<base target="_blank"><meta charset="utf-8">'
-        + `<div style="color:#8e8e93;padding:16px;text-align:center">${t('email_loading')}</div>`;
-      const folder = $('emailFolder').value;
-      const r = await api.get(
-        `/api/accounts/${account.id}/emails/body?email_id=${encodeURIComponent(e.uid)}&folder=${folder}`
-      );
-      // 用户可能同时切到了别的邮件
-      if (S.currentEmail !== e) return;
-      if (r && r.success && r.body) {
-        e.body = r.body;
-        e.body_type = r.body_type || 'text';
-        renderEmailBody(e.body, e.body_type);
-      } else {
-        renderEmailBody(e.body || '', e.body_type);
-      }
-    } catch (err) {
-      if (S.currentEmail === e) {
-        renderEmailBody(e.body || '', e.body_type);
-      }
-    }
+  // 缓存命中：直接渲染
+  if (e._fullBody) {
+    renderEmailBody(e._fullBody.body, e._fullBody.type);
+    maybeMarkRead(e);
+    return;
   }
 
-  if (!e.is_read) {
-    e.is_read = true;
-    renderEmailList();
-    api.post(`/api/accounts/${S.emailAccount.id}/emails/mark-read`, {
-      email_id: e.uid, folder: $('emailFolder').value, is_read: true
-    }).catch(() => {});
-  } else { renderEmailList(); }
+  // 没缓存 → 显示加载中，异步拉完整正文
+  renderEmailLoading();
+  const account = S.emailAccount;
+  if (!account || !e.uid) {
+    renderEmailBody('', 'text');
+    return;
+  }
+  const folder = $('emailFolder').value;
+  try {
+    const r = await api.get(
+      `/api/accounts/${account.id}/emails/body?email_id=${encodeURIComponent(e.uid)}&folder=${folder}`
+    );
+    // 用户已经切到下一封 → 丢弃本次结果
+    if (S.currentEmail !== e) return;
+    if (r && r.success) {
+      e._fullBody = { body: r.body || '', type: r.body_type || 'text' };
+      renderEmailBody(e._fullBody.body, e._fullBody.type);
+    } else {
+      renderEmailError(r && r.message ? r.message : t('email_load_fail'));
+    }
+  } catch (err) {
+    if (S.currentEmail === e) {
+      renderEmailError((err && err.message) || t('email_load_fail'));
+    }
+  }
+  maybeMarkRead(e);
+}
+
+function maybeMarkRead(e) {
+  if (e.is_read || !S.emailAccount) return;
+  e.is_read = true;
+  renderEmailList();
+  api.post(`/api/accounts/${S.emailAccount.id}/emails/mark-read`, {
+    email_id: e.uid, folder: $('emailFolder').value, is_read: true,
+  }).catch(() => {});
 }
 
 // ───────── Compose ─────────

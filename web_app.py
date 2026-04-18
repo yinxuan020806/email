@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -28,6 +29,7 @@ import sys
 import urllib.parse
 from typing import List, Optional
 
+import anyio
 import certifi
 import requests as req_lib
 from fastapi import (
@@ -104,6 +106,10 @@ DISABLE_REGISTER = os.getenv("EMAIL_WEB_DISABLE_REGISTER", "").strip() in {"1", 
 
 # SPA 路由前缀：未匹配到 /api、/static 时如果是这些路径，返回 index.html
 SPA_PATHS = {"/login", "/register", "/dashboard", "/settings", "/oauth"}
+
+# 批量检测/发送的并发数（IMAP/SMTP 是 IO 密集型，并发能显著提速）
+BATCH_CHECK_CONCURRENCY = max(1, int(os.getenv("EMAIL_BATCH_CHECK_CONCURRENCY", "8")))
+BATCH_SEND_CONCURRENCY = max(1, int(os.getenv("EMAIL_BATCH_SEND_CONCURRENCY", "4")))
 
 
 def _client_ip(request: Request) -> str:
@@ -871,8 +877,15 @@ def get_emails(
     account_id: int,
     folder: str = Query("inbox", pattern="^(inbox|junk|sent|drafts|deleted)$"),
     limit: int = Query(50, ge=1, le=200),
+    with_body: bool = Query(False),
     user: dict = CurrentUser,
 ) -> dict:
+    """获取邮件列表。
+
+    默认 ``with_body=False`` — 列表里 ``body`` 字段被清空，仅保留
+    ``preview``（前 200 字符）。点击单封时由 ``/emails/body`` 按需拉取完整正文。
+    这样列表加载快得多（节省 90% 左右带宽），刷新体验丝滑。
+    """
     acc = get_account_or_404(user["id"], account_id)
     client = create_client(user["id"], acc)
     try:
@@ -882,6 +895,11 @@ def get_emails(
     for e in emails:
         if e.get("date"):
             e["date"] = e["date"].isoformat()
+        if not with_body:
+            full_body = e.get("body") or ""
+            if not e.get("preview"):
+                e["preview"] = full_body[:200]
+            e["body"] = ""
     return {"emails": emails, "message": msg}
 
 
@@ -969,45 +987,90 @@ def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-@app.post("/api/batch/check")
-def batch_check(req: BatchCheckRequest, user: dict = CurrentUser) -> StreamingResponse:
-    owner_id = user["id"]
-
-    def generate():
-        total = len(req.account_ids)
-        sc = fc = 0
-        for i, aid in enumerate(req.account_ids):
-            acc = db.get_account(owner_id, aid)
-            if not acc:
-                fc += 1
-                yield _sse({
-                    "type": "progress", "current": i + 1, "total": total,
-                    "email": "?", "status": "异常",
-                })
-                continue
-            client = create_client(owner_id, acc)
-            has_aws = False
-            status_str = "异常"
+def _check_one_sync(owner_id: int, aid: int) -> dict:
+    """检测单个账号（IO 同步）— 在线程池中运行。"""
+    acc = db.get_account(owner_id, aid)
+    if not acc:
+        return {"email": "?", "status": "异常", "has_aws": False, "found": False}
+    client = create_client(owner_id, acc)
+    has_aws = False
+    status_str = "异常"
+    try:
+        try:
+            status_str, _ = client.check_status()
+        except Exception:
+            logger.exception("check_status 异常 acc=%s", aid)
+        try:
+            db.update_account_status(owner_id, aid, status_str)
+        except Exception:
+            logger.exception("update_account_status 异常 acc=%s", aid)
+        if status_str == "正常":
             try:
-                try:
-                    status_str, _ = client.check_status()
-                except Exception:
-                    logger.exception("check_status 异常 acc=%s", aid)
-                db.update_account_status(owner_id, aid, status_str)
-                if status_str == "正常":
-                    sc += 1
-                    try:
-                        has_aws, _ = client.check_aws_verification_emails(limit=30)
-                        db.update_aws_code_status(owner_id, aid, has_aws)
-                    except Exception:
-                        logger.exception("AWS 检测异常 acc=%s", aid)
-                else:
-                    fc += 1
-            finally:
-                client.disconnect()
+                has_aws, _ = client.check_aws_verification_emails(limit=30)
+                db.update_aws_code_status(owner_id, aid, has_aws)
+            except Exception:
+                logger.exception("AWS 检测异常 acc=%s", aid)
+    finally:
+        try:
+            client.disconnect()
+        except Exception:
+            pass
+    return {"email": acc.email, "status": status_str, "has_aws": has_aws, "found": True}
+
+
+def _send_one_sync(owner_id: int, aid: int, to: str, subject: str, body: str) -> dict:
+    """单账号发信（IO 同步）— 在线程池中运行。"""
+    acc = db.get_account(owner_id, aid)
+    if not acc:
+        return {"email": "?", "success": False, "message": "Not found"}
+    client = create_client(owner_id, acc)
+    try:
+        ok, msg = client.send_email(to, subject, body)
+    except Exception as exc:
+        logger.exception("send_email 异常 acc=%s", aid)
+        ok, msg = False, f"异常: {exc}"
+    finally:
+        try:
+            client.disconnect()
+        except Exception:
+            pass
+    return {"email": acc.email, "success": ok, "message": msg}
+
+
+@app.post("/api/batch/check")
+async def batch_check(
+    req: BatchCheckRequest, user: dict = CurrentUser
+) -> StreamingResponse:
+    """并发检测多个账号，结果按完成顺序流式推送。
+
+    - 并发数由 ``EMAIL_BATCH_CHECK_CONCURRENCY`` 环境变量控制（默认 8）
+    - 用 anyio 的线程池包裹同步 IMAP/Graph 调用
+    - 完成顺序与传入顺序无关；前端用 ``current`` 字段跟踪进度
+    """
+    owner_id = user["id"]
+    total = len(req.account_ids)
+    sem = asyncio.Semaphore(BATCH_CHECK_CONCURRENCY)
+
+    async def run_one(aid: int) -> dict:
+        async with sem:
+            return await anyio.to_thread.run_sync(_check_one_sync, owner_id, aid)
+
+    async def generate():
+        sc = fc = 0
+        tasks = [asyncio.create_task(run_one(aid)) for aid in req.account_ids]
+        completed = 0
+        for fut in asyncio.as_completed(tasks):
+            r = await fut
+            completed += 1
+            if r.get("status") == "正常":
+                sc += 1
+            else:
+                fc += 1
             yield _sse({
-                "type": "progress", "current": i + 1, "total": total,
-                "email": acc.email, "status": status_str, "has_aws": has_aws,
+                "type": "progress", "current": completed, "total": total,
+                "email": r.get("email", "?"),
+                "status": r.get("status", "异常"),
+                "has_aws": r.get("has_aws", False),
             })
         yield _sse({"type": "done", "success": sc, "fail": fc})
 
@@ -1015,41 +1078,48 @@ def batch_check(req: BatchCheckRequest, user: dict = CurrentUser) -> StreamingRe
 
 
 @app.post("/api/batch/send")
-def batch_send(
+async def batch_send(
     req: BatchSendRequest, request: Request, user: dict = CurrentUser
 ) -> StreamingResponse:
+    """并发批量发信。
+
+    并发度低于 batch_check（默认 4），因为大多数 SMTP 服务商对
+    同 IP 高频发送有节流策略，过高并发反而会触发限流/被封号。
+    """
     owner_id = user["id"]
     ip = _client_ip(request)
     ua = request.headers.get("user-agent", "")
+    total = len(req.account_ids)
+    sem = asyncio.Semaphore(BATCH_SEND_CONCURRENCY)
 
     db.log_audit(
         "batch_send_start", user_id=owner_id, username=user["username"],
         ip=ip, user_agent=ua, target=req.to[:100],
-        detail=f"accounts={len(req.account_ids)}",
+        detail=f"accounts={total},concurrency={BATCH_SEND_CONCURRENCY}",
     )
 
-    def generate():
-        total = len(req.account_ids)
+    async def run_one(aid: int) -> dict:
+        async with sem:
+            return await anyio.to_thread.run_sync(
+                _send_one_sync, owner_id, aid, req.to, req.subject, req.body,
+            )
+
+    async def generate():
         sc = fc = 0
-        for i, aid in enumerate(req.account_ids):
-            acc = db.get_account(owner_id, aid)
-            if not acc:
+        tasks = [asyncio.create_task(run_one(aid)) for aid in req.account_ids]
+        completed = 0
+        for fut in asyncio.as_completed(tasks):
+            r = await fut
+            completed += 1
+            if r.get("success"):
+                sc += 1
+            else:
                 fc += 1
-                yield _sse({
-                    "type": "progress", "current": i + 1, "total": total,
-                    "email": "?", "success": False, "message": "Not found",
-                })
-                continue
-            client = create_client(owner_id, acc)
-            try:
-                ok, msg = client.send_email(req.to, req.subject, req.body)
-            finally:
-                client.disconnect()
-            sc += 1 if ok else 0
-            fc += 0 if ok else 1
             yield _sse({
-                "type": "progress", "current": i + 1, "total": total,
-                "email": acc.email, "success": ok, "message": msg,
+                "type": "progress", "current": completed, "total": total,
+                "email": r.get("email", "?"),
+                "success": r.get("success", False),
+                "message": r.get("message", ""),
             })
         db.log_audit(
             "batch_send_done", user_id=owner_id, username=user["username"],
