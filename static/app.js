@@ -1430,6 +1430,49 @@ $('btnDoBatchSend').addEventListener('click', doBatchSend);
 $('btnDoMove').addEventListener('click', doMoveGroup);
 $('btnCopyDetail').addEventListener('click', copyAccountInfo);
 
+// ───────── 移动端侧边栏抽屉 ─────────
+// 只在 ≤768px 生效；桌面端 CSS 自动忽略 .open 类
+(() => {
+  const sidebar = $('sidebar');
+  const toggle = $('sbToggle');
+  const backdrop = $('sbBackdrop');
+  if (!sidebar || !toggle || !backdrop) return;
+
+  const mq = window.matchMedia('(max-width: 768px)');
+
+  function setOpen(open) {
+    sidebar.classList.toggle('open', open);
+    toggle.classList.toggle('open', open);
+    backdrop.classList.toggle('show', open);
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    // 打开时锁定 body 滚动，关闭时恢复
+    document.body.style.overflow = open ? 'hidden' : '';
+  }
+  function closeOnMobile() {
+    if (mq.matches) setOpen(false);
+  }
+
+  toggle.addEventListener('click', () => setOpen(!sidebar.classList.contains('open')));
+  backdrop.addEventListener('click', () => setOpen(false));
+
+  // 点击侧边栏内的导航项或分组项后自动收起（不影响分组的右键菜单按钮 ⋯）
+  sidebar.addEventListener('click', (e) => {
+    if (e.target.closest('.grp-ctx')) return;
+    if (e.target.closest('.sb-sec-h button')) return;
+    if (e.target.closest('.nav-btn, .grp-item, .sb-logout-btn')) closeOnMobile();
+  });
+
+  // 键盘 ESC 关闭
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && sidebar.classList.contains('open')) setOpen(false);
+  });
+
+  // 从移动端切回桌面端时，清理状态
+  const handleMq = (e) => { if (!e.matches) setOpen(false); };
+  if (mq.addEventListener) mq.addEventListener('change', handleMq);
+  else if (mq.addListener) mq.addListener(handleMq); // 旧 Safari 兼容
+})();
+
 // ───────── Init ─────────
 async function init() {
   try {

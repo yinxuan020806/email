@@ -228,3 +228,71 @@ body{font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif;background
 .import-help-pre{font-family:'Consolas','Courier New',monospace;font-size:12px;color:var(--text2);background:var(--inp-bg);border-radius:6px;padding:10px 12px;white-space:pre-wrap;word-break:break-all;line-height:1.5;margin:0}
 .export-warn{font-size:12px;color:var(--warning);background:rgba(255,149,0,.08);border:1px solid rgba(255,149,0,.2);border-radius:6px;padding:8px 12px;margin-bottom:14px}
 [data-theme="dark"] .export-warn{background:rgba(210,153,34,.1);border-color:rgba(210,153,34,.3)}
+
+/* ── 移动端汉堡按钮 & 蒙层（默认隐藏，仅 ≤768px 生效） ── */
+.sb-toggle{display:none;position:fixed;top:10px;left:10px;z-index:60;width:40px;height:40px;padding:0;border:1px solid var(--border);background:var(--card);border-radius:10px;cursor:pointer;align-items:center;justify-content:center;flex-direction:column;box-shadow:var(--shadow);transition:.15s}
+.sb-toggle:hover{border-color:var(--accent)}
+.sb-toggle span{display:block;width:20px;height:2px;background:var(--text);border-radius:2px;transition:transform .25s,opacity .2s}
+.sb-toggle span+span{margin-top:4px}
+.sb-toggle.open span:nth-child(1){transform:translateY(6px) rotate(45deg)}
+.sb-toggle.open span:nth-child(2){opacity:0}
+.sb-toggle.open span:nth-child(3){transform:translateY(-6px) rotate(-45deg)}
+.sb-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:40;opacity:0;transition:opacity .25s}
+.sb-backdrop.show{display:block;opacity:1}
+
+/* ── 响应式：≤768px（手机 / 平板竖屏） ── */
+@media (max-width:768px){
+  .sb-toggle{display:flex}
+  /* 侧边栏改为滑出式抽屉 */
+  .sb{position:fixed;top:0;left:0;width:260px;max-width:85vw;height:100vh;z-index:50;transform:translateX(-100%);transition:transform .28s ease;box-shadow:2px 0 16px rgba(0,0,0,.15)}
+  .sb.open{transform:translateX(0)}
+  /* 主区域占满宽度 */
+  .app{display:block;height:auto;min-height:100vh}
+  .main{width:100%;height:100vh}
+  /* 工具栏顶部留出汉堡按钮空间 */
+  .toolbar{padding:54px 14px 8px;flex-direction:column;align-items:stretch;gap:8px}
+  .toolbar h2{font-size:20px}
+  .toolbar-r{width:100%}
+  .search-inp{width:100%}
+  /* 操作栏紧凑化 */
+  .action-bar{padding:0 14px 10px;gap:6px}
+  .btn{padding:6px 12px;font-size:12px}
+  .rec-cnt{margin-left:0;width:100%;text-align:right;padding-top:2px}
+  /* 内容区 padding 收窄 */
+  .content{padding:0 14px 20px}
+  /* 表格横向滚动（保留所有列） */
+  #tableView{overflow-x:auto;-webkit-overflow-scrolling:touch;border-radius:12px;box-shadow:var(--shadow)}
+  #tableView .tbl{border-radius:0;box-shadow:none;min-width:860px}
+  /* 弹窗适配 */
+  .modal{width:95vw;max-width:95vw;max-height:92vh}
+  .modal-lg{width:95vw}
+  .auth-modal{width:95vw !important;max-width:420px !important}
+  .modal-h{padding:14px 16px}
+  .modal-h h3{font-size:16px}
+  .modal-body{padding:14px 16px}
+  .modal-foot{padding:12px 16px;flex-wrap:wrap}
+  /* 邮件查看弹窗：由左右布局改为上下堆叠 */
+  .email-layout{flex-direction:column;height:auto;gap:0}
+  .email-sidebar{width:100%;max-height:300px;border-right:none;border-bottom:1px solid var(--border)}
+  .email-content{padding:14px;min-height:280px}
+  .email-content h3{font-size:15px}
+  /* 表单行在窄屏改垂直排列 */
+  .form-row{flex-direction:column;gap:0}
+  /* 仪表盘卡片最小宽度降低 */
+  .dash-grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px}
+  .dash-card{padding:14px}
+  .dash-card .dc-n{font-size:24px}
+  /* 导入帮助文本不再水平溢出 */
+  .import-help-pre{font-size:11px}
+  /* Toast 靠右靠顶部，避免被汉堡按钮遮挡 */
+  .toast-box{top:60px;right:10px;left:10px}
+  .toast{min-width:0;width:100%}
+}
+
+/* ── 更窄屏（≤420px，小手机） ── */
+@media (max-width:420px){
+  .sb{width:240px}
+  .toolbar h2{font-size:18px}
+  .btn{padding:6px 10px;font-size:11.5px}
+  .dash-grid{grid-template-columns:repeat(2,1fr)}
+}
