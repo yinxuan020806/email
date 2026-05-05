@@ -37,8 +37,8 @@ jobs:
           key:      ${{ secrets.SSH_KEY }}
           # 严格模式 + 失败即退出
           script_stop: true
-          # 调试输出（出问题时排查用）
-          debug: false
+          # 调试输出 — 临时开启以排查 GitHub Actions 部署失败的真正原因
+          debug: true
           script: |
             set -euo pipefail
             cd /www/wwwroot/email
