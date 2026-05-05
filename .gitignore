@@ -59,3 +59,5 @@ terminals/
 # 一次性远程执行脚本（含 SSH 密码读取逻辑，仅本机使用，绝不入库）
 _deploy_remote.py
 _deploy_remote.log
+
+# auto-deploy trigger marker 2026-05-06 01:23:20
