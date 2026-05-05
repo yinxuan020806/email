@@ -1,10 +1,14 @@
 FROM python:3.12-slim AS base
 
-# 国内镜像可换 PIP_INDEX_URL；公网默认即可
+# 默认走清华 PyPI 镜像，国内服务器能稳定拉取；
+# 国外环境可在 build 时覆盖：docker build --build-arg PIP_INDEX_URL=https://pypi.org/simple ...
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
+    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn \
+    PIP_DEFAULT_TIMEOUT=120 \
     EMAIL_DATA_DIR=/data \
     EMAIL_WEB_HOST=0.0.0.0 \
     EMAIL_WEB_PORT=8000
