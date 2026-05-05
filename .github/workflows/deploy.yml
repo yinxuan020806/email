@@ -28,22 +28,43 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - name: SSH deploy
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host:     ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          port:     ${{ secrets.SSH_PORT }}
-          key:      ${{ secrets.SSH_KEY }}
-          # 严格模式 + 失败即退出
-          script_stop: true
-          # 调试输出 — 临时开启以排查 GitHub Actions 部署失败的真正原因
-          debug: true
-          script: |
-            set -euo pipefail
-            cd /www/wwwroot/email
-            if [ "${{ github.event.inputs.no_cache }}" = "true" ]; then
-                bash scripts/deploy.sh --no-cache
-            else
-                bash scripts/deploy.sh
-            fi
+      - name: Setup SSH key + known_hosts
+        env:
+          SSH_KEY:  ${{ secrets.SSH_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          # 写私钥到 ~/.ssh/id_ed25519（保留原始换行，不被 shell quoting 破坏）
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # 校验私钥能被 ssh-keygen 解析（如果不行立即 fail，且打出真实错误）
+          ssh-keygen -y -f ~/.ssh/id_ed25519 > /dev/null
+          echo "✓ private key parsed OK"
+          # 抓 host key 防止 StrictHostKeyChecking 提示交互
+          ssh-keyscan -H -p "$SSH_PORT" "$SSH_HOST" >> ~/.ssh/known_hosts 2>&1
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: SSH deploy with full stdout/stderr
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          NO_CACHE: ${{ github.event.inputs.no_cache }}
+        run: |
+          # 用原生 ssh，stdout/stderr 直接打印到 Actions log
+          ssh -i ~/.ssh/id_ed25519 \
+              -p "$SSH_PORT" \
+              -o BatchMode=yes \
+              -o ServerAliveInterval=30 \
+              "$SSH_USER@$SSH_HOST" bash -s -- "$NO_CACHE" <<'REMOTE_SCRIPT'
+          set -euo pipefail
+          NO_CACHE_ARG="${1:-}"
+          cd /www/wwwroot/email
+          if [ "$NO_CACHE_ARG" = "true" ]; then
+            bash scripts/deploy.sh --no-cache
+          else
+            bash scripts/deploy.sh
+          fi
+          REMOTE_SCRIPT
