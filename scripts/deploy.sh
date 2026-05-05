@@ -19,6 +19,7 @@ set -euo pipefail
 # ── 可配置项（也可通过环境变量覆盖） ─────────────────
 APP_DIR="${APP_DIR:-/www/wwwroot/email}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8000/api/health}"
+HEALTH_URL_CRX="${HEALTH_URL_CRX:-http://127.0.0.1:8001/healthz}"
 HEALTH_RETRIES="${HEALTH_RETRIES:-30}"      # 健康检查最多尝试次数（每次 sleep 1s）
 COMPOSE="${COMPOSE:-docker compose}"        # 老版本可改成 'docker-compose'
 DATA_UID="${DATA_UID:-10001}"               # Dockerfile 里的非 root 用户 uid
@@ -136,6 +137,26 @@ if [[ "$HTTP_CODE" != "200" ]]; then
     err "查看容器日志：$COMPOSE logs --tail=200"
     $COMPOSE ps || true
     exit 3
+fi
+ok  "管理端 healthy ($HEALTH_URL)"
+
+# ── 5b. 接码前台健康检查（双服务部署时启用；失败仅 warn 不阻断） ──
+if grep -q '^[[:space:]]*code-receiver:' docker-compose.yml 2>/dev/null; then
+    info "等待接码前台就绪 → $HEALTH_URL_CRX"
+    ATTEMPT=0
+    CRX_CODE=""
+    while (( ATTEMPT < HEALTH_RETRIES )); do
+        CRX_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "$HEALTH_URL_CRX" || echo "000")
+        [[ "$CRX_CODE" == "200" ]] && break
+        ATTEMPT=$((ATTEMPT + 1))
+        sleep 1
+    done
+    if [[ "$CRX_CODE" == "200" ]]; then
+        ok  "接码前台 healthy ($HEALTH_URL_CRX)"
+    else
+        warn "接码前台未就绪 (HTTP $CRX_CODE)；管理端已部署成功，但 code-receiver 异常"
+        warn "查看接码前台日志：$COMPOSE logs --tail=100 code-receiver"
+    fi
 fi
 
 # ── 6. 完成 ────────────────────────────────────────
