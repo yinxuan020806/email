@@ -1,0 +1,187 @@
+# -*- coding: utf-8 -*-
+"""提取器基类、SafeLinks unwrap、HTML 实体清洗。"""
+
+from __future__ import annotations
+
+import html as html_mod
+import logging
+import re
+from dataclasses import dataclass, field
+from typing import Iterable, List, Optional
+from urllib.parse import parse_qs, unquote, urlparse
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ExtractedResult:
+    """单封邮件提取出的结果。"""
+
+    code: Optional[str] = None
+    link: Optional[str] = None
+    sender: str = ""
+    subject: str = ""
+    received_at: str = ""
+    matched_rule_id: Optional[int] = None
+    body_preview: str = ""
+
+    def has_payload(self) -> bool:
+        return bool(self.code or self.link)
+
+
+class SafeLinks:
+    """处理 Outlook / O365 SafeLinks 包装的链接。
+
+    示例:
+        https://nam11.safelinks.protection.outlook.com/?url=https%3A%2F%2Fauth.openai.com%2Flog-in%2F...&data=...
+    """
+
+    _SAFELINK_HOST = "safelinks.protection.outlook.com"
+    _SAFELINK_PATTERN = re.compile(
+        r"https?://[a-z0-9-]+\.safelinks\.protection\.outlook\.com/[^\s\"'>]+",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def unwrap(cls, url: str) -> str:
+        if not url:
+            return url
+        try:
+            parsed = urlparse(url)
+            if cls._SAFELINK_HOST not in (parsed.netloc or ""):
+                return url
+            qs = parse_qs(parsed.query)
+            target = qs.get("url", [None])[0]
+            if not target:
+                return url
+            return unquote(target)
+        except (ValueError, TypeError):
+            return url
+
+    @classmethod
+    def unwrap_all_in_text(cls, text: str) -> str:
+        """把文本里所有 SafeLinks 包装的 URL 就地替换为原始 URL，便于后续正则匹配。"""
+        if not text:
+            return text
+        if "safelinks.protection.outlook.com" not in text.lower():
+            return text
+        return cls._SAFELINK_PATTERN.sub(lambda m: cls.unwrap(m.group(0)), text)
+
+
+@dataclass
+class Extractor:
+    """单条提取规则。"""
+
+    category: str
+    sender_patterns: List[re.Pattern] = field(default_factory=list)
+    subject_patterns: List[re.Pattern] = field(default_factory=list)
+    code_regex: Optional[re.Pattern] = None
+    link_regex: Optional[re.Pattern] = None
+    priority: int = 0
+    rule_id: Optional[int] = None
+    """rule_id 来自 DB 时非空；代码内置默认规则为 None。"""
+
+    @classmethod
+    def from_strings(
+        cls,
+        category: str,
+        sender_pattern: str = "",
+        subject_pattern: str = "",
+        code_regex: str = "",
+        link_regex: str = "",
+        priority: int = 0,
+        rule_id: Optional[int] = None,
+    ) -> "Extractor":
+        """从字符串模式构造，sender/subject 用通配符（``*``→``.*``）+ 大小写不敏感。"""
+
+        def _split_compile_patterns(s: str) -> List[re.Pattern]:
+            if not s:
+                return []
+            patterns: List[re.Pattern] = []
+            for raw in s.split("|"):
+                raw = raw.strip()
+                if not raw:
+                    continue
+                escaped = re.escape(raw).replace(r"\*", ".*")
+                try:
+                    patterns.append(re.compile(escaped, re.IGNORECASE))
+                except re.error:
+                    logger.warning("跳过非法发件人/主题模式: %r", raw)
+            return patterns
+
+        def _safe_compile(s: str) -> Optional[re.Pattern]:
+            if not s:
+                return None
+            try:
+                return re.compile(s, re.IGNORECASE | re.DOTALL)
+            except re.error as exc:
+                logger.warning("跳过非法正则 %r: %s", s, exc)
+                return None
+
+        return cls(
+            category=category.lower(),
+            sender_patterns=_split_compile_patterns(sender_pattern),
+            subject_patterns=_split_compile_patterns(subject_pattern),
+            code_regex=_safe_compile(code_regex),
+            link_regex=_safe_compile(link_regex),
+            priority=priority,
+            rule_id=rule_id,
+        )
+
+    def match(self, mail: dict) -> bool:
+        """发件人 + 主题双白名单匹配；任一组留空表示该维度不限制。"""
+        sender = (mail.get("sender") or mail.get("from") or "").lower()
+        subject = (mail.get("subject") or "").lower()
+        if self.sender_patterns:
+            if not any(p.search(sender) for p in self.sender_patterns):
+                return False
+        if self.subject_patterns:
+            if not any(p.search(subject) for p in self.subject_patterns):
+                return False
+        return True
+
+    def extract(self, mail: dict) -> ExtractedResult:
+        """从 mail dict 提取 code / link。约定 mail 至少包含
+        ``sender`` / ``subject`` / ``date`` / ``body`` 字段。
+        """
+        body = mail.get("body") or mail.get("preview") or ""
+        body_text = html_mod.unescape(body)
+        # SafeLinks unwrap 必须在正则匹配前完成，否则被包装的链接域名是
+        # safelinks.protection.outlook.com，无法命中 cursor.com / openai.com 模式
+        body_text = SafeLinks.unwrap_all_in_text(body_text)
+        result = ExtractedResult(
+            sender=mail.get("sender") or mail.get("from") or "",
+            subject=mail.get("subject") or "",
+            received_at=str(mail.get("date") or ""),
+            matched_rule_id=self.rule_id,
+            body_preview=body_text[:500],
+        )
+
+        if self.code_regex:
+            m = self.code_regex.search(body_text)
+            if m:
+                result.code = (m.group("code") if "code" in (m.groupdict() or {}) else m.group(0)).strip()
+
+        if self.link_regex:
+            m = self.link_regex.search(body_text)
+            if m:
+                raw_link = m.group("link") if "link" in (m.groupdict() or {}) else m.group(0)
+                result.link = SafeLinks.unwrap(raw_link.strip())
+
+        return result
+
+
+def first_match(extractors: Iterable[Extractor], mails: Iterable[dict]) -> Optional[ExtractedResult]:
+    """对一批邮件按时间倒序逐封尝试每个 extractor，返回首个成功结果。
+
+    调用方负责把 mails 排好序（最近优先）。
+    """
+    for mail in mails:
+        for ex in extractors:
+            if not ex.match(mail):
+                continue
+            result = ex.extract(mail)
+            if result.has_payload():
+                return result
+    return None

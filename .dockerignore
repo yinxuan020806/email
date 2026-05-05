@@ -1,32 +1,64 @@
+# ⚠️ build context 的 .dockerignore — 关系主密钥安全！
+#
+# 本仓库是双服务架构：
+#   - email-web        Dockerfile 在 ./Dockerfile（管理端，端口 8000）
+#   - code-receiver    Dockerfile 在 ./code-receiver/Dockerfile（接码前台，端口 8001）
+# 两个 Dockerfile 的 build context 都是当前仓库根目录。
+#
+# 必须排除：data/.master.key 与 emails.db —— 否则镜像分发即等于主密钥外泄。
+
+# === 数据与密钥（绝对不可入镜像）===
+data/
+code-receiver/data/
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/.master.key
+
+# === Python 缓存 ===
 __pycache__/
+**/__pycache__/
 *.py[cod]
 *.so
 *.egg-info/
-dist/
-build/
-
-.git/
-.gitignore
-.cursor/
-.vscode/
-.idea/
-
-data/
-*.db
-*.db-wal
-*.db-shm
-.master.key
-
-tests/
 .pytest_cache/
-*.log
-logs/
+**/.pytest_cache/
 
+# === 测试与开发工件 ===
+tests/
+**/tests/
 .venv/
 venv/
 .env
+.env.*
+*.log
+logs/
 
-README.md
-docker-compose.yml
-Dockerfile
+# === IDE / VCS ===
+.git/
+.gitignore
+.gitattributes
+.cursor/
+.vscode/
+.idea/
+.github/
+.playwright-mcp/
+
+# === 构建产物 ===
+dist/
+build/
+
+# === 容器构建 / 项目元数据 ===
+docker-compose.yml*
 .dockerignore
+**/Dockerfile
+**/entrypoint.sh
+
+# === 文档（仅运行时不需要的）===
+DEPLOY.md
+docs/
+
+# === 截图 / 大文件（管理端开发期截图）===
+*.png
+*.zip
+Email-Manager-main/

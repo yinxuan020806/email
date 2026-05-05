@@ -1,26 +1,74 @@
+# 联合启动：管理端（8000） + 接码前台（8001），共用一份 data/ 卷
+# 在仓库根目录（与本文件同级）执行：
+#   docker compose up -d --build
+# 升级：
+#   git pull && docker compose up -d --build
+#
+# 端口映射：
+# - 默认绑定 127.0.0.1，仅本机可访问；公网部署请走反代 (nginx/Caddy/Cloudflare Tunnel)
+# - 反代场景下接码前台必须设 CRX_TRUST_PROXY=1，否则 X-Forwarded-For 不被信任，限流会按反代 IP 计
+# - Cloudflare Tunnel 用户：app.py 已支持 CF-Connecting-IP，开 CRX_TRUST_PROXY 即生效
+#
+# CODE_OWNER_USERNAME: 接码业务的站长账号；只有这个用户名下的 is_public 邮箱
+#                      可被前台公开查询。默认 "xiaoxuan"，按需修改。
+
 services:
   email-web:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: email-web:latest
     container_name: email-web
     restart: unless-stopped
     ports:
-      - "127.0.0.1:8000:8000"   # 默认仅本机访问；如要内网访问改成 "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
-      - ./data:/data            # 持久化数据库与主密钥（请妥善备份）
+      - ./data:/data:rw
     environment:
       EMAIL_WEB_HOST: 0.0.0.0
       EMAIL_WEB_PORT: 8000
       EMAIL_WEB_LOG_LEVEL: INFO
-      # ── 多用户登录 ─────────────────────────────────
-      # 自 v3.0 起改为账密登录，没有共享 Token 概念。首次访问页面自助注册账号。
-      # 注册并创建好需要的账号后，强烈建议关闭注册（避免陌生人注册抢资源）：
+      EMAIL_DATA_DIR: /data
+      # 创建好账号后强烈建议关闭注册：
       # EMAIL_WEB_DISABLE_REGISTER: "1"
-      # 会话 cookie 有效期（秒），默认 7 天
-      # EMAIL_WEB_COOKIE_TTL: "604800"
-      # ── HTTPS（推荐由 nginx/caddy/Cloudflare Tunnel 反代时省略）──
-      # EMAIL_WEB_SSL_KEY:  /data/server.key
-      # EMAIL_WEB_SSL_CERT: /data/server.crt
-      # ── OAuth 自托管 ───────────────────────────────
-      # EMAIL_OAUTH_CLIENT_ID: "your-azure-app-client-id"
-      # EMAIL_OAUTH_REDIRECT_URI: "https://your.domain/oauth/callback"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=3); sys.exit(0 if r.status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  code-receiver:
+    build:
+      context: .
+      dockerfile: code-receiver/Dockerfile
+    image: code-receiver:latest
+    container_name: code-receiver
+    restart: unless-stopped
+    # 关键：等管理端 healthcheck 通过（master.key 已生成）才启动接码前台
+    depends_on:
+      email-web:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8001:8001"
+    volumes:
+      - ./data:/data:rw
+    environment:
+      CRX_HOST: 0.0.0.0
+      CRX_PORT: 8001
+      CRX_LOG_LEVEL: INFO
+      EMAIL_DATA_DIR: /data
+      CODE_OWNER_USERNAME: xiaoxuan
+      MASTER_KEY_WAIT_TIMEOUT: "120"
+      # 反代场景（Cloudflare Tunnel / nginx / Caddy）必须开，否则限流按反代 IP 计：
+      # CRX_TRUST_PROXY: "1"
+      # 限流阈值（默认 5/min, 30/hour, 邮箱 10/hour）：
+      # CRX_RATE_IP_PER_MIN: "5"
+      # CRX_RATE_IP_PER_HOUR: "30"
+      # CRX_RATE_EMAIL_PER_HOUR: "10"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:8001/healthz',timeout=3); sys.exit(0 if r.status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

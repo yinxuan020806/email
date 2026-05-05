@@ -1,0 +1,27 @@
+# 仅在 code-receiver 自身作为 context build 时生效；
+# 仓库根 .dockerignore 已经覆盖更广的场景（推荐统一从仓库根 build）。
+
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.pytest_cache/
+
+tests/
+.venv/
+venv/
+.env
+.env.*
+*.log
+logs/
+
+.git/
+.gitignore
+.cursor/
+.vscode/
+.idea/
+
+Dockerfile
+docker-compose.yml
+.dockerignore
+README.md

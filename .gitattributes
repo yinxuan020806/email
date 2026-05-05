@@ -1,0 +1,10 @@
+﻿# 强制 LF 行尾的文件类型。
+# 关键：shell 脚本和 Dockerfile 在 Linux 容器内执行，CRLF 会导致
+# /entrypoint.sh: No such file or directory（bash 把 \r 当成路径一部分）。
+
+*.sh         text eol=lf
+*.bash       text eol=lf
+Dockerfile   text eol=lf
+*.Dockerfile text eol=lf
+
+# Python / 配置 / 文档文件保留 git 默认行为（按平台），不强制行尾。
