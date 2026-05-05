@@ -49,10 +49,11 @@ dist/
 build/
 
 # === 容器构建 / 项目元数据 ===
+# 注意：Dockerfile 不被 COPY 进 image（docker build 直接读取），可以排除；
+# 但 entrypoint.sh 必须 COPY 进 image，绝对不可在这里排除。
 docker-compose.yml*
 .dockerignore
 **/Dockerfile
-**/entrypoint.sh
 
 # === 文档（仅运行时不需要的）===
 DEPLOY.md
