@@ -159,6 +159,44 @@ def test_openai_otp_fallback():
     assert result.code == "749210"
 
 
+def test_openai_chinese_subject_with_code():
+    """OpenAI 中文模板：主题 '你的 OpenAI 代码为 186862' 自身就含验证码 → 应能抓到。"""
+    mails = [
+        make_mail(
+            sender="noreply@tm.openai.com",
+            subject="你的 OpenAI 代码为 186862",
+            body="OpenAI\n\n输入此临时验证码以继续:\n\n186862\n\n如果您无意登录...",
+        )
+    ]
+    extractors = get_extractors("openai")
+    result = first_match(extractors, mails)
+    assert result is not None
+    assert result.code == "186862", f"实际抓到 {result.code}"
+
+
+def test_openai_html_email_extracts_otp():
+    """真实场景 OpenAI HTML 邮件：6 位数字被 <div> 包着 + 关键词在另一段 <p>。"""
+    html_body = """<!DOCTYPE html><html><head><style>.body{font-family:Sohne}</style></head>
+    <body>
+      <table><tr><td>
+        <p>输入此临时验证码以继续:</p>
+        <div style="font-size:32px;text-align:center;letter-spacing:6px">186862</div>
+        <p>如果您无意登录 OpenAI，请<a href="#">重置密码</a>。</p>
+      </td></tr></table>
+    </body></html>"""
+    mails = [
+        make_mail(
+            sender="noreply@tm.openai.com",
+            subject="OpenAI - Your verification code",
+            body=html_body,
+        )
+    ]
+    extractors = get_extractors("openai")
+    result = first_match(extractors, mails)
+    assert result is not None
+    assert result.code == "186862"
+
+
 def test_safelinks_unwrap_passthrough():
     """非 SafeLinks 原样返回。"""
     raw = "https://example.com/x?y=1"

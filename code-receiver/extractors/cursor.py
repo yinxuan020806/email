@@ -16,10 +16,12 @@ from extractors.base import Extractor
 
 def default_rules() -> list[Extractor]:
     sender = "*@cursor.sh|*@cursor.com|*@mail.cursor.sh|*@mail.cursor.com"
-    subject = "Cursor|Verify*|Sign in*|verification*|登录*|验证*"
-    # 高优先级：带"code/verification/验证码"上下文的 6 位 OTP，避免误抓订单号
+    subject = "Cursor|Verify*|Sign in*|verification*|登录*|验证*|代码*"
+    # 关键词触发后允许 80 字符（跨换行、跨 HTML 标签 strip 后的空格）再抓 6 位数
+    # 避免误抓订单号；非贪婪 ? 抓"最近"的 6 位数字
     contextual_code = (
-        r"(?:code|verification|verify|验证码|验证)[^\d\n]{0,40}(?P<code>\d{6})(?!\d)"
+        r"(?:code|verification|verify|验证码|验证|代码|otp)[^\d]{0,80}?"
+        r"(?P<code>\d{6})(?!\d)"
     )
     link = r"(?P<link>https?://(?:[a-z0-9-]+\.)?cursor\.(?:sh|com)/[^\s\"'>]+)"
     return [

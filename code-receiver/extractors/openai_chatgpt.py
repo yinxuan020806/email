@@ -17,9 +17,14 @@ from extractors.base import Extractor
 
 def default_rules() -> list[Extractor]:
     sender = "*@openai.com|*@tm.openai.com|*@auth.openai.com|*@mail.openai.com"
-    subject_general = "OpenAI|ChatGPT|Verify*|Log in*|sign in*|verification*|登录*|验证*"
+    subject_general = (
+        "OpenAI|ChatGPT|Verify*|Log in*|sign in*|verification*|登录*|验证*|代码*"
+    )
+    # 关键词触发后允许 80 字符（跨换行、跨 HTML 标签 strip 后的空格）再抓 6 位数
+    # 非贪婪 ?  确保命中"最近"的 6 位数字而非邮件后部的其他数字
     contextual_code = (
-        r"(?:code|verification|verify|验证码|验证)[^\d\n]{0,40}(?P<code>\d{6})(?!\d)"
+        r"(?:code|verification|verify|验证码|验证|代码|otp)[^\d]{0,80}?"
+        r"(?P<code>\d{6})(?!\d)"
     )
     link = r"(?P<link>https?://(?:[a-z0-9-]+\.)?(?:auth\.)?openai\.com/[^\s\"'>]+)"
     return [

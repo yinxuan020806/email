@@ -30,6 +30,37 @@ class ExtractedResult:
         return bool(self.code or self.link)
 
 
+_HTML_SCRIPT_STYLE_RE = re.compile(
+    r"<(script|style)[^>]*>[\s\S]*?</\1>", re.IGNORECASE
+)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_ALL_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def strip_html_tags(text: str) -> str:
+    """简单 HTML → 纯文本（不引入 BS4 重型依赖，足以覆盖 Cursor / OpenAI 邮件）。
+
+    - 移除 <script>/<style> 整段内容
+    - 移除所有标签
+    - 折叠所有空白（含 \\n）成单空格 — 让正则能跨原 HTML 标签结构命中
+    """
+    if not text:
+        return text
+    text = _HTML_SCRIPT_STYLE_RE.sub(" ", text)
+    text = _HTML_TAG_RE.sub(" ", text)
+    text = html_mod.unescape(text)
+    text = _ALL_WHITESPACE_RE.sub(" ", text)
+    return text.strip()
+
+
+def looks_like_html(text: str) -> bool:
+    if not text:
+        return False
+    low = text.lower()
+    return ("<html" in low or "<body" in low or "<!doctype html" in low
+            or low.count("<div") > 2 or low.count("<p>") > 2)
+
+
 class SafeLinks:
     """处理 Outlook / O365 SafeLinks 包装的链接。
 
@@ -145,26 +176,40 @@ class Extractor:
         """从 mail dict 提取 code / link。约定 mail 至少包含
         ``sender`` / ``subject`` / ``date`` / ``body`` 字段。
         """
-        body = mail.get("body") or mail.get("preview") or ""
-        body_text = html_mod.unescape(body)
+        raw_body = mail.get("body") or mail.get("preview") or ""
+        body_text = html_mod.unescape(raw_body)
         # SafeLinks unwrap 必须在正则匹配前完成，否则被包装的链接域名是
         # safelinks.protection.outlook.com，无法命中 cursor.com / openai.com 模式
         body_text = SafeLinks.unwrap_all_in_text(body_text)
+        # OpenAI / 部分发件方只发 HTML 邮件，<div>123456</div> 这种
+        # 验证码被标签包着，必须先 strip tag 才能让正则跨标签命中
+        if looks_like_html(body_text):
+            body_text = strip_html_tags(body_text)
+        subject = mail.get("subject") or ""
+
         result = ExtractedResult(
             sender=mail.get("sender") or mail.get("from") or "",
-            subject=mail.get("subject") or "",
+            subject=subject,
             received_at=str(mail.get("date") or ""),
             matched_rule_id=self.rule_id,
             body_preview=body_text[:500],
         )
 
+        # 验证码：优先 body 找（避免 subject 含 "code" 关键词把 body 开头的订单号
+        # 误命中）；body 没找到再 fallback 到 subject — 适用于 OpenAI 中文模板
+        # "你的 OpenAI 代码为 186862" 这种 subject 自身就含验证码的情况。
         if self.code_regex:
             m = self.code_regex.search(body_text)
+            if not m and subject:
+                m = self.code_regex.search(subject)
             if m:
                 result.code = (m.group("code") if "code" in (m.groupdict() or {}) else m.group(0)).strip()
 
+        # link 同样优先 body 找
         if self.link_regex:
             m = self.link_regex.search(body_text)
+            if not m and subject:
+                m = self.link_regex.search(subject)
             if m:
                 raw_link = m.group("link") if "link" in (m.groupdict() or {}) else m.group(0)
                 result.link = SafeLinks.unwrap(raw_link.strip())
