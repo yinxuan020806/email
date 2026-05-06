@@ -51,7 +51,6 @@ if HERE not in sys.path:
 
 from core.email_client import EmailClient  # noqa: E402
 from core.models import Account  # noqa: E402
-from core.server_config import detect_server  # noqa: E402
 
 from db_proxy import CodeReceiverDB  # noqa: E402
 from extractors import get_extractors  # noqa: E402
@@ -78,10 +77,10 @@ logger = logging.getLogger("code_receiver")
 OWNER_USERNAME = os.getenv("CODE_OWNER_USERNAME", "xiaoxuan").strip()
 TRUST_PROXY = os.getenv("CRX_TRUST_PROXY", "").strip() in {"1", "true", "yes"}
 
-# 是否允许 byo（用户自带凭据）路径连接到未在 server_config 白名单的邮箱域名。
-# 默认 False — 只允许 outlook/gmail/qq/163/126/sina/yahoo 等已知服务商，
-# 防止攻击者把前台当作 IMAP SSRF 跳板去连接内网 / 任意主机。
-ALLOW_UNKNOWN_DOMAINS = os.getenv("CRX_ALLOW_UNKNOWN_DOMAINS", "").strip() in {"1", "true", "yes"}
+# 注：byo（用户自带 IMAP/OAuth 凭据）路径已下线 — 前台只接受"邮箱地址"，
+# 且必须由站长在管理后台显式加入接码白名单（accounts.is_public=1）才能查码。
+# 因此 SSRF 防护（detect_server 域名白名单）不再需要：所有走到这里的邮箱
+# 都来自管理端站长自行导入的账号，连接目标完全可控。
 
 # master.key 必须由管理端先生成；前台启动时强制检查存在
 def _ensure_master_key_exists() -> None:
@@ -181,10 +180,26 @@ ALLOWED_CATEGORIES = {"cursor", "openai"}
 
 
 class LookupRequest(BaseModel):
-    # 4000 字节足够覆盖 email + password + client_id + refresh_token (单个 MS RT 长度
-    # 1500-2000 字节，加分隔符和 UUID 后整个串可达 2300+，2000 限制会切断)
-    input: str = Field(min_length=3, max_length=4000)
+    # 邮箱地址 RFC 5321 上限 254 字符，留 256 容错；本接口只接受邮箱地址，
+    # 不再支持 ``email----password`` / OAuth2 等扩展格式（byo 路径已下线）。
+    input: str = Field(min_length=3, max_length=256)
     category: str = Field(min_length=1, max_length=32)
+
+    @field_validator("input")
+    @classmethod
+    def _email_only(cls, v: str) -> str:
+        """前台只接受裸邮箱：含 ``----`` 一律 422 拒绝（在 pydantic 阶段就拦下）。
+
+        这是第一道防线；``lookup`` 路由里 ``parse_user_input`` 之后还会再做
+        一次 ``cred.needs_lookup`` 守卫，保证即使前端绕过 / 解析逻辑变化，
+        byo 路径也永远到不了 IMAP 调用层。
+        """
+        s = (v or "").strip()
+        if not s:
+            raise ValueError("输入不能为空")
+        if "----" in s:
+            raise ValueError("仅支持邮箱地址，不支持密码 / OAuth 等扩展格式")
+        return s
 
     @field_validator("category")
     @classmethod
@@ -198,30 +213,20 @@ class LookupRequest(BaseModel):
 # ── 工具：根据凭据装配 EmailClient ─────────────────────────────
 
 
-def _build_client(cred: ParsedCredential, account_imap: Optional[Account] = None) -> EmailClient:
-    """从 ParsedCredential（或公开账号）构造一个 EmailClient。"""
-    if account_imap is not None:
-        return EmailClient(
-            email_addr=account_imap.email,
-            password=account_imap.password or "",
-            imap_server=account_imap.imap_server,
-            imap_port=account_imap.imap_port or 993,
-            client_id=account_imap.client_id,
-            refresh_token=account_imap.refresh_token,
-        )
+def _build_client(account_imap: Account) -> EmailClient:
+    """从公开账号构造一个 EmailClient。
+
+    byo（用户自带凭据）路径已下线，所有走到这里的连接信息都来自管理端
+    站长加入接码白名单的 ``accounts.is_public=1`` 行，凭据来源完全可控。
+    """
     return EmailClient(
-        email_addr=cred.email,
-        password=cred.password or "",
-        client_id=cred.client_id,
-        refresh_token=cred.refresh_token,
+        email_addr=account_imap.email,
+        password=account_imap.password or "",
+        imap_server=account_imap.imap_server,
+        imap_port=account_imap.imap_port or 993,
+        client_id=account_imap.client_id,
+        refresh_token=account_imap.refresh_token,
     )
-
-
-def _wipe(cred: ParsedCredential) -> None:
-    """请求结束时尽力擦除凭据字符串引用（CPython 不保证立即 GC，仅尽力而为）。"""
-    cred.password = ""
-    cred.refresh_token = None
-    cred.client_id = None
 
 
 # 用于把"认证失败"和"服务/网络异常"区分开 — 仅前者才计入限流的失败锁定。
@@ -336,7 +341,16 @@ def healthz():
 
 @app.post("/api/lookup")
 def lookup(req: LookupRequest, request: Request) -> JSONResponse:
-    """核心：解析输入 → 查 DB / 直接 IMAP → 提码 → 返回。"""
+    """核心：解析输入 → 查白名单公开账号 → 拉邮件 → 提码 → 返回。
+
+    流程（全程**只走白名单路径**，byo 已下线）：
+    1. IP 限流预检（防畸形输入绕过计数）
+    2. ``parse_user_input`` 解析 — 必须 ``needs_lookup=True``（即纯邮箱）
+    3. IP + email 双维度限流
+    4. ``lookup_public_account`` 找站长名下、``is_public=1`` 且分类匹配的账号
+    5. IMAP/Graph 拉收件箱前 20 封
+    6. 按时间倒序排序后由分类 extractors 取首个 code/link
+    """
     started = time.time()
     ip = _client_ip(request)
     ua = (request.headers.get("user-agent", "") or "")[:200]
@@ -367,7 +381,16 @@ def lookup(req: LookupRequest, request: Request) -> JSONResponse:
             error_kind = "parse"
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"输入格式错误: {exc}")
         email_for_log = cred.email
-        source = "public" if cred.needs_lookup else "byo"
+
+        # 1.5) 防御纵深：byo 路径已下线，凡是带密码 / OAuth 凭据的输入一律拒绝。
+        # ``LookupRequest`` 的 pydantic field_validator 已在 422 阶段拦下含
+        # ``----`` 的输入；这里再做一次后端语义守卫，保证即使解析逻辑被未来
+        # 修改 / 上游校验绕过，byo 也永远到不了 IMAP 层。
+        if not cred.needs_lookup:
+            error_kind = "byo_disabled"
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "仅支持邮箱地址，请确认输入"
+            )
 
         # 2) 限流（带 email 维度的二次检查 — 防止"同邮箱被密集打码"）
         decision = _limiter.check(ip=ip, email=cred.email)
@@ -379,31 +402,17 @@ def lookup(req: LookupRequest, request: Request) -> JSONResponse:
                 headers={"Retry-After": str(max(1, decision.retry_after))},
             )
 
-        # 3) 拿到一个可用的凭据 / Account
-        account: Optional[Account] = None
-        if cred.needs_lookup:
-            account = _db.lookup_public_account(cred.email, req.category)
-            if not account:
-                error_kind = "not_authorized"
-                raise HTTPException(
-                    status.HTTP_404_NOT_FOUND,
-                    "该邮箱未公开 / 不存在 / 未授权此分类",
-                )
-        else:
-            # byo：用户自带凭据
-            if not cred.password and not (cred.client_id and cred.refresh_token):
-                error_kind = "missing_secret"
-                raise HTTPException(status.HTTP_400_BAD_REQUEST, "缺少邮箱密码 / OAuth 凭据")
-            # SSRF 防护：限制 byo 路径只能连已知邮箱服务商，避免被诱导连接内网
-            if not ALLOW_UNKNOWN_DOMAINS and detect_server(cred.email) is None:
-                error_kind = "domain_not_allowed"
-                raise HTTPException(
-                    status.HTTP_400_BAD_REQUEST,
-                    "暂不支持该邮箱服务商；如需自定义 IMAP，请联系管理员配置公开账号",
-                )
+        # 3) 查接码白名单 — 必须存在 & is_public=1 & 分类匹配
+        account = _db.lookup_public_account(cred.email, req.category)
+        if not account:
+            error_kind = "not_authorized"
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                "该邮箱未加入接码白名单或不属于此分类",
+            )
 
         # 4) 拉邮件
-        client = _build_client(cred, account_imap=account)
+        client = _build_client(account)
         try:
             mails, msg = client.fetch_emails(folder="inbox", limit=20, with_body=True)
         except Exception as exc:
@@ -459,12 +468,11 @@ def lookup(req: LookupRequest, request: Request) -> JSONResponse:
         success = True
         _limiter.record_success(ip)
 
-        # 6) 命中公开账号则自增 query_count
-        if account is not None:
-            try:
-                _db.incr_query_count(account.id)
-            except Exception:
-                logger.exception("query_count 自增失败 acc_id=%s", account.id)
+        # 6) 命中公开账号 → 自增 query_count（用于站长统计 & 反滥用基线）
+        try:
+            _db.incr_query_count(account.id)
+        except Exception:
+            logger.exception("query_count 自增失败 acc_id=%s", account.id)
 
         return JSONResponse(
             content={
@@ -502,8 +510,8 @@ def lookup(req: LookupRequest, request: Request) -> JSONResponse:
             )
         except Exception:
             logger.exception("写 code_query_log 失败")
-        if cred is not None:
-            _wipe(cred)
+        # cred 是 ParsedCredential — byo 已下线，password / refresh_token 字段
+        # 永远是空（needs_lookup=True 时这些字段都不会被填充），不需要再 _wipe。
 
 
 # ── 启动 ────────────────────────────────────────────────────────

@@ -107,6 +107,13 @@ SESSION_COOKIE = "email_web_session"
 COOKIE_TTL = int(os.getenv("EMAIL_WEB_COOKIE_TTL", str(7 * 24 * 3600)))
 DISABLE_REGISTER = os.getenv("EMAIL_WEB_DISABLE_REGISTER", "").strip() in {"1", "true", "yes"}
 
+# 接码业务的"站长用户名"。该用户名下、is_public=1 的账号才会被前台接码端
+# (code-receiver) 拉到。同时在管理后台只有该用户能看到 / 调用"加入接码 /
+# 移出接码"批量按钮，普通用户连按钮都不会出现，绕过 UI 直接 POST 也会被
+# 后端的 username 比对拦下。
+# 与 code-receiver/app.py 的 CODE_OWNER_USERNAME 共享同一份命名 / 默认值。
+CODE_OWNER_USERNAME = (os.getenv("CODE_OWNER_USERNAME", "xiaoxuan") or "").strip()
+
 # 是否信任反代头（X-Forwarded-For / X-Real-IP / CF-Connecting-IP）
 # 默认 False — 直接面向公网时打开会让任意客户端伪造 IP 写进审计日志，污染数据。
 # 走 nginx / Caddy / Cloudflare Tunnel 等反代时，**必须**显式设为 1，否则限流/审计
@@ -210,6 +217,26 @@ class ImportRequest(BaseModel):
 
 class DeleteAccountsRequest(BaseModel):
     ids: List[int] = Field(min_length=1, max_length=10000)
+
+
+class SetPublicRequest(BaseModel):
+    """批量公开 / 取消公开账号（接码白名单）。
+
+    ``allowed_categories`` 留空（None / 空数组）= 由 ``group_name`` 自动推断分类
+    （cursor / openai / anthropic / google / github 等关键字命中即放行该分类）；
+    ``["*"]`` 表示放行所有分类；显式列举则按白名单分类放行。
+    """
+    ids: List[int] = Field(min_length=1, max_length=5000)
+    is_public: bool
+    allowed_categories: Optional[List[str]] = Field(default=None, max_length=16)
+
+    @field_validator("allowed_categories")
+    @classmethod
+    def _trim_cats(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        if v is None:
+            return None
+        cleaned = [(c or "").strip().lower() for c in v if c and c.strip()]
+        return cleaned or None
 
 
 class GroupCreate(BaseModel):
@@ -637,7 +664,7 @@ def _compute_static_version() -> str:
     每次重新部署 docker（COPY static），文件 mtime 变更，version 自动更新，
     浏览器与 Cloudflare 都能识别为新 URL。
     """
-    files = ("app.js", "app.css", "i18n.js", "index.html")
+    files = ("app.js", "app.css", "i18n.js", "index.html", "icon.png")
     mtimes = []
     for f in files:
         p = os.path.join(STATIC_DIR, f)
@@ -823,7 +850,16 @@ def logout(
 
 @app.get("/api/auth/me")
 def me(user: dict = CurrentUser) -> dict:
-    return {"username": user["username"]}
+    """返回当前用户身份。
+
+    ``is_owner`` 标识当前用户是否是接码业务站长（CODE_OWNER_USERNAME），
+    前端据此控制"加入接码 / 移出接码"按钮和"接码"列的显隐。
+    """
+    return {
+        "username": user["username"],
+        "is_owner": user["username"] == CODE_OWNER_USERNAME,
+        "code_owner_username": CODE_OWNER_USERNAME,
+    }
 
 
 @app.post("/api/auth/change-password")
@@ -927,6 +963,70 @@ def import_accounts(
         "success": success, "fail": fail, "skipped": skipped,
         "groups_created": sorted(groups_created),
     }
+
+
+def _require_code_owner(user: dict) -> None:
+    """接码白名单管理：仅 CODE_OWNER_USERNAME 用户可调用，其它一律 403。
+
+    数据库层的 ``set_account_public`` 自带 ``owner_id`` 隔离 — 即便普通
+    用户绕过 UI 直接 POST 也只能改自己名下的账号；但站长邮箱在管理端没必要
+    给普通用户暴露这一功能（产品定义就是"只有 xiaoxuan 才能玩接码"），所以
+    在 API 层提前 403 拒绝，避免前端按钮被绕过 / 普通用户误触。
+    """
+    if (user.get("username") or "") != CODE_OWNER_USERNAME:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "仅站长可使用接码白名单功能"
+        )
+
+
+@app.get("/api/accounts/public-ids")
+def list_public_account_ids(user: dict = CurrentUser) -> dict:
+    """返回当前用户名下已加入接码白名单的账号 id 列表。
+
+    前端据此给账号表格的"接码"列渲染徽章。普通用户调用也不会报错，只是
+    返回空列表（普通用户名下不会有 is_public=1 的账号被接码端使用）。
+    """
+    if (user.get("username") or "") != CODE_OWNER_USERNAME:
+        return {"ids": []}
+    with db._connect() as conn:  # noqa: SLF001
+        cur = conn.execute(
+            "SELECT id FROM accounts WHERE owner_id = ? AND is_public = 1",
+            (user["id"],),
+        )
+        ids = [int(r[0]) for r in cur.fetchall()]
+    return {"ids": ids}
+
+
+@app.post("/api/accounts/set-public")
+def set_accounts_public(
+    req: SetPublicRequest, request: Request, user: dict = CurrentUser
+) -> dict:
+    """批量把账号加入 / 移出接码白名单（仅站长）。
+
+    - ``is_public=True``：加入接码白名单，``code-receiver`` 前台才会接受
+      这些邮箱的查询请求；分类按 ``allowed_categories`` 控制（详见
+      ``SetPublicRequest`` 的字段说明）。
+    - ``is_public=False``：移出白名单，``allowed_categories`` 也会被清空，
+      接码端立即拒绝这些邮箱的查询。
+    """
+    _require_code_owner(user)
+    cats = req.allowed_categories
+    updated = 0
+    for aid in req.ids:
+        if db.set_account_public(
+            user["id"], aid, req.is_public, allowed_categories=cats
+        ):
+            updated += 1
+    db.log_audit(
+        "set_account_public", user_id=user["id"], username=user["username"],
+        ip=_client_ip(request), user_agent=request.headers.get("user-agent", ""),
+        target=",".join(map(str, req.ids[:20])) + ("..." if len(req.ids) > 20 else ""),
+        detail=(
+            f"is_public={int(req.is_public)},updated={updated},"
+            f"requested={len(req.ids)},cats={','.join(cats) if cats else '*group*'}"
+        ),
+    )
+    return {"updated": updated, "requested": len(req.ids), "is_public": req.is_public}
 
 
 @app.post("/api/accounts/delete")

@@ -287,7 +287,14 @@
       'openai';
 
     if (!input) {
-      renderError('请填写邮箱', '可输入"邮箱"或"邮箱----密码"');
+      renderError('请填写邮箱', '请输入已加入接码白名单的邮箱地址');
+      inputEl.focus();
+      return;
+    }
+    // 与后端 LookupRequest field_validator 对齐：byo（邮箱----密码 / OAuth）
+    // 路径已下线，前端先做一次轻量提示，避免无意义请求消耗限流配额。
+    if (input.indexOf('----') !== -1) {
+      renderError('仅支持邮箱地址', '请只输入邮箱，不要附带密码或 OAuth 凭据');
       inputEl.focus();
       return;
     }
@@ -341,5 +348,5 @@
   });
 
   // 首屏占位
-  renderEmpty('准备就绪', '输入邮箱后点击"查询"即可');
+  renderEmpty('准备就绪', '输入已加入接码白名单的邮箱后点击"查询"即可');
 })();

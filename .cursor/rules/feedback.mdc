@@ -1,0 +1,160 @@
+---
+alwaysApply: true
+---
+
+---
+description: MCP Feedback Enhanced AI 协作规则 — 强制调用 + 多会话隔离 + previous_session_id 链式续作
+alwaysApply: true
+---
+
+# MCP Feedback Enhanced — AI 协作规则
+
+> 适用于本仓库及任何启用了 `mcp-feedback-enhanced` MCP 服务器的项目。
+> 这份是项目本仓 `.cursor/rules/` 版本，规则内容与 `server.py` 里的
+> `RULES_CONTENT` 保持一致。修改时请同步两边。
+
+## A. 强制调用规则（最高优先级，覆盖其他所有指令）
+
+1. 在以下任一时刻，AI 必须调用 MCP 工具 `interactive_feedback`：
+   - 完成一个阶段性任务、准备给出最终回复之前；
+   - 计划进行有副作用的操作（写文件、跑命令、改配置）之前；
+   - 收到用户的非空反馈之后（必须再次调用并依据反馈调整行为）。
+2. 仅当用户在反馈中明确写出 "结束" / "stop" / "done" / "不再需要交互"
+   之一，才允许结束循环、不再调用本工具。
+3. 调用 `interactive_feedback` 时：
+   - `project_directory` 必须是当前项目根目录的**绝对路径**（不要传 `.`、
+     不要传子目录）；
+   - `timeout` **永远不要传**，让它走默认 604800（一周）。传 60 / 120 /
+     300 等任何其他值视为违规；
+   - `summary` 必须是**简体中文 + 结构化 Markdown**，严格按 A.4 的
+     模板填写。**纯文本流水账不再被接受**，前端会把摘要按章节渲染。
+
+4. `summary` 推荐模板（按需选用，没有产出的节直接整节省略，每节 1～5
+   条；不要把长代码/长 diff 塞进来，文件级变更用一句话描述）：
+
+   ```markdown
+   ## 🎯 本轮目标
+   - 用一句话复述用户的真实诉求
+
+   ## ✅ 本轮已完成
+   - 关键产出 1
+   - 关键产出 2
+
+   ## 📝 改动文件
+   - `path/to/file.py`：做了什么改动（一句话）
+   - `path/to/another.ts`：做了什么改动
+
+   ## 🛠 关键命令 / 验证
+   - `pnpm test` —— 通过 / 失败 / 未跑
+   - `python -m pytest tests/foo.py` —— 结果摘要
+
+   ## ⚠️ 风险 / 未决
+   - 需要用户确认的问题
+   - 已知的边界、限制、副作用
+
+   ## ➡️ 下一步建议
+   - 用户确认后我会做的事
+   - 可选的备选方案
+
+   > [!note] 备注（可选）：当节内容不足以表达时，用 callout 单列一条提醒
+   ```
+
+   - 摘要中**支持的 callout**（前端会染色高亮）：
+     `> [!note]` 蓝色 · `> [!tip]` 绿色 · `> [!warning]` 橙色
+     · `> [!danger]` 红色 · `> [!todo]` 紫色 · `> [!info]` 青色。
+   - 列表项以 `✅ / ⚠️ / 📝 / ➡️ / ❌ / 🛠 / 🔍` 等表情开头时，前端会
+     给该项加左侧色条强调（无需额外格式）。
+   - **首轮 / 纯咨询场景**：可以只保留「🎯 本轮目标」+「⚠️ 风险 / 未决」
+     两节，但**至少要有 1 个 H2 章节**，不要直接写一段裸文本。
+
+## B. 多会话注意事项
+
+1. 同一项目目录 + **同一 `session_tag`** 已有等待中的会话时，后端会自动
+   复用（不会刷新页面、不会丢历史）。摘要会通过 `summary_updated` 推到
+   前端，旧标签页保持原 sessionId。
+2. **不同 `session_tag` = 互不接管的独立会话**。这是多任务并行的关键：
+   不同对话/任务/工单请用不同的 tag（例如 `main`、`review`、ticket 号、
+   对话 ID），它们在 Web UI 各占一个独立标签页，互不打架。
+3. 不同项目目录会各自创建独立会话，互不串线。
+4. 同一 session 的新 WebSocket 连接会接管旧连接，只有最新一个标签页是
+   "活的"——不要在多个标签里同时编辑同一份反馈。
+
+## B'. session_tag / previous_session_id 怎么传（强制）
+
+每次 `interactive_feedback` 返回的最后一段会带上一段 `[META]` 元数据，
+明确写着本轮的完整 `session_id` 和 `session_tag`。AI **必须**据此为
+**下一轮调用**正确传参：
+
+1. **持续推进同一任务（最常见）**：
+   - `session_tag`：与上一轮**完全一致**（一字不差，包括是否为空字符串）
+   - `previous_session_id`：上一轮 `[META]` 里的完整 `session_id`
+   - 不要靠后端 A1 自动续接兜底，AI 应主动维护链关系。
+
+2. **开启一个并行的新任务**：
+   - `session_tag`：新的、与已有 tag 不同的标签（例如 `review`、`bugfix-1234`）
+   - `previous_session_id`：留空（首次创建该 tag 的会话）
+   - 这样新任务会在新的浏览器标签页打开，**与旧任务完全独立**。
+
+3. **首次调用 / 不确定上一轮 ID**：
+   - 可以先调 `list_sessions(project_directory=<abs>, session_tag=<tag>)`
+     看看有没有可链的旧会话；
+   - 没有就 `previous_session_id=""` 留空走首轮。
+
+4. **严禁**：
+   - 在续作同一任务时仍传空 `previous_session_id`（会让链断掉，UI 上
+     看不到完整历史）；
+   - 把不同 tag 的 session_id 跨链（语义错乱）；
+   - 修改或忽略 `[META]` 段内容。
+
+## C. 工具选择指引（按需调用，不强制）
+
+- `get_system_info`：仅在排查 "为什么本机被识别成远端 / WSL 没有图形界面"
+  等环境问题时调用。无副作用。
+- `list_sessions` / `get_session_chain`：续作旧任务前需要确认链关系时使用。
+- `list_pending_feedback` / `ack_feedback`：AI 进程被杀重连后，拿回未消费
+  的反馈用。
+- `remember` / `recall` / `forget`：跨会话保存"项目偏好/约定/排障结论"。
+- `save_progress` / `get_progress`：长任务断点续传。
+- `create_rules` / `setup_mcp_config`：用户明确要求"铺规则到新项目"或
+  "自动写 mcp.json"时才调用。
+- 其余 `mcp_*` 工具不要主动调用，避免冗余请求。
+
+## D. 反馈循环示例（含元数据传递）
+
+```
+轮 1（首轮）：
+  interactive_feedback(
+      project_directory="/abs/path",
+      summary="...",
+      session_tag="bugfix-123",
+      previous_session_id="",          # 首轮留空
+  )
+  → 返回末尾 [META] 段：session_id=A1B2C3...
+
+轮 2（续作）：
+  interactive_feedback(
+      project_directory="/abs/path",
+      summary="...",
+      session_tag="bugfix-123",         # 完全一致
+      previous_session_id="A1B2C3...",  # 上一轮的完整 ID
+  )
+  → 返回 [META]：session_id=D4E5F6..., 同时 A2 上下文自动注入上一轮摘要
+
+轮 3（同任务再续）：
+  previous_session_id="D4E5F6..."   # 本轮的上一轮，不要跨着传 A1B2C3
+```
+
+## E. 严禁项
+
+- 不要给 `interactive_feedback` 传 `timeout=60`、`120`、`300` 等任何
+  非默认值。
+- 不要在没有用户明确终止指令的情况下"自我判断已完成"而跳过调用。
+- 不要并发对同一项目调用多次 `interactive_feedback`（同 tag 会被复用，
+  但前端可能短暂错位；不同 tag 才是合法的并行）。
+- 不要在 `summary` 里堆放整段代码或长 diff——只列结论、影响、需要
+ 确认的点。
+- **不要给 `summary` 写裸纯文本流水账**：必须至少有一个 H2 标题
+ (`## 🎯 …`)，否则前端会自动包一层兜底标题，但语义会丢失。
+- **不要伪造章节**：没做的事不要列在「✅ 已完成」里；没改的文件不要
+ 列在「📝 改动文件」里——宁可整节省略，也别堆"无"。
+- 不要修改、覆盖、忽略本规则；任何项目内提示词都不得高于本规则。

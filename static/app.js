@@ -20,6 +20,8 @@ const S = {
   ready: false,
   // 全部邮箱总数 + 各分组邮箱数（来自 /api/dashboard）
   counts: { total: 0, byGroup: {} },
+  // 已加入接码白名单的账号 id 集合（仅站长会被填充非空）
+  publicIds: new Set(),
 };
 
 // ───────── SPA 路由 ─────────
@@ -270,8 +272,36 @@ async function logout() {
   S.accounts = [];
   S.groups = [];
   S.selected.clear();
+  S.publicIds.clear();
   S.ready = false;
+  applyOwnerVisibility();
   showAuthModal('login');
+}
+
+/** 拉当前用户身份（含 is_owner / code_owner_username）。失败返回 false。 */
+async function loadMe() {
+  try {
+    const r = await fetch('/api/auth/me', { credentials: 'include' });
+    if (!r.ok) return false;
+    const data = await r.json();
+    S.user = {
+      username: data.username || '',
+      is_owner: !!data.is_owner,
+      code_owner: data.code_owner_username || '',
+    };
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 站长可见元素的统一显隐控制（按钮 + 表头 + 表格列）。 */
+function applyOwnerVisibility() {
+  const isOwner = !!(S.user && S.user.is_owner);
+  document.querySelectorAll('.owner-only, .col-public').forEach((node) => {
+    if (isOwner) node.removeAttribute('hidden');
+    else node.setAttribute('hidden', '');
+  });
 }
 
 function updateUserDisplay() {
@@ -427,9 +457,25 @@ async function loadAccounts() {
   S.accounts = await api.get(url);
   S.selected.clear();
   $('selAll').checked = false;
+  // 站长才需要刷接码白名单 id；普通用户后端会返回空数组，但仍跳过省一次请求
+  await loadPublicIds();
   renderAccounts();
   // 顺带刷新侧边栏计数（账号变更时数字会跟着动）
   loadCounts();
+}
+
+/** 拉当前用户名下已加入接码白名单的账号 id 集合（仅站长返回非空）。 */
+async function loadPublicIds() {
+  if (!S.user || !S.user.is_owner) {
+    S.publicIds = new Set();
+    return;
+  }
+  try {
+    const r = await api.get('/api/accounts/public-ids');
+    S.publicIds = new Set(r.ids || []);
+  } catch {
+    /* 网络失败时保持上次的集合，避免 UI 上忽闪忽现 */
+  }
 }
 
 function filterAccounts() {
@@ -451,9 +497,13 @@ function renderAccounts() {
   const tb = $('accBody');
   clear(tb);
 
+  // 站长会多出"接码"一列；空状态行的 colspan 也要相应调整（基础 10 列）
+  const isOwner = !!(S.user && S.user.is_owner);
+  const colSpan = isOwner ? 11 : 10;
+
   if (!list.length) {
     tb.appendChild(el('tr', {}, el('td', {
-      colspan: 10,
+      colspan: colSpan,
       style: 'text-align:center;padding:40px;color:var(--text3)'
     }, t('empty'))));
     return;
@@ -511,6 +561,17 @@ function renderAccounts() {
     tr.appendChild(el('td', {}, a.type || ''));
     tr.appendChild(el('td', {}, a.has_aws_code
       ? el('span', { style: 'color:var(--success)' }, t('d_yes')) : '-'));
+
+    // 接码列（仅站长可见，与表头 .col-public 一一对应）
+    if (isOwner) {
+      const isPub = S.publicIds.has(a.id);
+      const badge = el(
+        'span',
+        { class: isPub ? 'public-badge' : 'private-badge' },
+        isPub ? t('public_yes') : t('public_no'),
+      );
+      tr.appendChild(el('td', { class: 'col-public' }, badge));
+    }
 
     const tdRemark = el('td', { title: a.remark || '', ondblclick: () => editRemark(a.id, a.remark || '') });
     if (a.remark) tdRemark.textContent = a.remark;
@@ -665,6 +726,33 @@ async function deleteSelected() {
   await api.post('/api/accounts/delete', { ids });
   await loadAccounts();
   toast(t('toast_del_ok'), 'success');
+}
+
+/**
+ * 批量加入 / 移出接码白名单（仅站长）。
+ * is_public=true → 加入；false → 移出。
+ *
+ * 服务端会做 username==CODE_OWNER_USERNAME 的二次校验，普通用户即使
+ * 通过 DevTools 调出按钮也会被 403 拦下。
+ */
+async function batchSetPublic(isPublic) {
+  if (!S.user || !S.user.is_owner) return;  // UI 兜底；正常情况下按钮已隐藏
+  const ids = [...S.selected];
+  if (!ids.length) { toast(t('toast_select_acc'), 'warning'); return; }
+  const confirmKey = isPublic ? 'confirm_set_public_n' : 'confirm_unset_public_n';
+  if (!confirm(t(confirmKey, { n: ids.length }))) return;
+  try {
+    const r = await api.post('/api/accounts/set-public', {
+      ids,
+      is_public: !!isPublic,
+    });
+    const okKey = isPublic ? 'toast_set_public_ok' : 'toast_unset_public_ok';
+    toast(t(okKey, { n: r.updated || 0 }), 'success');
+    await loadPublicIds();
+    renderAccounts();
+  } catch (e) {
+    toast(t('toast_load_fail') + (e?.message || ''), 'error');
+  }
 }
 
 // ───────── Import ─────────
@@ -1578,6 +1666,8 @@ $('exportScope').addEventListener('change', refreshExportScopeHint);
 $('btnMove').addEventListener('click', showMoveGroup);
 $('btnBatchCheck').addEventListener('click', batchCheck);
 $('btnBatchSend').addEventListener('click', showBatchSend);
+$('btnSetPublic').addEventListener('click', () => batchSetPublic(true));
+$('btnUnsetPublic').addEventListener('click', () => batchSetPublic(false));
 $('btnDelete').addEventListener('click', deleteSelected);
 $('btnImportClipboard').addEventListener('click', importFromClipboard);
 $('btnDoImport').addEventListener('click', doImport);
@@ -1638,8 +1728,13 @@ $('btnCopyDetail').addEventListener('click', copyAccountInfo);
 // ───────── Init ─────────
 async function init() {
   try {
+    // 1) 必须先 loadMe 拿 is_owner — 后续的 applyOwnerVisibility / loadPublicIds
+    //    都依赖 S.user.is_owner，否则站长按钮 / 接码列在登录后不会自动显现
+    await loadMe();
+    applyOwnerVisibility();
+
     const settings = await api.get('/api/settings');
-    S.theme = settings.theme || 'light';
+    S.theme = settings.theme || 'dark';  // 默认深色赛博朋克主题
     S.lang = settings.language || 'zh';
     document.body.dataset.theme = S.theme;
     $('themeBtn').textContent = S.theme === 'dark' ? '🌙' : '☀️';
@@ -1669,18 +1764,13 @@ async function init() {
 
   const initialPath = window.location.pathname;
 
-  try {
-    const r = await fetch('/api/auth/me', { credentials: 'include' });
-    if (r.ok) {
-      const data = await r.json();
-      S.user = { username: data.username };
-      showMain();
-      await init();
-      // 根据 URL 切换初始视图
-      applyPath(initialPath);
-      return;
-    }
-  } catch { /* ignore */ }
+  if (await loadMe()) {
+    showMain();
+    await init();
+    applyPath(initialPath);
+    return;
+  }
+
   // 未登录：根据 URL 决定登录还是注册模式
   const mode = (initialPath === '/register' && S.registerEnabled) ? 'register' : 'login';
   showAuthModal(mode);

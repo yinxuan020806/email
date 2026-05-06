@@ -174,7 +174,11 @@ def test_register_login_logout_flow(client):
     """登录态由 cookie 维护：注销后不应再被识别为已登录。"""
     me = client.get("/api/auth/me")
     assert me.status_code == 200
-    assert me.json() == {"username": "alice"}
+    body = me.json()
+    assert body["username"] == "alice"
+    # 新增：me 还应该返回 is_owner / code_owner_username（接码白名单功能用）
+    assert "is_owner" in body and isinstance(body["is_owner"], bool)
+    assert "code_owner_username" in body
 
     # 注销后 cookie 失效
     assert client.post("/api/auth/logout").status_code == 200

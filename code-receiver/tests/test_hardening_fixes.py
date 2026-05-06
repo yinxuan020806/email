@@ -4,7 +4,8 @@
 覆盖修复点：
 - M2 ``_sort_mails_newest_first`` 对 RFC 2822 日期 fallback
 - M3 ``_AUTH_ERROR_NEEDLES`` 扩充：AADSTS / bad credentials / mailbox 等
-- L3 ``LookupRequest.input`` 字段长度上限放宽到 4000
+- L3 ``LookupRequest.input`` 仅接受裸邮箱（RFC 5321 上限 254，模型放宽到 256）；
+  byo（长 OAuth 串）路径已下线，不再接收 4000 字节输入
 - S2 ``/api/lookup`` parse 失败也走 IP 维度限流计数
 - M6 ``get_public_account_for_lookup`` email 查询大小写不敏感
 """
@@ -107,27 +108,37 @@ def test_is_auth_failure_does_not_overmatch():
 # ── 单元测试：LookupRequest 字段长度 ───────────────────────────────
 
 
-def test_lookup_request_accepts_long_input():
-    """Microsoft refresh_token 平均 1500-2000 字节 + email + client_id + 分隔符
-    可达 2300+，旧 max_length=2000 会切断；放宽到 4000 才能容纳。"""
+def test_lookup_request_accepts_valid_email_max_length():
+    """仅邮箱：合法最长形态（接近 254）应通过校验。"""
     from app import LookupRequest
 
-    long_input = "x@outlook.com----pwd----" + ("M" * 3500)
-    assert len(long_input) > 2000
-    assert len(long_input) < 4000
-    # 不抛 ValidationError 即视为通过
-    req = LookupRequest(input=long_input, category="cursor")
-    assert req.input == long_input
+    # 256 长度边界内：65(local) + @ + 186(domain) = 252（有效邮箱形态）
+    local = "a" * 64
+    domain = "b" * 180 + ".com"
+    email = f"{local}@{domain}"
+    assert len(email) <= 256
+    req = LookupRequest(input=email, category="cursor")
+    assert req.input == email
 
 
-def test_lookup_request_rejects_oversized_input():
-    """超出新上限 4000 仍应被拦截。"""
+def test_lookup_request_rejects_byo_dash_pattern():
+    """含 ``----`` 的 byo 输入在 field_validator 阶段拒绝。"""
     from pydantic import ValidationError
 
     from app import LookupRequest
 
     with pytest.raises(ValidationError):
-        LookupRequest(input="x@outlook.com" + ("y" * 5000), category="cursor")
+        LookupRequest(input="x@outlook.com----pwd", category="cursor")
+
+
+def test_lookup_request_rejects_oversized_input():
+    """超出 256 字符上限应被拦截。"""
+    from pydantic import ValidationError
+
+    from app import LookupRequest
+
+    with pytest.raises(ValidationError):
+        LookupRequest(input="x@outlook.com" + ("y" * 260), category="cursor")
 
 
 # ── 单元测试：M6 — email 大小写不敏感查询 ────────────────────────

@@ -107,8 +107,31 @@ def test_lookup_validation_does_not_leak_input(client):
     assert "errors" in body or "detail" in body
 
 
-def test_lookup_blocks_unknown_domain_byo_path(client):
-    """SSRF 防护：未知域名 + 自带密码 → 400，不会去连内网。"""
+def test_lookup_rejects_byo_input_with_dashes(client):
+    """byo 路径已下线：含 ---- 的输入一律在 pydantic 阶段（422）就被拦下，
+    不会进入 lookup 函数体（也不会消耗限流配额或触发 IMAP 连接）。
+    """
+    secret_pwd = "AnotherSecretPwd123"
+    r = client.post(
+        "/api/lookup",
+        json={
+            "input": f"alice@outlook.com----{secret_pwd}",
+            "category": "cursor",  # 合法分类，单纯 input 校验失败
+        },
+    )
+    assert r.status_code == 422
+    # 关键安全：响应里**绝不能**含有用户原始密码
+    assert secret_pwd not in r.text, "422 响应泄漏了密码字段"
+    body = r.json()
+    # 字段错误信息应明确说明只支持邮箱
+    err_text = " ".join(
+        e.get("msg", "") for e in body.get("errors", []) if isinstance(e, dict)
+    ) + body.get("detail", "")
+    assert "邮箱" in err_text or "扩展格式" in err_text
+
+
+def test_lookup_rejects_byo_unknown_domain(client):
+    """未知域名 + 含 ---- → 仍然 422 在 pydantic 阶段拦下（连 SSRF 检查都不需要）。"""
     r = client.post(
         "/api/lookup",
         json={
@@ -116,10 +139,7 @@ def test_lookup_blocks_unknown_domain_byo_path(client):
             "category": "cursor",
         },
     )
-    # 400 表示在 SSRF 检查阶段就被拦下来了
-    assert r.status_code == 400
-    body = r.json()
-    assert "暂不支持" in body.get("detail", "") or "服务商" in body.get("detail", "")
+    assert r.status_code == 422
 
 
 def test_lookup_email_only_not_public_returns_404(client):
@@ -130,25 +150,36 @@ def test_lookup_email_only_not_public_returns_404(client):
     )
     # 404 因为查 DB 找不到 is_public=1 + 属于 xiaoxuan 的账号
     assert r.status_code == 404
-
-
-def test_lookup_byo_known_domain_no_password(client):
-    """已知服务商 + 没填密码 → 400 提示缺少密码。
-
-    输入是 'a@outlook.com----'（有 ---- 但密码段空）→ parse_user_input 解析为 2 段
-    (email, password='')，缺少 password 触发 missing_secret 400。
-    """
-    r = client.post(
-        "/api/lookup",
-        json={"input": "alice@outlook.com----", "category": "cursor"},
-    )
-    assert r.status_code == 400
     body = r.json()
-    assert "密码" in body.get("detail", "") or "凭据" in body.get("detail", "")
+    assert "白名单" in body.get("detail", "") or "未授权" in body.get("detail", "") \
+        or "未公开" in body.get("detail", "")  # 兼容旧文案
 
 
-def test_lookup_success_path_mocked(app_module, client):
-    """mock EmailClient → 验证完整提码流程：byo 拉到伪造邮件 → cursor 提取器 → 返回 code。"""
+def _make_fake_account(email: str = "owner@outlook.com"):
+    """构造一个假的 Account 对象用来 mock 公开账号查询。"""
+    from core.models import Account
+    return Account(
+        id=1,
+        email=email,
+        password="placeholder",
+        group_name="cursor",
+        status="正常",
+        account_type="普通",
+        imap_server="outlook.office365.com",
+        imap_port=993,
+        smtp_server="smtp.office365.com",
+        smtp_port=587,
+        client_id=None,
+        refresh_token=None,
+        created_at="2026-05-05T00:00:00",
+        last_check=None,
+        has_aws_code=0,
+        remark="",
+    )
+
+
+def test_lookup_success_path_public_cursor(app_module, client):
+    """公开账号路径：mock DB lookup_public_account 返回 cursor 账号 + IMAP 拉到验证码邮件。"""
     fake_mails = [
         {
             "sender": "no-reply@cursor.sh",
@@ -170,21 +201,22 @@ def test_lookup_success_path_mocked(app_module, client):
         def disconnect(self):
             pass
 
-    with patch.object(app_module, "EmailClient", FakeClient):
-        # 用一个 "已知服务商域名 + 假密码" 的 byo 输入，IMAP 被 mock 后会返回 fake_mails
+    fake_account = _make_fake_account("alice@outlook.com")
+
+    with patch.object(app_module, "EmailClient", FakeClient), \
+         patch.object(app_module._db, "lookup_public_account", return_value=fake_account), \
+         patch.object(app_module._db, "incr_query_count", return_value=True):
         r = client.post(
             "/api/lookup",
-            json={
-                "input": "alice@outlook.com----any-imap-password",
-                "category": "cursor",
-            },
+            json={"input": "alice@outlook.com", "category": "cursor"},
         )
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["found"] is True
     assert body["code"] == "248135"
     assert body["category"] == "cursor"
-    assert body["source"] == "byo"
+    # byo 已下线，source 永远是 public
+    assert body["source"] == "public"
     assert body["sender"].startswith("no-reply@cursor.sh")
 
 
@@ -215,13 +247,14 @@ def test_lookup_success_path_openai_link(app_module, client):
         def disconnect(self):
             pass
 
-    with patch.object(app_module, "EmailClient", FakeClient):
+    fake_account = _make_fake_account("bob@outlook.com")
+
+    with patch.object(app_module, "EmailClient", FakeClient), \
+         patch.object(app_module._db, "lookup_public_account", return_value=fake_account), \
+         patch.object(app_module._db, "incr_query_count", return_value=True):
         r = client.post(
             "/api/lookup",
-            json={
-                "input": "bob@outlook.com----any-imap-password",
-                "category": "openai",
-            },
+            json={"input": "bob@outlook.com", "category": "openai"},
         )
     assert r.status_code == 200, r.text
     body = r.json()

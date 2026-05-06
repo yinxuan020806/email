@@ -4,17 +4,21 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title data-i18n="app_title">邮箱管家</title>
-<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="icon" type="image/png" href="/static/icon.png?v=__STATIC_VERSION__">
+<link rel="apple-touch-icon" href="/static/icon.png?v=__STATIC_VERSION__">
 <link rel="stylesheet" href="/static/app.css?v=__STATIC_VERSION__">
 </head>
-<body data-theme="light">
+<body data-theme="dark">
 <div class="app">
   <button class="sb-toggle" id="sbToggle" type="button" aria-label="Toggle sidebar" aria-expanded="false">
     <span></span><span></span><span></span>
   </button>
   <div class="sb-backdrop" id="sbBackdrop"></div>
   <aside class="sb" id="sidebar">
-    <div class="sb-logo"><span>📧</span><span data-i18n="app_title">邮箱管家</span></div>
+    <div class="sb-logo">
+      <img src="/static/icon.png?v=__STATIC_VERSION__" alt="" width="28" height="28" class="sb-logo-img">
+      <span data-i18n="app_title">邮箱管家</span>
+    </div>
     <div class="sb-line"></div>
     <button class="nav-btn active" id="navAll" data-view="table" data-group="全部" data-i18n="nav_all">📋 全部邮箱</button>
     <div class="sb-sec">
@@ -52,6 +56,8 @@
       <button class="btn btn-o" id="btnMove" data-i18n="btn_move">移动分组</button>
       <button class="btn btn-s" id="btnBatchCheck" data-i18n="btn_batch_check">批量检测</button>
       <button class="btn btn-w" id="btnBatchSend" data-i18n="btn_batch_send">批量发信</button>
+      <button class="btn btn-cyber owner-only" id="btnSetPublic" data-i18n="btn_set_public" data-i18n-title="btn_set_public_title" title="把选中邮箱加入接码白名单（仅站长）" hidden>📡 加入接码</button>
+      <button class="btn btn-o owner-only" id="btnUnsetPublic" data-i18n="btn_unset_public" data-i18n-title="btn_unset_public_title" title="把选中邮箱移出接码白名单（仅站长）" hidden>📴 移出接码</button>
       <button class="btn btn-d" id="btnDelete" data-i18n="btn_delete">批量删除</button>
       <span class="rec-cnt" id="recCnt"></span>
     </div>
@@ -66,6 +72,7 @@
           <th style="width:80px" data-i18n="col_status">状态</th>
           <th style="width:60px" data-i18n="col_type">类型</th>
           <th style="width:50px" data-i18n="col_aws">AWS</th>
+          <th class="col-public" style="width:70px" data-i18n="col_public" hidden>接码</th>
           <th data-i18n="col_remark">备注</th>
           <th style="width:160px" data-i18n="col_op">操作</th>
         </tr></thead><tbody id="accBody"></tbody></table>
@@ -80,7 +87,9 @@
 <!-- Auth (Login / Register) Modal -->
 <div class="modal-bg" id="authModal"><div class="modal auth-modal" style="width:400px">
   <div class="auth-brand">
-    <div class="auth-logo">📧</div>
+    <div class="auth-logo">
+      <img src="/static/icon.png?v=__STATIC_VERSION__" alt="" width="48" height="48">
+    </div>
     <h3 class="auth-title" data-i18n="app_title">邮箱管家</h3>
     <p class="auth-sub" id="authSub" data-i18n="auth_sub_login">登录到您的账号</p>
   </div>

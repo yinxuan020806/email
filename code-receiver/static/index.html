@@ -4,10 +4,11 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="referrer" content="no-referrer" />
-  <meta name="theme-color" content="#5b50f5" />
-  <meta name="color-scheme" content="light dark" />
+  <meta name="theme-color" content="#0a0e17" />
+  <meta name="color-scheme" content="dark" />
   <title>验证码助手 · 一键提取邮箱验证码</title>
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'&gt;&lt;defs&gt;&lt;linearGradient id='g' x1='0' y1='0' x2='1' y2='1'&gt;&lt;stop offset='0' stop-color='%236d5cf3'/&gt;&lt;stop offset='1' stop-color='%23a855f7'/&gt;&lt;/linearGradient&gt;&lt;/defs&gt;&lt;rect width='64' height='64' rx='16' fill='url(%23g)'/&gt;&lt;path d='M14 22 L32 36 L50 22 M14 42 L26 32 M50 42 L38 32' stroke='white' stroke-width='4' stroke-linecap='round' stroke-linejoin='round' fill='none'/&gt;&lt;/svg&gt;" />
+  <link rel="icon" type="image/png" href="/static/icon.png" />
+  <link rel="apple-touch-icon" href="/static/icon.png" />
   <link rel="stylesheet" href="/static/app.css" />
 </head>
 <body>
@@ -20,23 +21,10 @@
   <main class="page">
     <header class="brand">
       <div class="brand-mark" aria-hidden="true">
-        <svg viewBox="0 0 32 32" width="32" height="32">
-          <defs>
-            <linearGradient id="brandG" x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0" stop-color="#6d5cf3" />
-              <stop offset="1" stop-color="#a855f7" />
-            </linearGradient>
-          </defs>
-          <rect width="32" height="32" rx="9" fill="url(#brandG)" />
-          <path
-            d="M7 11 L16 18 L25 11 M7 21 L13 16 M25 21 L19 16"
-            stroke="#fff" stroke-width="2.2" stroke-linecap="round"
-            stroke-linejoin="round" fill="none"
-          />
-        </svg>
+        <img src="/static/icon.png" alt="" width="56" height="56" />
       </div>
       <h1 class="brand-title">验证码助手</h1>
-      <p class="brand-sub">输入邮箱，秒拿 Cursor / ChatGPT 验证码与登录链接</p>
+      <p class="brand-sub">输入邮箱地址 · 一键提取 Cursor / ChatGPT 验证码与登录链接</p>
     </header>
 
     <section class="search-card" aria-label="查询表单">
@@ -53,13 +41,13 @@
           <input
             id="input-credential"
             name="input"
-            type="text"
+            type="email"
             inputmode="email"
             spellcheck="false"
             autocapitalize="off"
             autocomplete="off"
             placeholder="邮箱地址 · 例：name@outlook.com"
-            aria-label="邮箱地址或凭据"
+            aria-label="邮箱地址"
             required
           />
           <button type="submit" id="submit-btn" class="btn-primary">
@@ -77,7 +65,7 @@
         </div>
         <div class="category-row" role="radiogroup" aria-label="选择邮件分类">
           <label class="chip">
-            <input type="radio" name="category" value="cursor" />
+            <input type="radio" name="category" value="cursor" checked />
             <span class="chip-body">
               <svg class="chip-icon" viewBox="0 0 24 24" width="16" height="16"
                    fill="none" stroke="currentColor" stroke-width="2"
@@ -89,7 +77,7 @@
             </span>
           </label>
           <label class="chip">
-            <input type="radio" name="category" value="openai" checked />
+            <input type="radio" name="category" value="openai" />
             <span class="chip-body">
               <svg class="chip-icon" viewBox="0 0 24 24" width="16" height="16"
                    fill="none" stroke="currentColor" stroke-width="2"
@@ -106,19 +94,11 @@
     <section id="result" class="result" aria-live="polite"></section>
 
     <footer class="hint">
-      <p class="hint-title">支持的输入格式</p>
+      <p class="hint-title">使用说明</p>
       <ul class="hint-list">
         <li>
           <code>邮箱</code>
-          <span class="hint-desc">站点公开邮箱可直接查询</span>
-        </li>
-        <li>
-          <code>邮箱----密码</code>
-          <span class="hint-desc">通用 IMAP / 邮箱密码</span>
-        </li>
-        <li>
-          <code>邮箱----应用专用密码</code>
-          <span class="hint-desc">Gmail / Yahoo 授权码</span>
+          <span class="hint-desc">仅站长加入接码白名单的邮箱可被查询</span>
         </li>
       </ul>
     </footer>
