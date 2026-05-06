@@ -201,11 +201,25 @@ class Extractor:
         )
 
     def match(self, mail: dict) -> bool:
-        """发件人 + 主题双白名单匹配；任一组留空表示该维度不限制。"""
-        sender = (mail.get("sender") or mail.get("from") or "").lower()
+        """发件人 + 主题双白名单匹配；任一组留空表示该维度不限制。
+
+        sender 维度同时把 ``sender`` / ``from`` / ``sender_email`` / ``from_email``
+        都拼起来再匹配——Graph API 拉到的邮件 ``sender`` 字段只是 display name
+        （比如 ``"OpenAI"``），实际邮箱地址在 ``sender_email``。如果只看 ``sender``，
+        ``*@*.openai.com`` 这种 pattern 在纯 display name 上**永远漏匹**，
+        导致 extractor 跳过 OpenAI 最新邮件、回退到老的 ``noreply@tm.openai.com``
+        那封——用户感受是"接码取到的不是最新"。
+        """
+        sender_parts = [
+            mail.get("sender") or "",
+            mail.get("from") or "",
+            mail.get("sender_email") or "",
+            mail.get("from_email") or "",
+        ]
+        sender_combined = " ".join(s for s in sender_parts if s).lower()
         subject = (mail.get("subject") or "").lower()
         if self.sender_patterns:
-            if not any(p.search(sender) for p in self.sender_patterns):
+            if not any(p.search(sender_combined) for p in self.sender_patterns):
                 return False
         if self.subject_patterns:
             if not any(p.search(subject) for p in self.subject_patterns):

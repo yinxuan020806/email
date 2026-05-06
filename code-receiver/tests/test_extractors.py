@@ -197,6 +197,120 @@ def test_openai_html_email_extracts_otp():
     assert result.code == "186862"
 
 
+def test_openai_new_subdomain_email_openai_com():
+    """回归：OpenAI 切到 ``email.openai.com`` 子域时，前台必须仍能拿到最新邮件。
+
+    历史现象：旧 sender pattern 写死 4 个固定子域（openai.com / tm.openai.com /
+    auth.openai.com / mail.openai.com）。当 OpenAI 切到 email.openai.com 后这条
+    最新邮件被 extractor 跳过，前台只能拿到老的 tm.openai.com 邮件 → 用户感受是
+    "接码取到的不是最新"。修复后 ``*@*.openai.com`` 通配涵盖任意子域。
+    """
+    mails = [
+        # 最新邮件：新子域，旧 pattern 漏匹
+        make_mail(
+            sender='OpenAI <noreply@email.openai.com>',
+            subject='您的临时 ChatGPT 登录代码',
+            body='输入此临时验证码以继续: 654321 如果并非你本人...',
+            date='2026-05-06T20:57:00',
+        ),
+        # 老邮件：旧 pattern 能命中
+        make_mail(
+            sender='noreply@tm.openai.com',
+            subject='您的临时 ChatGPT 验证码',
+            body='输入此临时验证码以继续: 245602',
+            date='2026-05-06T20:43:00',
+        ),
+    ]
+    extractors = get_extractors("openai")
+    result = first_match(extractors, mails)
+    assert result is not None
+    assert result.code == "654321", (
+        f"应取最新邮件 654321（email.openai.com 子域），实际拿到 {result.code} "
+        "—— 说明 sender pattern 没正确通配 .openai.com 子域"
+    )
+
+
+def test_openai_graph_display_name_only_with_sender_email_field():
+    """Graph API 返回的邮件 ``sender`` 字段只是 display name（如 ``"OpenAI"``），
+    实际邮箱在 ``sender_email``。Extractor.match 必须把两个字段一起看，否则
+    pattern ``*@*.openai.com`` 在纯 ``"OpenAI"`` 上永远找不到 @，漏匹。
+
+    这是用户实测场景：管理端 UI 显示的 sender 列就是纯 ``"OpenAI"``，
+    背后 Graph 返回的是 ``{from.emailAddress.name: "OpenAI", address: "noreply@email.openai.com"}``。
+    """
+    mails = [
+        {
+            "sender": "OpenAI",  # display name only — 实际 Graph 返回就是这样
+            "sender_email": "noreply@email.openai.com",
+            "subject": "您的临时 ChatGPT 验证码",
+            "body": "输入此临时验证码以继续: 777888",
+            "preview": "输入此临时验证码以继续: 777888",
+            "date": "2026-05-06T20:57:00",
+        }
+    ]
+    extractors = get_extractors("openai")
+    result = first_match(extractors, mails)
+    assert result is not None
+    assert result.code == "777888", (
+        f"Extractor 应同时看 sender + sender_email 字段，实际抓到 {result.code}"
+    )
+
+
+def test_openai_subject_only_fallback():
+    """终极兜底：sender 完全陌生（如 OpenAI 转 ESP），但 subject 含 ChatGPT 字样
+    应该靠 priority=10 的 subject-only 规则命中。"""
+    mails = [
+        make_mail(
+            sender='OpenAI <support@some-third-party-esp.io>',
+            subject='您的 ChatGPT 验证码',
+            body='输入此临时验证码以继续: 999000',
+        )
+    ]
+    extractors = get_extractors("openai")
+    result = first_match(extractors, mails)
+    assert result is not None
+    assert result.code == "999000"
+
+
+def test_openai_subject_only_fallback_does_not_match_random():
+    """terminal 兜底必须只在 subject 含 ChatGPT/OpenAI 时触发，不能误抓通用邮件。"""
+    mails = [
+        make_mail(
+            sender='spam@example.com',
+            subject='Your shopping order #123456',
+            body='Code 123456 is your order ID',
+        )
+    ]
+    extractors = get_extractors("openai")
+    result = first_match(extractors, mails)
+    assert result is None, (
+        "随机商家邮件不能被 OpenAI extractor 误抓"
+    )
+
+
+def test_cursor_new_subdomain_notifications():
+    """Cursor 后续可能切到 ``notifications.cursor.com`` 等新子域，通配 pattern
+    必须能命中，而不是漏掉最新邮件回退到老的。"""
+    mails = [
+        make_mail(
+            sender='Cursor <no-reply@notifications.cursor.com>',
+            subject='Your verification code',
+            body='Your verification code is 384910.',
+            date='2026-05-06T20:00:00',
+        ),
+        make_mail(
+            sender='no-reply@cursor.sh',
+            subject='Your code',
+            body='Your code is 100000.',
+            date='2026-05-05T10:00:00',
+        ),
+    ]
+    extractors = get_extractors("cursor")
+    result = first_match(extractors, mails)
+    assert result is not None
+    assert result.code == "384910"
+
+
 def test_safelinks_unwrap_passthrough():
     """非 SafeLinks 原样返回。"""
     raw = "https://example.com/x?y=1"

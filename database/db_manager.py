@@ -45,7 +45,7 @@ SORTABLE_COLUMNS = {
     "last_check",
 }
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # 审计日志保留天数（超过自动清理）
 AUDIT_RETENTION_DAYS = 90
@@ -332,16 +332,11 @@ class DatabaseManager:
                 "ON code_query_log(email_hash, ts)"
             )
 
-            # ── v5 → v6 一次性数据迁移：修复"假加入接码"账号 ──
-            # 历史问题：早期版本"加入接码"按钮没自动写 allowed_categories='*'，
-            # 而依赖 group_name 关键字（cursor/gpt/openai/...）推断分类。
-            # 当账号 group_name 不含任何关键字时（比如默认分组「默认分组」），
-            # 前台 lookup_public_account 会**永远查不到**这个账号 — 站长在 UI 上
-            # 看到"已加入接码"但前台一直返回"邮箱未加入接码白名单"。
-            #
-            # 这条幂等 UPDATE 把所有命中"假加入"的账号统一改成 '*'（允许所有分类）。
-            # 已经显式设置过 allowed_categories（含分类名 / 含 '*'）的账号不动。
-            # 已经在 cursor/gpt 等分组里的账号也不动（避免改变站长的细粒度配置）。
+            # ── v5 → v6 一次性数据迁移：修复部分"假加入接码"账号（保守版） ──
+            # 仅修复 group_name 不含分类关键字的账号 — 但漏掉了一种关键场景：
+            # 账号 group_name='cursor' 时，前台查 cursor 能命中（group_name 推断），
+            # 但查 openai 仍查不到——站长意图是"加入接码=允许所有分类"，但前台只支持
+            # 一个分类。v6 没修这种 case；v7 来兜底。
             if current_version < 6:
                 fix_sql = """
                     UPDATE accounts SET allowed_categories='*'
@@ -360,12 +355,36 @@ class DatabaseManager:
                 fixed = cur.execute(fix_sql).rowcount
                 if fixed:
                     logger.warning(
-                        "v5→v6 数据迁移：修复 %d 个『假加入接码』账号 "
-                        "(allowed_categories: '' → '*')。这些账号在管理端显示"
-                        "『已加入接码』但前台一直查不到，原因是 group_name "
-                        "不含 cursor/gpt/openai 等关键字，无法被 group_name "
-                        "推断逻辑命中。",
+                        "v5→v6 数据迁移：修复 %d 个『完全假加入』账号 "
+                        "(allowed_categories: '' → '*')",
                         fixed,
+                    )
+
+            # ── v6 → v7 一次性数据迁移：修复"分类受限的假加入"账号 ──
+            # 用户报告：管理端 UI 显示『已开放』，但前台查 openai 分类时仍提示
+            # 『邮箱未加入接码白名单』，必须重新点一次"加入接码"才能恢复。
+            #
+            # 根因：账号 is_public=1 但 allowed_categories='' 且 group_name='cursor'
+            # → group_name 推断只让 cursor 分类能查到，openai/chatgpt 都被拦下。
+            # 但站长在 UI 点"加入接码"按钮的语义是"允许所有分类"（按钮目前默认写 '*'）。
+            #
+            # v7 无条件把所有 is_public=1 但 allowed_categories='' 的账号设成 '*'：
+            # - 已经显式设过 allowed_categories（如 'cursor' / 'cursor,openai'）的账号不动
+            # - 让"已开放"⇄"前台所有分类都能查到"语义彻底一致
+            if current_version < 7:
+                fix_sql_v7 = """
+                    UPDATE accounts SET allowed_categories='*'
+                    WHERE is_public = 1
+                      AND COALESCE(allowed_categories, '') = ''
+                """
+                fixed_v7 = cur.execute(fix_sql_v7).rowcount
+                if fixed_v7:
+                    logger.warning(
+                        "v6→v7 数据迁移：修复 %d 个『管理端显示已开放但前台查不到』"
+                        "的账号 (allowed_categories: '' → '*')。这些账号 group_name "
+                        "命中某个分类（如 cursor），但其他分类（如 openai）拿不到——"
+                        "v7 让『加入接码』按钮的语义彻底兑现：开放 = 允许所有分类。",
+                        fixed_v7,
                     )
 
             cur.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

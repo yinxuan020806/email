@@ -100,3 +100,81 @@ def test_audit_log_table_exists(db_path):
     col_names = {c[1] for c in cols}
     assert {"id", "ts", "user_id", "username", "action",
             "target", "ip", "user_agent", "success", "detail"} <= col_names
+
+
+def test_v7_migration_fixes_fake_public_accounts(db_path, monkeypatch):
+    """v6→v7 迁移：把 is_public=1 但 allowed_categories='' 的账号统一改成 '*'。
+
+    回归用：用户实测场景——管理端 UI 显示『已开放』但前台查 openai 拿不到，
+    必须重新点一次"加入接码"才能恢复。原因是账号 group_name='cursor'，旧逻辑
+    依赖 group_name 推断分类（cursor 命中、openai 漏匹）。v7 让"已开放"
+    在所有分类都有效。
+    """
+    # 1. 先用 v6 schema 建库，插一条"假加入"账号
+    monkeypatch.setenv("EMAIL_DATA_DIR", str(db_path.parent))
+    _reset_singletons()
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA user_version = 6")
+    conn.execute(
+        """CREATE TABLE users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"""
+    )
+    conn.execute("INSERT INTO users (username, password_hash) VALUES ('xiaoxuan', 'h')")
+    conn.execute(
+        """CREATE TABLE accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner_id INTEGER NOT NULL,
+            email TEXT NOT NULL,
+            password TEXT NOT NULL,
+            group_name TEXT DEFAULT '默认分组',
+            status TEXT DEFAULT '未检测',
+            account_type TEXT DEFAULT '普通',
+            imap_server TEXT, imap_port INTEGER DEFAULT 993,
+            smtp_server TEXT, smtp_port INTEGER DEFAULT 465,
+            client_id TEXT, refresh_token TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_check TIMESTAMP, has_aws_code INTEGER DEFAULT 0,
+            remark TEXT, is_public INTEGER DEFAULT 0,
+            allowed_categories TEXT DEFAULT '', query_count INTEGER DEFAULT 0,
+            UNIQUE (owner_id, email))"""
+    )
+    # 三种账号，验证 v7 迁移行为
+    conn.execute(
+        "INSERT INTO accounts (owner_id, email, password, group_name, is_public, allowed_categories) "
+        "VALUES (1, 'a@x.com', 'p', 'cursor', 1, '')"        # 假加入：分组限 cursor
+    )
+    conn.execute(
+        "INSERT INTO accounts (owner_id, email, password, group_name, is_public, allowed_categories) "
+        "VALUES (1, 'b@x.com', 'p', '默认', 1, '')"           # 完全假加入（v6 已修过）
+    )
+    conn.execute(
+        "INSERT INTO accounts (owner_id, email, password, group_name, is_public, allowed_categories) "
+        "VALUES (1, 'c@x.com', 'p', 'cursor', 1, 'cursor')"  # 显式只允许 cursor，不应被改
+    )
+    conn.execute(
+        "INSERT INTO accounts (owner_id, email, password, group_name, is_public, allowed_categories) "
+        "VALUES (1, 'd@x.com', 'p', 'cursor', 0, '')"        # 未开放，不该动
+    )
+    conn.commit()
+    conn.close()
+
+    # 2. 触发 v6 → v7 升级
+    from database.db_manager import DatabaseManager, SCHEMA_VERSION
+    assert SCHEMA_VERSION >= 7
+    DatabaseManager(db_path=str(db_path))
+
+    # 3. 验证迁移结果
+    conn = sqlite3.connect(str(db_path))
+    rows = dict(conn.execute(
+        "SELECT email, allowed_categories FROM accounts ORDER BY email"
+    ).fetchall())
+    conn.close()
+    _reset_singletons()
+
+    assert rows["a@x.com"] == "*", "假加入(分组 cursor)账号应被 v7 修复为 '*'"
+    assert rows["b@x.com"] == "*", "完全假加入账号应被 v7 修复为 '*'"
+    assert rows["c@x.com"] == "cursor", "显式 'cursor' 配置不应被覆盖"
+    assert rows["d@x.com"] == "", "is_public=0 的账号不该被动"
