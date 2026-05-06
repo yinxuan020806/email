@@ -67,19 +67,42 @@ if [[ "$RESTART_ONLY" == "1" ]]; then
 else
     # ── 2. 拉取最新代码 ─────────────────────────────
     if [[ -d .git ]]; then
-        # docker-compose.yml 在服务器上常被改（填真实 token / 端口），
-        # 让 git 忽略它的本地修改，避免每次 pull 冲突
+        # ── 2a. docker-compose.yml 本地改动隔离 ──
+        # 服务器上 docker-compose.yml 常被改（填真实 token / 端口）。
+        # 旧策略只靠 git update-index --skip-worktree 标记，但首次部署 / 标记
+        # 被取消时一旦仓库改动了 docker-compose.yml，git pull --ff-only 会被
+        # "Your local changes ... would be overwritten" 拦下导致整次部署失败。
+        #
+        # 新策略（更稳）：pull 前若 dirty 就备份并重置，pull 完再用备份覆盖回去——
+        # 这样无论仓库改没改 compose、本地改了多少，pull 都不会冲突；用户的
+        # 真实 token / 端口完整保留。代价是仓库新增的 compose 字段（如本次的
+        # CRX_TRUST_PROXY）不会自动出现，但下面 3.5 的"自动注入"hook 会补齐。
+        COMPOSE_RESTORE_FROM=""
         if [[ -f docker-compose.yml ]] && git ls-files --error-unmatch docker-compose.yml >/dev/null 2>&1; then
+            # 先临时取消 skip-worktree，让后续 checkout / 状态查询能正常工作
             CURRENT_FLAGS=$(git ls-files -v docker-compose.yml | head -c 1)
-            if [[ "$CURRENT_FLAGS" != "S" ]]; then
+            COMPOSE_HAD_SKIP=0
+            if [[ "$CURRENT_FLAGS" == "S" ]]; then
+                COMPOSE_HAD_SKIP=1
+                git update-index --no-skip-worktree docker-compose.yml
+            fi
+            # 检测是否 dirty（git diff 在 skip-worktree 下永远返回 unchanged，必须先取消标记）
+            if ! git diff --quiet -- docker-compose.yml; then
+                COMPOSE_RESTORE_FROM="docker-compose.yml.local-$(date +%Y%m%d_%H%M%S)"
+                info "docker-compose.yml 有本地改动 → 备份到 $COMPOSE_RESTORE_FROM 后重置以让 pull 顺利"
+                cp docker-compose.yml "$COMPOSE_RESTORE_FROM"
+                git checkout HEAD -- docker-compose.yml
+            fi
+            # 重新设上 skip-worktree（如果之前有）+ 首次部署也要标记上
+            git update-index --skip-worktree docker-compose.yml
+            if [[ "$COMPOSE_HAD_SKIP" != "1" ]]; then
                 info "标记 docker-compose.yml 为 skip-worktree（保留本地真实配置）"
-                git update-index --skip-worktree docker-compose.yml
             fi
         fi
 
         info "git pull --ff-only ..."
         if ! git diff --quiet || ! git diff --cached --quiet; then
-            warn "工作区有未提交修改，请先确认后再运行；仅展示差异，不会 reset。"
+            warn "工作区还有未提交修改（除 docker-compose.yml 已备份外）；展示差异，不会 reset。"
             git status --short || true
         fi
         BEFORE=$(git rev-parse HEAD)
@@ -90,6 +113,15 @@ else
         else
             info "代码已更新：$BEFORE → $AFTER"
             git --no-pager log --oneline "$BEFORE..$AFTER" | head -20 || true
+        fi
+
+        # ── 2b. 恢复本地 docker-compose.yml 改动（如果有） ──
+        if [[ -n "$COMPOSE_RESTORE_FROM" && -f "$COMPOSE_RESTORE_FROM" ]]; then
+            info "恢复 docker-compose.yml 本地改动（覆盖回 git 跟踪文件）"
+            cp "$COMPOSE_RESTORE_FROM" docker-compose.yml
+            # 备份保留 7 天后清理（dot 备份不影响 git，因 skip-worktree 已设）
+            find . -maxdepth 1 -name 'docker-compose.yml.local-*' -mtime +7 -delete 2>/dev/null || true
+            ok "已恢复本地 docker-compose.yml；备份保留在 $COMPOSE_RESTORE_FROM"
         fi
     else
         warn "$APP_DIR 不是 git 仓库，跳过 git pull（请按 docs/deploy-tencent-baota.md 配置 git remote）"
