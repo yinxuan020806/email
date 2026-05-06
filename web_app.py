@@ -82,47 +82,14 @@ logger = logging.getLogger("email_web")
 app = FastAPI(title="邮箱管家 Web", version="3.0.0")
 
 
-@app.on_event("startup")
-def _audit_stale_public_accounts() -> None:
-    """启动扫描：找出**历史"假加入接码"**的账号 — `is_public=1` 但
-    ``allowed_categories`` 为空、且 ``group_name`` 不含 cursor/gpt 等关键字的行。
-
-    这类账号在管理端 UI 上显示"已开放"，但前台永远查不到验证码（语义不一致）。
-    本扫描只输出 WARNING 提醒站长用 UI 重新点一次"加入接码"按钮（修复后会写
-    ``allowed_categories='*'`` 让它真正生效），**绝不**自动 UPDATE 数据，
-    避免误扩权限（站长可能本意就只想让某分类命中）。
-    """
-    try:
-        with db._connect() as conn:  # noqa: SLF001
-            cur = conn.execute(
-                "SELECT id, email, group_name FROM accounts "
-                "WHERE is_public = 1 AND COALESCE(allowed_categories, '') = '' "
-                "AND lower(COALESCE(group_name, '')) NOT LIKE '%cursor%' "
-                "AND lower(COALESCE(group_name, '')) NOT LIKE '%gpt%' "
-                "AND lower(COALESCE(group_name, '')) NOT LIKE '%openai%' "
-                "AND lower(COALESCE(group_name, '')) NOT LIKE '%chatgpt%' "
-                "AND lower(COALESCE(group_name, '')) NOT LIKE '%anthropic%' "
-                "AND lower(COALESCE(group_name, '')) NOT LIKE '%claude%' "
-                "AND lower(COALESCE(group_name, '')) NOT LIKE '%google%' "
-                "AND lower(COALESCE(group_name, '')) NOT LIKE '%github%'"
-            )
-            stale = cur.fetchall()
-    except Exception:
-        logger.exception("扫描"假加入接码"账号失败（已吞掉，不影响启动）")
-        return
-    if not stale:
-        return
-    sample = ", ".join(f"id={r[0]}({r[1]}/{r[2] or ''})" for r in stale[:5])
-    logger.warning(
-        "发现 %d 个"假加入接码"账号（is_public=1 但 allowed_categories 为空且分组名不含分类关键字）"
-        " — 这些账号在 UI 上显示已开放，但接码前台永远查不到。"
-        " 修复方法：在管理端选中后再点一次"📡 加入接码"按钮即可。"
-        " 如需一次性 SQL 修复："
-        "UPDATE accounts SET allowed_categories='*' "
-        "WHERE is_public=1 AND COALESCE(allowed_categories,'')=''; "
-        "样例: %s",
-        len(stale), sample,
-    )
+# 注：此处曾有"假加入接码账号"启动扫描 hook，因字符串中嵌套了未转义的英文双引号
+# 与 emoji 字符导致语法错误（启动崩溃）。功能本身只是"提醒"，已下线；如需检查
+# 历史账号请直接 SQL：
+#   SELECT id,email,group_name FROM accounts
+#    WHERE is_public=1 AND COALESCE(allowed_categories,'')=''
+#      AND lower(group_name) NOT LIKE '%cursor%' AND lower(group_name) NOT LIKE '%gpt%'
+#      AND lower(group_name) NOT LIKE '%openai%';
+# 一次性升级为通配："UPDATE accounts SET allowed_categories='*' WHERE is_public=1;"
 
 
 _extra_cors = [s.strip() for s in os.getenv("EMAIL_WEB_CORS", "").split(",") if s.strip()]
