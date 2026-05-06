@@ -188,6 +188,23 @@
     }
   }
 
+  /** 把 retry_after 秒数转成友好中文，如 60 → "约 1 分钟"，3600 → "约 1 小时"。 */
+  function formatRetryAfter(sec) {
+    sec = Math.max(0, parseInt(sec, 10) || 0);
+    if (sec <= 0) return '';
+    if (sec < 60) return '约 ' + sec + ' 秒后再试';
+    if (sec < 3600) {
+      var m = Math.round(sec / 60);
+      return '约 ' + m + ' 分钟后再试';
+    }
+    if (sec < 86400) {
+      var h = Math.round(sec / 3600 * 10) / 10;
+      return '约 ' + (h % 1 === 0 ? h.toFixed(0) : h.toFixed(1)) + ' 小时后再试';
+    }
+    var d = Math.round(sec / 86400 * 10) / 10;
+    return '约 ' + (d % 1 === 0 ? d.toFixed(0) : d.toFixed(1)) + ' 天后再试';
+  }
+
   function renderEmpty(title, desc) {
     resultEl.replaceChildren();
     var wrap = document.createElement('div');
@@ -440,7 +457,7 @@
         (body && (body.error || body.detail || body.message)) ||
         '请求失败 (HTTP ' + resp.status + ')';
       var retryAfter = body && body.retry_after;
-      renderError(msg, retryAfter ? '约 ' + retryAfter + 's 后再试' : '');
+      renderError(msg, retryAfter ? formatRetryAfter(retryAfter) : '');
       return;
     }
 

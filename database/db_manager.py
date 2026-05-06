@@ -45,7 +45,7 @@ SORTABLE_COLUMNS = {
     "last_check",
 }
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # 审计日志保留天数（超过自动清理）
 AUDIT_RETENTION_DAYS = 90
@@ -331,6 +331,42 @@ class DatabaseManager:
                 "CREATE INDEX IF NOT EXISTS idx_code_query_email "
                 "ON code_query_log(email_hash, ts)"
             )
+
+            # ── v5 → v6 一次性数据迁移：修复"假加入接码"账号 ──
+            # 历史问题：早期版本"加入接码"按钮没自动写 allowed_categories='*'，
+            # 而依赖 group_name 关键字（cursor/gpt/openai/...）推断分类。
+            # 当账号 group_name 不含任何关键字时（比如默认分组「默认分组」），
+            # 前台 lookup_public_account 会**永远查不到**这个账号 — 站长在 UI 上
+            # 看到"已加入接码"但前台一直返回"邮箱未加入接码白名单"。
+            #
+            # 这条幂等 UPDATE 把所有命中"假加入"的账号统一改成 '*'（允许所有分类）。
+            # 已经显式设置过 allowed_categories（含分类名 / 含 '*'）的账号不动。
+            # 已经在 cursor/gpt 等分组里的账号也不动（避免改变站长的细粒度配置）。
+            if current_version < 6:
+                fix_sql = """
+                    UPDATE accounts SET allowed_categories='*'
+                    WHERE is_public = 1
+                      AND COALESCE(allowed_categories, '') = ''
+                      AND LOWER(COALESCE(group_name, '')) NOT LIKE '%cursor%'
+                      AND LOWER(COALESCE(group_name, '')) NOT LIKE '%gpt%'
+                      AND LOWER(COALESCE(group_name, '')) NOT LIKE '%openai%'
+                      AND LOWER(COALESCE(group_name, '')) NOT LIKE '%chatgpt%'
+                      AND LOWER(COALESCE(group_name, '')) NOT LIKE '%anthropic%'
+                      AND LOWER(COALESCE(group_name, '')) NOT LIKE '%claude%'
+                      AND LOWER(COALESCE(group_name, '')) NOT LIKE '%google%'
+                      AND LOWER(COALESCE(group_name, '')) NOT LIKE '%gmail-only%'
+                      AND LOWER(COALESCE(group_name, '')) NOT LIKE '%github%'
+                """
+                fixed = cur.execute(fix_sql).rowcount
+                if fixed:
+                    logger.warning(
+                        "v5→v6 数据迁移：修复 %d 个『假加入接码』账号 "
+                        "(allowed_categories: '' → '*')。这些账号在管理端显示"
+                        "『已加入接码』但前台一直查不到，原因是 group_name "
+                        "不含 cursor/gpt/openai 等关键字，无法被 group_name "
+                        "推断逻辑命中。",
+                        fixed,
+                    )
 
             cur.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -1094,11 +1130,15 @@ class DatabaseManager:
         ip_hash: Optional[str] = None,
         email_hash: Optional[str] = None,
         error_kind: Optional[str] = None,
+        exclude_error_kinds: Optional[list[str]] = None,
     ) -> int:
         """限流读：统计 ``since_ts_iso`` 之后某 ip_hash / email_hash / error_kind 的查询次数。
 
         ``error_kind`` 非空时仅统计该错误类型的行（用于 FailureLocker 的
         ``auth_failed`` 计数）；为空时不限制错误类型（用于普通限流计数）。
+        ``exclude_error_kinds`` 非空时**排除**这些错误类型，让"前置失败"
+        （如用户输错邮箱、parse 失败、人机校验失败）不占用 IP/email 限流配额，
+        仅"实际发起 IMAP 拉取"的请求消耗配额，避免误操作把自己锁 1 小时。
         """
         sql = "SELECT COUNT(*) FROM code_query_log WHERE ts >= ?"
         params: list = [since_ts_iso]
@@ -1111,6 +1151,13 @@ class DatabaseManager:
         if error_kind:
             sql += " AND error_kind = ?"
             params.append(error_kind)
+        if exclude_error_kinds:
+            cleaned = [k for k in exclude_error_kinds if k]
+            if cleaned:
+                placeholders = ",".join("?" for _ in cleaned)
+                # COALESCE 保证 NULL（success=True 的成功行）不会被排除
+                sql += f" AND COALESCE(error_kind, '') NOT IN ({placeholders})"
+                params.extend(cleaned)
         with self._connect() as conn:
             cur = conn.execute(sql, params)
             return cur.fetchone()[0]

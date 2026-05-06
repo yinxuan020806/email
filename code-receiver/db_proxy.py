@@ -119,6 +119,57 @@ class CodeReceiverDB:
             self.owner_username, email, category
         )
 
+    def diagnose_lookup_failure(self, email: str, category: str) -> dict:
+        """``lookup_public_account`` 返回 None 时调用，告诉站长**到底是哪一步**没满足。
+
+        仅用于服务器侧日志诊断 — 不会把结果回包给前台访问者，避免：
+        - 泄露"该邮箱是否属于站长"（盲注探测站长名下的邮箱）
+        - 泄露"邮箱是否处于 is_public=1 状态"（探测白名单组成）
+
+        返回 dict 形式 { reason: str, allowed_categories: str|None }
+        - ``no_owner_user``：站长用户名 ``owner_username`` 不存在（部署/配置问题）
+        - ``no_account``：站长名下没有这个邮箱（用户拼写错 / 还没导入）
+        - ``not_public``：邮箱在站长名下但 ``is_public=0``（管理端忘了点"加入接码"）
+        - ``category_mismatch``：is_public=1 但 ``allowed_categories`` / ``group_name``
+          都不允许此分类（账号在 GitHub 分组里却查 cursor 之类）
+        - ``unknown``：诊断异常或并发改动
+        """
+        if not email or not category:
+            return {"reason": "no_account", "allowed_categories": None}
+        try:
+            with self._db._connect() as conn:  # noqa: SLF001
+                cur = conn.execute(
+                    "SELECT id FROM users WHERE username = ?",
+                    (self.owner_username,),
+                )
+                user_row = cur.fetchone()
+                if not user_row:
+                    return {"reason": "no_owner_user", "allowed_categories": None}
+                owner_id = int(user_row[0])
+                cur = conn.execute(
+                    "SELECT is_public, COALESCE(allowed_categories, ''), "
+                    "       COALESCE(group_name, '') "
+                    "FROM accounts "
+                    "WHERE owner_id = ? AND LOWER(email) = LOWER(?) LIMIT 1",
+                    (owner_id, email.strip()),
+                )
+                row = cur.fetchone()
+            if not row:
+                return {"reason": "no_account", "allowed_categories": None}
+            is_public, allowed_cats, group_name = row
+            if not is_public:
+                return {
+                    "reason": "not_public",
+                    "allowed_categories": allowed_cats or None,
+                }
+            return {
+                "reason": "category_mismatch",
+                "allowed_categories": allowed_cats or f"(empty,group={group_name!r})",
+            }
+        except Exception:
+            logger.exception("diagnose_lookup_failure 异常")
+            return {"reason": "unknown", "allowed_categories": None}
+
     # ── 读：提取规则 ─────────────────────────────────────────────
 
     def list_rules(self, category: str) -> List[dict]:
@@ -188,7 +239,10 @@ class CodeReceiverDB:
         window_seconds: int,
         ip: Optional[str] = None,
         email: Optional[str] = None,
+        exclude_error_kinds: Optional[list[str]] = None,
     ) -> int:
+        """限流计数：可选排除"前置失败"类 error_kind，避免用户输错邮箱
+        / 触发人机校验等情况把自己 IP 配额耗尽。"""
         since = (datetime.now() - timedelta(seconds=window_seconds)).isoformat(
             sep=" ", timespec="seconds"
         )
@@ -196,6 +250,7 @@ class CodeReceiverDB:
             since_ts_iso=since,
             ip_hash=hash_ip(ip) if ip else None,
             email_hash=hash_email(email) if email else None,
+            exclude_error_kinds=exclude_error_kinds,
         )
 
     def count_auth_failures(self, ip: str, window_seconds: int) -> int:

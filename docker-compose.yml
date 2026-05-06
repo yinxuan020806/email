@@ -60,12 +60,15 @@ services:
       EMAIL_DATA_DIR: /data
       CODE_OWNER_USERNAME: xiaoxuan
       MASTER_KEY_WAIT_TIMEOUT: "120"
-      # 反代场景（Cloudflare Tunnel / nginx / Caddy）必须开，否则限流按反代 IP 计：
-      # CRX_TRUST_PROXY: "1"
-      # 限流阈值（默认 5/min, 30/hour, 邮箱 10/hour）：
-      # CRX_RATE_IP_PER_MIN: "5"
-      # CRX_RATE_IP_PER_HOUR: "30"
-      # CRX_RATE_EMAIL_PER_HOUR: "10"
+      # 反代场景（Cloudflare Tunnel / nginx / Caddy）必须开，否则限流按反代 IP 计、
+      # 全网用户共享同一限流桶（30 次/小时一把就用完）。容器仅 bind 127.0.0.1，
+      # 公网必须经反代访问，所以默认开启 — 仅当你把端口改成 0.0.0.0 直接暴露公网时才需关闭。
+      CRX_TRUST_PROXY: "1"
+      # 限流阈值（默认 30/min, 300/hour, 单邮箱 60/hour；2026-05 二期放宽，
+      # 一期默认 5/min/30/hour 实测站长自己用都被卡 1 小时）：
+      # CRX_RATE_IP_PER_MIN: "30"        # 单 IP 每分钟次数（机器人才会触发）
+      # CRX_RATE_IP_PER_HOUR: "300"      # 单 IP 每小时上限
+      # CRX_RATE_EMAIL_PER_HOUR: "60"    # 单邮箱每小时上限（多人共用同一邮箱场景）
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:8001/healthz',timeout=3); sys.exit(0 if r.status==200 else 1)"]
       interval: 30s

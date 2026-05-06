@@ -83,13 +83,13 @@ app = FastAPI(title="邮箱管家 Web", version="3.0.0")
 
 
 # 注：此处曾有"假加入接码账号"启动扫描 hook，因字符串中嵌套了未转义的英文双引号
-# 与 emoji 字符导致语法错误（启动崩溃）。功能本身只是"提醒"，已下线；如需检查
-# 历史账号请直接 SQL：
-#   SELECT id,email,group_name FROM accounts
-#    WHERE is_public=1 AND COALESCE(allowed_categories,'')=''
-#      AND lower(group_name) NOT LIKE '%cursor%' AND lower(group_name) NOT LIKE '%gpt%'
-#      AND lower(group_name) NOT LIKE '%openai%';
-# 一次性升级为通配："UPDATE accounts SET allowed_categories='*' WHERE is_public=1;"
+# 与 emoji 字符导致语法错误（启动崩溃）。
+# 功能已被 ``database.db_manager`` 的 v5→v6 数据迁移替代——首次升级到 v6 时
+# 启动会自动把 ``is_public=1 AND allowed_categories='' AND group_name 不含分类
+# 关键字`` 的"假加入"账号统一改成 ``allowed_categories='*'``，让前台立即可查。
+# 如需手工排查请直接 SQL：
+#   SELECT id,email,group_name,allowed_categories FROM accounts
+#    WHERE is_public=1 AND COALESCE(allowed_categories,'')='';
 
 
 _extra_cors = [s.strip() for s in os.getenv("EMAIL_WEB_CORS", "").split(",") if s.strip()]

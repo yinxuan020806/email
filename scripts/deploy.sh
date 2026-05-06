@@ -111,6 +111,44 @@ else
         [[ "$EUID" == "0" ]] && chown -R "$DATA_UID":"$DATA_UID" data
     fi
 
+    # ── 3.5 关键升级 hook：确保 docker-compose.yml 已启用 CRX_TRUST_PROXY ─
+    # docker-compose.yml 因 skip-worktree 不会被 git pull 覆盖；首次升级到新版后
+    # 必须把 CRX_TRUST_PROXY: "1" 注入到旧 compose 文件，否则限流仍按反代 IP 算，
+    # 全网用户共享同一个限流桶（30 次/小时一把就用完）。
+    if [[ -f docker-compose.yml ]]; then
+        if grep -qE '^\s*CRX_TRUST_PROXY\s*:\s*"?1"?\s*$' docker-compose.yml; then
+            info "docker-compose.yml 已启用 CRX_TRUST_PROXY=1（限流按真实客户端 IP 计）"
+        else
+            # 把已注释或缺失的配置统一替换/追加为活跃配置
+            BACKUP="docker-compose.yml.bak.$(date +%Y%m%d_%H%M%S)"
+            cp docker-compose.yml "$BACKUP"
+            info "升级 hook：备份旧 compose → $BACKUP"
+            if grep -qE '^\s*#\s*CRX_TRUST_PROXY\s*:' docker-compose.yml; then
+                # 已有注释行 → 取消注释
+                # 用 sed 行内替换：保留缩进，把 "# CRX_TRUST_PROXY:" 变成 "CRX_TRUST_PROXY:"
+                sed -i -E 's@^([[:space:]]*)#[[:space:]]*CRX_TRUST_PROXY[[:space:]]*:[[:space:]]*.*$@\1CRX_TRUST_PROXY: "1"@' docker-compose.yml
+                ok "升级 hook：取消注释 CRX_TRUST_PROXY: \"1\""
+            elif grep -qE '^\s*CODE_OWNER_USERNAME\s*:' docker-compose.yml; then
+                # 没注释行 → 在 CODE_OWNER_USERNAME 之后插入一行（沿用相同缩进）
+                sed -i -E '/^([[:space:]]*)CODE_OWNER_USERNAME[[:space:]]*:.*$/{
+                    s@@&\n\1CRX_TRUST_PROXY: "1"@
+                }' docker-compose.yml
+                ok "升级 hook：在 CODE_OWNER_USERNAME 后插入 CRX_TRUST_PROXY: \"1\""
+            else
+                warn "docker-compose.yml 里既没找到现成的 CRX_TRUST_PROXY 也没找到 CODE_OWNER_USERNAME，"
+                warn "  请手动在 code-receiver.environment 段加上：CRX_TRUST_PROXY: \"1\""
+                warn "  否则限流会把所有公网用户算成同一个反代 IP，严重影响可用性。"
+            fi
+            # 验证修改后语法是否还能 docker compose config 通过
+            if ! $COMPOSE config >/dev/null 2>&1; then
+                err "升级 hook：注入后 docker-compose.yml 语法异常 — 已回滚"
+                cp "$BACKUP" docker-compose.yml
+                exit 1
+            fi
+            ok "升级 hook：CRX_TRUST_PROXY=1 已写入 docker-compose.yml"
+        fi
+    fi
+
     # ── 4. 构建并启动 ──────────────────────────────
     info "$COMPOSE up -d --build $NO_CACHE"
     if [[ -n "$NO_CACHE" ]]; then

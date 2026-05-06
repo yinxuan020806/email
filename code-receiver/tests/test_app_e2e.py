@@ -328,3 +328,152 @@ def test_client_ip_ignores_proxy_headers_when_trust_off(app_module, monkeypatch)
     }
     ip = app_module._client_ip(Request(scope))
     assert ip == "10.0.0.1", "TRUST_PROXY=False 必须只用 client.host，绝不能信任伪造头"
+
+
+# ──────────────────────────────────────────────────────────────────
+# 限流策略：前置失败（输错邮箱、未加入白名单等）不消耗 IP/hour 配额
+# ──────────────────────────────────────────────────────────────────
+
+
+def test_preflight_failures_do_not_consume_ip_quota(app_module, client, monkeypatch):
+    """场景：用户连续 31 次输入「未加入白名单的邮箱」（each → 404 not_authorized），
+    第 32 次输入合法邮箱 → 仍应该 200 而非 429。
+
+    回归用：旧版本里 not_authorized / parse / turnstile_* 等"前置失败"会被算入
+    IP/hour=30 限流桶，导致用户输错几次邮箱就把自己 1 小时锁住，体验非常差。
+
+    临时把 IP/min 阈值调高到 1000，避免和其他测试在 1 分钟内的成功请求冲突
+    （IP/min 仍排除 preflight，但成功请求会被算入）。
+    """
+    monkeypatch.setattr(app_module._limiter, "ip_per_min", 1000)
+    monkeypatch.setattr(app_module._limiter, "ip_per_hour", 1000)
+    monkeypatch.setattr(app_module._limiter, "email_per_hour", 1000)
+
+    fake_mails = [
+        {
+            "sender": "no-reply@cursor.sh",
+            "from": "no-reply@cursor.sh",
+            "subject": "Your Cursor verification code",
+            "body": "Your code is 654321.",
+            "preview": "Your code is 654321.",
+            "date": "2026-05-05T12:00:00",
+        }
+    ]
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def fetch_emails(self, *a, **kw):
+            return fake_mails, "ok"
+
+        def disconnect(self):
+            pass
+
+    fake_account = _make_fake_account("legit-preflight@outlook.com")
+
+    # 1) 连续打 31 次"未加入白名单"的邮箱（lookup_public_account 返回 None）
+    for i in range(31):
+        r = client.post(
+            "/api/lookup",
+            json={"input": "stranger-preflight@outlook.com", "category": "cursor"},
+        )
+        # 必须是 404，而不能因为限流先于 lookup 触发变成 429
+        assert r.status_code == 404, (
+            f"前置失败应该返回 404，但第 {i+1} 次拿到 {r.status_code}: {r.text[:200]}"
+        )
+
+    # 2) 现在把 IP/hour 调到 30（旧默认），第 32 次合法请求若失败说明 preflight 被
+    # 错误地计入了 IP/hour 配额（因为 31 > 30）
+    monkeypatch.setattr(app_module._limiter, "ip_per_hour", 30)
+
+    # 3) 第 32 次用合法邮箱 → 必须 200，不能被 IP/hour 拦
+    with patch.object(app_module, "EmailClient", FakeClient), \
+         patch.object(app_module._db, "lookup_public_account", return_value=fake_account), \
+         patch.object(app_module._db, "incr_query_count", return_value=True):
+        r = client.post(
+            "/api/lookup",
+            json={"input": "legit-preflight@outlook.com", "category": "cursor"},
+        )
+    assert r.status_code == 200, (
+        f"前置失败 31 次后合法请求应 200 而非被限流，实际 {r.status_code}: {r.text[:200]}"
+    )
+    body = r.json()
+    assert body.get("found") is True
+    assert body.get("code") == "654321"
+
+
+def test_diagnose_lookup_failure_is_not_leaked_to_client(app_module, client):
+    """诊断细化的 error_kind（not_authorized_no_account 等）必须只写日志，
+    不能在响应体里暴露给前台访问者，否则会变成『盲注探测站长名下邮箱』的渠道。
+    """
+    r = client.post(
+        "/api/lookup",
+        json={"input": "completely-unknown@example.invalid", "category": "cursor"},
+    )
+    assert r.status_code == 404
+    text = r.text
+    # 响应体必须只回统一的"白名单"提示，不能含细化的 reason 关键字
+    assert "no_account" not in text
+    assert "not_public" not in text
+    assert "category_mismatch" not in text
+    assert "no_owner_user" not in text
+
+
+# ──────────────────────────────────────────────────────────────────
+# 静态资源 & UX 回归
+# ──────────────────────────────────────────────────────────────────
+
+
+def test_app_js_has_friendly_retry_after_formatter(client):
+    """app.js 必须用 formatRetryAfter 把 retry_after 从秒转成中文友好提示，
+    而不是直接拼 `'约 ' + retryAfter + 's 后再试'` —— 后者在 1 小时锁定时
+    会显示 "约 3600s 后再试"，对用户不友好。"""
+    r = client.get("/static/app.js")
+    assert r.status_code == 200
+    body = r.text
+    assert "formatRetryAfter" in body, "app.js 应有 formatRetryAfter 工具函数"
+    assert "formatRetryAfter(retryAfter)" in body, (
+        "renderError 调用必须走 formatRetryAfter，禁止直接拼 's 后再试'"
+    )
+    # 拒绝旧版裸秒拼接（防止后续误回滚）
+    assert "+ 's 后再试'" not in body, (
+        "禁止旧版 `+ 's 后再试'` 字面量；必须用 formatRetryAfter"
+    )
+
+
+def test_app_css_cyber_does_not_double_blur(client):
+    """cyber 主题不应在 .card / .search-card / .theme-toggle 上叠加 backdrop-filter，
+    否则与 aurora blob 的 blur 叠加会让中端 GPU 帧率掉到个位数。
+
+    回归方式：先剥掉所有 CSS 注释（注释里也可能含 ``backdrop-filter`` 字面量），
+    再把整份 CSS 按 ``}`` 拆成"规则块"。每个含 backdrop-filter 声明的规则，
+    其选择器必须明确含 ``[data-theme="dark"]`` 或 ``[data-theme="light"]``，
+    禁止挂在裸选择器（基础规则=cyber 主题默认）上。
+    """
+    import re as _re
+
+    r = client.get("/static/app.css")
+    assert r.status_code == 200
+    raw_css = r.text
+
+    css = _re.sub(r"/\*.*?\*/", "", raw_css, flags=_re.DOTALL)
+
+    blocks = css.split("}")
+    bad: list[str] = []
+    for blk in blocks:
+        if "backdrop-filter" not in blk:
+            continue
+        parts = blk.rsplit("{", 1)
+        if len(parts) != 2:
+            continue
+        selector_raw = parts[0]
+        selector = selector_raw.split(";")[-1].split("{")[-1].strip().lower()
+        if "data-theme=\"dark\"" in selector or "data-theme=\"light\"" in selector:
+            continue
+        bad.append(selector[:160])
+
+    assert not bad, (
+        "以下选择器在 cyber 主题下挂了 backdrop-filter（已知性能问题）：\n  - "
+        + "\n  - ".join(bad)
+    )

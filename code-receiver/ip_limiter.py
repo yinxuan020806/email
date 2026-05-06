@@ -28,12 +28,45 @@ logger = logging.getLogger(__name__)
 
 
 # 各窗口阈值（环境变量 CRX_RATE_* 可覆盖）
-DEFAULT_IP_PER_MIN = 5
-DEFAULT_IP_PER_HOUR = 30
-DEFAULT_EMAIL_PER_HOUR = 10
-DEFAULT_FAIL_LOCK_THRESHOLD = 3
-DEFAULT_FAIL_LOCK_DURATION = 3600
-DEFAULT_FAIL_WINDOW = 600
+#
+# 历次调整：
+#  - 2026-05 一期默认（5/min, 30/hour, 10邮箱/hour, 3 次锁 1h）
+#    实际使用反馈：单用户日常多次刷新拿验证码就被卡 1 小时，自己都没法用。
+#  - 2026-05 二期放宽到当前值，思路：
+#    * IP/min 30：每 2 秒一次明显是机器人才会触发，正常用户够用
+#    * IP/hour 300：1 小时内 5 次/分钟，正常用户难触达
+#    * email/hour 60：单邮箱每分钟最多 1 次，刷新拿最新验证码完全够
+#    * 失败锁 600 秒：输错凭据 5 次锁 10 分钟，不是 1 小时——用户输错能快速恢复
+#    * 失败窗口 300 秒：5 分钟内累计 5 次才锁，正常人不会
+DEFAULT_IP_PER_MIN = 30
+DEFAULT_IP_PER_HOUR = 300
+DEFAULT_EMAIL_PER_HOUR = 60
+DEFAULT_FAIL_LOCK_THRESHOLD = 5
+DEFAULT_FAIL_LOCK_DURATION = 600
+DEFAULT_FAIL_WINDOW = 300
+
+# 前置失败的 error_kind：这些请求**没真正发起 IMAP 拉取**，不应该消耗
+# IP/hour、IP/min、email/hour 这些"成本型"配额——否则用户输错邮箱、
+# 触发一次人机校验失败、查到一个未加入白名单的邮箱，就把自己 1 小时锁住，
+# 体验非常差。这些前置失败仍然会写入 code_query_log（用于审计），但
+# count_queries_in_window 里被排除。
+#
+# 注意：``auth_failed`` **不在**排除列表里——凭据失败必须计入失败锁定，
+# 否则攻击者可以无限对单个邮箱试 OAuth refresh。
+PREFLIGHT_ERROR_KINDS: tuple[str, ...] = (
+    "parse",                # 输入格式错误
+    "byo_disabled",         # byo 路径已下线（含 ----）
+    "not_authorized",       # 邮箱不在接码白名单（兼容老日志）
+    "not_authorized_no_owner_user",   # 站长用户名错（部署级问题）
+    "not_authorized_no_account",      # 站长名下没这个邮箱（用户拼错 / 没导入）
+    "not_authorized_not_public",      # 邮箱在但管理端没点"加入接码"
+    "not_authorized_category_mismatch",  # 分类不允许（账号属于其他分组）
+    "not_authorized_unknown",         # 诊断 SQL 异常
+    "no_extractor",         # 该分类没有提取规则（站长配置错）
+    "turnstile_missing",    # 用户没填人机校验
+    "turnstile_failed",     # 人机校验失败
+    "turnstile_upstream",   # CF siteverify 服务异常
+)
 
 
 class RateLimitDecision:
@@ -155,27 +188,38 @@ class RateLimiter:
         必须配合 ``end`` 在请求结束时 -1，否则会泄漏配额。
 
         判定 = DB 已落库的请求数 + 内存中正在进行中的请求数。
+
+        DB 计数排除 ``PREFLIGHT_ERROR_KINDS``：用户因输错邮箱、人机校验失败
+        等"还没到 IMAP 那一步"的请求不消耗配额，避免误操作把自己锁 1 小时。
         """
-        # 1) 失败锁定
+        excluded = list(PREFLIGHT_ERROR_KINDS)
+
+        # 1) 失败锁定（auth_failed 计数走独立路径，不受 excluded 影响）
         locked, retry = self.failure_locker.is_locked(ip)
         if locked:
             return RateLimitDecision(False, retry, "credentials_locked")
 
-        # 2) IP 1 分钟窗口（DB + inflight 合计）
-        n_db = self._db.count_queries_in_window(60, ip=ip)
+        # 2) IP 1 分钟窗口：仍排除 preflight，但 1 分钟阈值小，主要拦短时刷量
+        n_db = self._db.count_queries_in_window(
+            60, ip=ip, exclude_error_kinds=excluded
+        )
         n_inflight = self._inflight_ip.get(_ip_min_key(ip))
         if n_db + n_inflight >= self.ip_per_min:
             return RateLimitDecision(False, 60, "ip_per_min")
 
         # 3) IP 1 小时窗口（DB + inflight 合计）
-        n_db = self._db.count_queries_in_window(3600, ip=ip)
+        n_db = self._db.count_queries_in_window(
+            3600, ip=ip, exclude_error_kinds=excluded
+        )
         n_inflight = self._inflight_ip.get(_ip_hour_key(ip))
         if n_db + n_inflight >= self.ip_per_hour:
             return RateLimitDecision(False, 3600, "ip_per_hour")
 
         # 4) email 1 小时窗口
         if email:
-            n_db = self._db.count_queries_in_window(3600, email=email)
+            n_db = self._db.count_queries_in_window(
+                3600, email=email, exclude_error_kinds=excluded
+            )
             n_inflight = self._inflight_email.get(_email_hour_key(email))
             if n_db + n_inflight >= self.email_per_hour:
                 return RateLimitDecision(False, 3600, "email_per_hour")
@@ -201,20 +245,27 @@ class RateLimiter:
 
         新调用方应使用 ``begin`` + ``end`` 配对（begin 通过会累加 in-flight），
         ``check`` 仅供测试或外部健康探针无副作用地查询限流状态。
+
+        与 ``begin`` 一致排除 preflight error_kind。
         """
-        # 失败锁定
+        excluded = list(PREFLIGHT_ERROR_KINDS)
         locked, retry = self.failure_locker.is_locked(ip)
         if locked:
             return RateLimitDecision(False, retry, "credentials_locked")
-        # IP / email 三个窗口：DB + inflight 合计
-        n = self._db.count_queries_in_window(60, ip=ip) + self._inflight_ip.get(_ip_min_key(ip))
+        n = self._db.count_queries_in_window(
+            60, ip=ip, exclude_error_kinds=excluded
+        ) + self._inflight_ip.get(_ip_min_key(ip))
         if n >= self.ip_per_min:
             return RateLimitDecision(False, 60, "ip_per_min")
-        n = self._db.count_queries_in_window(3600, ip=ip) + self._inflight_ip.get(_ip_hour_key(ip))
+        n = self._db.count_queries_in_window(
+            3600, ip=ip, exclude_error_kinds=excluded
+        ) + self._inflight_ip.get(_ip_hour_key(ip))
         if n >= self.ip_per_hour:
             return RateLimitDecision(False, 3600, "ip_per_hour")
         if email:
-            n = self._db.count_queries_in_window(3600, email=email) + self._inflight_email.get(_email_hour_key(email))
+            n = self._db.count_queries_in_window(
+                3600, email=email, exclude_error_kinds=excluded
+            ) + self._inflight_email.get(_email_hour_key(email))
             if n >= self.email_per_hour:
                 return RateLimitDecision(False, 3600, "email_per_hour")
         return RateLimitDecision(True, 0, "")

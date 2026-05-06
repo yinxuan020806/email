@@ -14,9 +14,9 @@
     CODE_OWNER_USERNAME       (必填) 接码业务的站长用户名（仅这个用户的 is_public 邮箱可被前台查询）
     EMAIL_DATA_DIR            数据目录，与管理端共享；默认指向 ../data
     CRX_TRUST_PROXY           "1" 表示信任 X-Forwarded-For（反代后必须开）
-    CRX_RATE_IP_PER_MIN       默认 5
-    CRX_RATE_IP_PER_HOUR      默认 30
-    CRX_RATE_EMAIL_PER_HOUR   默认 10
+    CRX_RATE_IP_PER_MIN       默认 30
+    CRX_RATE_IP_PER_HOUR      默认 300
+    CRX_RATE_EMAIL_PER_HOUR   默认 60
 """
 
 from __future__ import annotations
@@ -199,9 +199,9 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 _db = CodeReceiverDB(owner_username=OWNER_USERNAME)
 _limiter = RateLimiter(
     _db,
-    ip_per_min=int(os.getenv("CRX_RATE_IP_PER_MIN", "5")),
-    ip_per_hour=int(os.getenv("CRX_RATE_IP_PER_HOUR", "30")),
-    email_per_hour=int(os.getenv("CRX_RATE_EMAIL_PER_HOUR", "10")),
+    ip_per_min=int(os.getenv("CRX_RATE_IP_PER_MIN", "30")),
+    ip_per_hour=int(os.getenv("CRX_RATE_IP_PER_HOUR", "300")),
+    email_per_hour=int(os.getenv("CRX_RATE_EMAIL_PER_HOUR", "60")),
 )
 
 
@@ -565,7 +565,26 @@ def lookup(req: LookupRequest, request: Request) -> JSONResponse:
         # 3) 查接码白名单 — 必须存在 & is_public=1 & 分类匹配
         account = _db.lookup_public_account(cred.email, req.category)
         if not account:
-            error_kind = "not_authorized"
+            # 站长侧日志：把"为什么没命中"细化打到 logger，方便 docker logs 排错。
+            # 用户响应里仍然只暴露统一的 not_authorized，避免攻击者盲注探测白名单。
+            try:
+                diag = _db.diagnose_lookup_failure(cred.email, req.category)
+                # email_domain 不会泄露具体邮箱；reason 是站长配置维度
+                domain = cred.email.split("@", 1)[-1] if "@" in cred.email else ""
+                logger.info(
+                    "lookup not_authorized: cat=%s domain=%s reason=%s allowed=%s",
+                    req.category, domain[:48],
+                    diag.get("reason"), str(diag.get("allowed_categories"))[:64],
+                )
+                # 用细化的 error_kind 落库，便于站长在管理端用 SQL 统计排错
+                reason = (diag.get("reason") or "unknown").strip()
+                if reason in {"no_owner_user", "no_account", "not_public", "category_mismatch"}:
+                    error_kind = f"not_authorized_{reason}"
+                else:
+                    error_kind = "not_authorized"
+            except Exception:
+                logger.exception("not_authorized 诊断失败（已吞掉）")
+                error_kind = "not_authorized"
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND,
                 "该邮箱未加入接码白名单或不属于此分类",
