@@ -71,6 +71,9 @@ body{font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif;background
 .icon-btn:hover{border-color:var(--accent)}
 .lang-btn{height:40px;padding:0 14px;border-radius:12px;border:1px solid var(--border);background:var(--card);color:var(--text2);font-size:12px;cursor:pointer;transition:.15s}
 .lang-btn:hover{border-color:var(--accent);color:var(--text)}
+.sb-version{padding:2px 16px 12px;text-align:center;user-select:none}
+.sb-version .version-tag{display:inline-block;padding:2px 8px;border-radius:4px;border:1px solid var(--border);background:rgba(255,255,255,.02);font-family:ui-monospace,SFMono-Regular,"JetBrains Mono",Menlo,Consolas,monospace;font-size:10.5px;color:var(--text2);letter-spacing:.5px;transition:.2s}
+.sb-version .version-tag:hover{border-color:var(--accent);color:var(--text)}
 
 /* Main */
 .main{flex:1;display:flex;flex-direction:column;overflow:hidden}

@@ -1769,11 +1769,19 @@ async function init() {
 
 // 启动：先看是否已登录；未登录则展示登录框
 (async () => {
-  // 先取注册开关
+  // 先取注册开关 + 版本号
   try {
     const r = await fetch('/api/health', { credentials: 'include' });
     const j = await r.json();
     S.registerEnabled = !!j.register_enabled;
+    const v = String(j.version || '').trim();
+    if (v) {
+      const tag = document.getElementById('app-version');
+      if (tag) {
+        tag.textContent = 'v' + v;
+        tag.title = '后端版本号 / 最近一次部署的 git commit short SHA';
+      }
+    }
   } catch { /* ignore */ }
 
   const initialPath = window.location.pathname;

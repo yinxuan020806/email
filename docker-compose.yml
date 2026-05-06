@@ -29,6 +29,10 @@ services:
       EMAIL_WEB_PORT: 8000
       EMAIL_WEB_LOG_LEVEL: INFO
       EMAIL_DATA_DIR: /data
+      # 版本号（前端右下角显示，方便确认部署是否生效）
+      # deploy.sh 会自动在仓库根写一份 .env 把 APP_VERSION=git short SHA
+      # 注入进来，命令行手动起则会落到 "dev"
+      APP_VERSION: ${APP_VERSION:-dev}
       # 创建好账号后强烈建议关闭注册：
       # EMAIL_WEB_DISABLE_REGISTER: "1"
     healthcheck:
@@ -60,6 +64,8 @@ services:
       EMAIL_DATA_DIR: /data
       CODE_OWNER_USERNAME: xiaoxuan
       MASTER_KEY_WAIT_TIMEOUT: "120"
+      # 版本号（前端右下角显示）：来自 deploy.sh 写的 .env，通常是 git short SHA
+      APP_VERSION: ${APP_VERSION:-dev}
       # 反代场景（Cloudflare Tunnel / nginx / Caddy）必须开，否则限流按反代 IP 计、
       # 全网用户共享同一限流桶（30 次/小时一把就用完）。容器仅 bind 127.0.0.1，
       # 公网必须经反代访问，所以默认开启 — 仅当你把端口改成 0.0.0.0 直接暴露公网时才需关闭。

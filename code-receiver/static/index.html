@@ -7,23 +7,17 @@
   <meta name="theme-color" content="#0a0e17" />
   <meta name="color-scheme" content="dark light" />
   <title>验证码助手 · 一键提取邮箱验证码</title>
-  <link rel="icon" type="image/png" href="/static/icon.png?v=3" />
-  <link rel="apple-touch-icon" href="/static/icon.png?v=3" />
-  <link rel="stylesheet" href="/static/app.css?v=3" />
+  <link rel="icon" type="image/png" href="/static/icon.png?v=4" />
+  <link rel="apple-touch-icon" href="/static/icon.png?v=4" />
+  <link rel="stylesheet" href="/static/app.css?v=4" />
 </head>
 <body data-theme="cyber">
-  <div class="aurora" aria-hidden="true">
-    <span class="aurora-blob blob-1"></span>
-    <span class="aurora-blob blob-2"></span>
-    <span class="aurora-blob blob-3"></span>
-  </div>
-
   <button type="button" id="theme-toggle" class="theme-toggle" aria-label="切换主题" title="切换主题">🌐</button>
 
   <main class="page">
     <header class="brand">
       <div class="brand-mark" aria-hidden="true">
-        <img src="/static/icon.png?v=3" alt="" width="56" height="56" />
+        <img src="/static/icon.png?v=4" alt="" width="56" height="56" />
       </div>
       <h1 class="brand-title">验证码助手</h1>
       <p class="brand-sub">输入邮箱地址 · 一键提取 Cursor / ChatGPT 验证码与登录链接</p>
@@ -66,6 +60,9 @@
           </button>
         </div>
         <div id="turnstile-slot" class="turnstile-slot" hidden></div>
+        <div id="recent-row" class="recent-row" aria-label="最近查询邮箱" hidden>
+          <span class="recent-label">最近</span>
+        </div>
         <div class="category-row" role="radiogroup" aria-label="选择邮件分类">
           <label class="chip">
             <input type="radio" name="category" value="cursor" checked />
@@ -95,8 +92,12 @@
     </section>
 
     <section id="result" class="result" aria-live="polite"></section>
+
+    <footer class="app-footer" aria-label="版本信息">
+      <span id="app-version" class="version-tag" title="后端版本号">v—</span>
+    </footer>
   </main>
 
-  <script src="/static/app.js?v=3" defer></script>
+  <script src="/static/app.js?v=4" defer></script>
 </body>
 </html>

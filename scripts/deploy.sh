@@ -127,6 +127,23 @@ else
         warn "$APP_DIR 不是 git 仓库，跳过 git pull（请按 docs/deploy-tencent-baota.md 配置 git remote）"
     fi
 
+    # ── 2c. 写 .env：把 APP_VERSION=git short SHA 注入给 docker compose ──
+    # docker-compose.yml 里 environment 段用 ${APP_VERSION:-dev}，docker compose
+    # 启动时会自动从同目录的 .env 文件读取变量。前端通过 /api/config /
+    # /api/health 读到这个值显示在右下角"版本号"，方便快速确认部署是否生效。
+    if [[ -d .git ]]; then
+        APP_VERSION=$(git rev-parse --short=8 HEAD 2>/dev/null || echo "dev")
+    else
+        APP_VERSION="dev"
+    fi
+    info "写入 .env: APP_VERSION=$APP_VERSION"
+    # 移除旧的 APP_VERSION 行后追加新的，避免重复
+    if [[ -f .env ]]; then
+        grep -v '^APP_VERSION=' .env > .env.tmp.$$ || true
+        mv .env.tmp.$$ .env
+    fi
+    echo "APP_VERSION=$APP_VERSION" >> .env
+
     # ── 3. 修复 data/ 目录权限（容器以 uid=10001 运行） ─
     if [[ -d data ]]; then
         # 仅 root 才能 chown，普通用户跳过

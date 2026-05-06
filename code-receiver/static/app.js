@@ -63,10 +63,18 @@
     fetch('/api/config', { credentials: 'omit' })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (cfg) {
-        if (!cfg || !cfg.turnstile || !cfg.turnstile.enabled) return;
-        TURNSTILE.enabled = true;
-        TURNSTILE.sitekey = String(cfg.turnstile.sitekey || '');
-        if (TURNSTILE.sitekey) renderTurnstile();
+        if (!cfg) return;
+        if (cfg.turnstile && cfg.turnstile.enabled) {
+          TURNSTILE.enabled = true;
+          TURNSTILE.sitekey = String(cfg.turnstile.sitekey || '');
+          if (TURNSTILE.sitekey) renderTurnstile();
+        }
+        var v = String(cfg.version || '').trim();
+        var tag = document.getElementById('app-version');
+        if (tag && v) {
+          tag.textContent = 'v' + v;
+          tag.title = '后端版本号 / 最近一次部署的 git commit short SHA';
+        }
       })
       .catch(function () { /* 静默：未启用 / 网络错都按未启用处理 */ });
   }
@@ -203,6 +211,81 @@
     }
     var d = Math.round(sec / 86400 * 10) / 10;
     return '约 ' + (d % 1 === 0 ? d.toFixed(0) : d.toFixed(1)) + ' 天后再试';
+  }
+
+  /* ── 最近查询邮箱（localStorage，存最近 5 个） ── */
+  var RECENT_KEY = 'cr_recent_emails';
+  var RECENT_MAX = 5;
+
+  function loadRecent() {
+    try {
+      var raw = localStorage.getItem(RECENT_KEY);
+      if (!raw) return [];
+      var arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr.slice(0, RECENT_MAX) : [];
+    } catch (_) { return []; }
+  }
+  function saveRecent(list) {
+    try { localStorage.setItem(RECENT_KEY, JSON.stringify(list.slice(0, RECENT_MAX))); }
+    catch (_) {}
+  }
+  function pushRecent(email) {
+    email = (email || '').trim().toLowerCase();
+    if (!email || email.indexOf('@') < 0) return;
+    var list = loadRecent().filter(function (e) { return e !== email; });
+    list.unshift(email);
+    saveRecent(list);
+    renderRecent();
+  }
+  function removeRecent(email) {
+    var list = loadRecent().filter(function (e) { return e !== email; });
+    saveRecent(list);
+    renderRecent();
+  }
+  function renderRecent() {
+    var row = document.getElementById('recent-row');
+    if (!row) return;
+    var list = loadRecent();
+    while (row.children.length > 1) row.removeChild(row.lastChild);
+    if (!list.length) {
+      row.setAttribute('hidden', '');
+      return;
+    }
+    row.removeAttribute('hidden');
+    list.forEach(function (email) {
+      var pill = document.createElement('span');
+      pill.className = 'recent-pill';
+      pill.tabIndex = 0;
+      pill.setAttribute('role', 'button');
+      pill.setAttribute('aria-label', '使用 ' + email + ' 重新查询');
+
+      var label = document.createElement('span');
+      label.textContent = email;
+      pill.appendChild(label);
+
+      var x = document.createElement('span');
+      x.className = 'pill-x';
+      x.textContent = '×';
+      x.setAttribute('aria-label', '从历史中删除');
+      x.addEventListener('click', function (e) {
+        e.stopPropagation();
+        removeRecent(email);
+      });
+      pill.appendChild(x);
+
+      pill.addEventListener('click', function () {
+        inputEl.value = email;
+        inputEl.focus();
+      });
+      pill.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          inputEl.value = email;
+          inputEl.focus();
+        }
+      });
+      row.appendChild(pill);
+    });
   }
 
   function renderEmpty(title, desc) {
@@ -453,11 +536,27 @@
     }
 
     if (!resp.ok) {
-      var msg =
+      var rawMsg =
         (body && (body.error || body.detail || body.message)) ||
         '请求失败 (HTTP ' + resp.status + ')';
-      var retryAfter = body && body.retry_after;
-      renderError(msg, retryAfter ? formatRetryAfter(retryAfter) : '');
+      var hint = '';
+      if (resp.status === 404) {
+        hint = '请确认：邮箱拼写无误 · 站长已在管理端把它"加入接码"';
+      } else if (resp.status === 401) {
+        hint = '邮箱凭据已过期 — 请联系站长在管理端刷新 OAuth refresh_token';
+      } else if (resp.status === 502) {
+        hint = '邮箱服务器暂时不可用，几秒后再试一次';
+      } else if (resp.status === 429) {
+        hint = body && body.retry_after ? formatRetryAfter(body.retry_after) : '请稍候再试';
+      } else if (resp.status === 403) {
+        hint = '人机校验未通过，刷新页面后重新校验';
+      } else if (resp.status === 422 || resp.status === 400) {
+        hint = '输入格式不被接受 — 仅支持邮箱地址';
+      } else {
+        var retryAfter = body && body.retry_after;
+        hint = retryAfter ? formatRetryAfter(retryAfter) : '';
+      }
+      renderError(rawMsg, hint);
       return;
     }
 
@@ -471,12 +570,12 @@
       return;
     }
 
+    pushRecent(input);
     renderResult(body);
   });
 
-  // 首屏占位
   renderEmpty('准备就绪', '输入已加入接码白名单的邮箱后点击"查询"即可');
+  renderRecent();
 
-  // 启动期：从 /api/config 异步拉取是否启用 Turnstile（启用则注入挑战 widget）
   bootstrapConfig();
 })();

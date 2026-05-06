@@ -745,12 +745,16 @@ async def spa_routes() -> Response:
     return _serve_index()
 
 
+_APP_VERSION = (os.getenv("APP_VERSION", "") or "dev").strip()[:32]
+
+
 @app.get("/api/health")
 def health() -> dict:
     return {
         "ok": True,
         "auth_required": True,
         "register_enabled": not DISABLE_REGISTER,
+        "version": _APP_VERSION,
     }
 
 
