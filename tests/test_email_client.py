@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
-from core.email_client import EmailClient
+import pytest
+
+from core.email_client import EmailClient, _is_outlook_domain
 from core.folder_map import imap_folder_for, graph_folder_for
 
 
@@ -86,3 +88,54 @@ def test_folder_map_unknown_key_passthrough():
 def test_graph_folder_map():
     assert graph_folder_for("graph", "junk") == "junkemail"
     assert graph_folder_for("outlook", "deleted") == "deleteditems"
+
+
+# ── _is_outlook_domain 边界（防止伪装域名被误判走 OAuth）──
+
+
+@pytest.mark.parametrize(
+    "addr",
+    [
+        "user@outlook.com",
+        "user@hotmail.com",
+        "user@live.com",
+        "user@msn.com",
+        "user@outlook.office.com",
+        "user@outlook.office365.com",
+        "user@mail.outlook.com",          # 真子域
+        "user@corp.live.com",             # 真子域
+    ],
+)
+def test_is_outlook_domain_true(addr):
+    assert _is_outlook_domain(addr) is True
+
+
+@pytest.mark.parametrize(
+    "addr",
+    [
+        "user@gmail.com",
+        "user@qq.com",
+        "user@163.com",
+        "user@example.com",
+        "user@outlook.evil.com",          # ★ 关键：伪装域名必须返回 False
+        "user@hotmail.evil.com",
+        "user@live.attacker.io",
+        "user@xoutlook.com",              # 不是真子域
+        "user@outlookcom",                # 缺点
+        "",                                # 空串
+        "noatsymbol",                      # 没 @
+    ],
+)
+def test_is_outlook_domain_false(addr):
+    assert _is_outlook_domain(addr) is False
+
+
+def test_oauth_path_disabled_for_spoofed_outlook_subdomain():
+    """伪装成 outlook 子域 + 提供 OAuth 凭据 → 不走 Outlook OAuth 路径。"""
+    c = EmailClient(
+        "user@outlook.evil.com", "",
+        client_id="cid", refresh_token="rt",
+    )
+    assert c._token_manager is None     # noqa: SLF001
+    assert c._graph is None             # noqa: SLF001
+    assert c._imap.token_manager is None  # noqa: SLF001

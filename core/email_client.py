@@ -26,12 +26,25 @@ from core.oauth_token import TokenManager
 logger = logging.getLogger(__name__)
 
 
-_OUTLOOK_DOMAINS = ("outlook.", "hotmail.", "live.", "msn.com")
+_OUTLOOK_DOMAINS = frozenset({
+    "outlook.com", "outlook.office.com", "outlook.office365.com",
+    "hotmail.com", "live.com", "msn.com",
+})
 
 
 def _is_outlook_domain(email_addr: str) -> bool:
-    domain = email_addr.split("@")[-1].lower()
-    return any(domain.startswith(p) or domain == p for p in _OUTLOOK_DOMAINS)
+    """判断是否是 Microsoft 托管邮箱（含官方区域域名与子域）。
+
+    旧实现用 ``startswith('outlook.')`` 会误判 ``user@outlook.evil.com``：
+    `outlook.evil.com.startswith('outlook.')` = True，导致伪装域名被路由到 OAuth
+    路径。改成精确匹配 + 真子域（`endswith('.<known>')`）后只接受合法层级。
+    """
+    domain = (email_addr or "").rsplit("@", 1)[-1].lower()
+    if not domain:
+        return False
+    if domain in _OUTLOOK_DOMAINS:
+        return True
+    return any(domain.endswith("." + d) for d in _OUTLOOK_DOMAINS)
 
 
 class EmailClient:
@@ -47,8 +60,6 @@ class EmailClient:
         refresh_token: Optional[str] = None,
         account_id: Optional[int] = None,
         on_token_refresh: Optional[Callable[[int, str, str], None]] = None,
-        # 兼容字段（旧接口曾接受 db_manager）
-        db_manager=None,
     ) -> None:
         self.email_addr = email_addr
         self.password = password
@@ -62,19 +73,17 @@ class EmailClient:
         if self._use_oauth():
             cb = None
             if on_token_refresh and account_id is not None:
+                # 闭包绑定 account_id：TokenManager 回调签名是 (cid, new_rt)，
+                # 这里把 account_id 偷渡进 web 层提供的 (aid, cid, new_rt) 持久化函数
                 def _cb(cid: str, new_rt: str, _aid=account_id) -> None:
                     on_token_refresh(_aid, cid, new_rt)
-                cb = _cb
-            elif db_manager is not None and account_id is not None:
-                def _cb(cid: str, new_rt: str, _aid=account_id, _db=db_manager) -> None:
-                    _db.update_account_oauth(_aid, cid, new_rt)
                 cb = _cb
 
             self._token_manager = TokenManager(
                 client_id=client_id, refresh_token=refresh_token,
                 on_token_refresh=cb,
             )
-            # 仅 graph 路径已就绪；是否使用见 _can_use_graph()
+            # 仅 graph 路径已就绪；是否使用见 _can_use_graph_for_writes()
             self._graph = GraphClient(self._token_manager)
 
         # IMAPClient：OAuth 走 XOAUTH2，其它走密码
@@ -163,10 +172,7 @@ class EmailClient:
     ) -> Tuple[list[dict], str]:
         """拉取邮件列表；``with_body=False`` 时不带正文（更快）。"""
         if self._graph is not None:
-            emails, msg = self._graph.fetch_emails(folder, limit, with_body=with_body)
-            if emails:
-                return emails, msg
-            return emails, msg
+            return self._graph.fetch_emails(folder, limit, with_body=with_body)
         # IMAP 暂时不支持 with_body 区分（需要改成 BODY.PEEK[HEADER]，工程量大）
         return self._imap.fetch_emails(folder, limit)
 

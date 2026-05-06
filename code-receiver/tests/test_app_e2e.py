@@ -38,11 +38,46 @@ def client(app_module):
 def test_root_returns_html(client):
     r = client.get("/")
     assert r.status_code == 200
-    assert "邮件查看器" in r.text
+    # 品牌名 / 应用主标题（UI 重新设计后改为"验证码助手"）
+    assert "验证码助手" in r.text
     # 关键安全头
     assert r.headers.get("X-Content-Type-Options") == "nosniff"
     assert r.headers.get("X-Frame-Options") == "DENY"
     assert "frame-ancestors 'none'" in r.headers.get("Content-Security-Policy", "")
+
+
+def test_root_no_longer_lists_oauth2_format(client):
+    """UI 改版后：底部"支持格式"应当不再展示
+    ``email----密码----client_id----refresh_token (Outlook OAuth2)`` 这一项。
+
+    底层 `parse_user_input` 仍然支持 OAuth2 4 段输入（向后兼容），
+    只是不再在 UI 上把这种格式当作明确的"使用方式"暴露给终端用户。
+    """
+    text = client.get("/").text
+    assert "OAuth2" not in text, "UI 不应再显式提及 OAuth2 输入格式"
+    assert "refresh_token" not in text, "UI 不应再展示 refresh_token 字段名"
+
+
+def test_root_no_longer_includes_security_disclaimer(client):
+    """UI 改版后：底部"安全说明：您输入的密码/授权码..."段已删除。"""
+    text = client.get("/").text
+    assert "安全说明" not in text
+    assert "授权码仅在本次请求" not in text
+
+
+def test_app_js_blocks_javascript_protocol_in_link(client):
+    """前端必须有 ``safeHttpUrl`` 之类的协议白名单，防止后端被攻破或邮件被
+    篡改时返回 ``link: 'javascript:alert(1)'`` 触发存储型 XSS。
+    """
+    r = client.get("/static/app.js")
+    assert r.status_code == 200
+    body = r.text
+    assert "safeHttpUrl" in body, "app.js 应导出 safeHttpUrl 协议白名单函数"
+    # 校验函数体中明确白名单 http(s)，且把它用在 link 渲染前
+    assert "https?:" in body, "safeHttpUrl 应仅放行 http(s) 协议"
+    assert "safeHttpUrl(data.link)" in body, (
+        "渲染 link 之前必须先经过 safeHttpUrl 过滤，禁止 a.href = data.link"
+    )
 
 
 def test_healthz_ok(client):

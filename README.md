@@ -14,7 +14,7 @@
 - **可选 Token 鉴权** — 局域网开放时启用 `EMAIL_WEB_TOKEN`
 - **HTTPS 支持** — 通过环境变量挂载证书；附带自签证书生成脚本
 - **中英双语** — 前端实时切换 zh/en
-- **测试覆盖** — 42 个 pytest 测试覆盖核心逻辑（DB / 加密 / API / 路由）
+- **测试覆盖** — 230+ 个 pytest 用例覆盖核心逻辑（鉴权 / 加密 / DB / 路由 / 限流 / OAuth / 提取器）
 
 ---
 
@@ -208,18 +208,31 @@ me@outlook.com----password----<client_id>----<refresh_token>
 # 安装开发依赖
 pip install -r requirements-dev.txt
 
-# 运行测试套件（约 4 秒，42 个用例）
+# 运行主测试套件（含多用户隔离 / 限流 / 路由 / 加密 / OAuth 缓存等，约 35 秒）
 python -m pytest tests -q
+
+# 接码前台子项目测试
+python -m pytest code-receiver/tests -q
 
 # 仅跑指定测试
 python -m pytest tests/test_db.py -v
 ```
 
-测试覆盖：
-- `test_security.py` — Fernet 加解密、密钥持久化、密文幂等
-- `test_db.py` — CRUD、孤儿分组、rowcount 准确性、settings 白名单
-- `test_email_client.py` — Facade 路由判断、文件夹映射
-- `test_web_app.py` — 端点鉴权、参数校验、bug 回归
+测试覆盖（主仓 14 个模块 + 接码前台 4 个模块）：
+- `test_security.py` — Fernet 加解密、密钥持久化、密文幂等、损坏 master.key 必须 raise
+- `test_db.py` / `test_schema_migration.py` — CRUD、孤儿分组、rowcount 准确性、settings 白名单、版本化迁移
+- `test_email_client.py` — Facade 路由判断、文件夹映射、_is_outlook_domain 严格匹配
+- `test_web_app.py` — 端点鉴权、参数校验、TRUST_PROXY 行为、改密踢会话、收件人 CRLF 防护
+- `test_token_cache.py` — TokenManager 三级缓存（实例 / 进程 / 刷新）+ singleflight 并发
+- `test_rate_limit.py` — LoginRateLimiter 锁定 / 自动 GC
+- `test_routes_and_export.py` — SPA 路由、二次密码导出回路
+- `test_audit.py` / `test_emails_endpoint.py` / `test_batch_concurrent.py` — 审计、批量并发
+- `test_parse_import.py` / `test_mail_parser.py` — 多格式导入解析 / RFC 822 解码
+- `test_security_check.py` — 启动安全提示
+- `code-receiver/tests/test_input_parser.py` — 5 段输入格式判定
+- `code-receiver/tests/test_extractors.py` — Cursor / OpenAI 默认规则、SafeLinks unwrap、ReDoS 长度限制
+- `code-receiver/tests/test_db_lookup.py` — 公开账号查询、按分类命中
+- `code-receiver/tests/test_app_e2e.py` — UI 不泄露凭据、SSRF 防护、协议白名单 XSS 防护
 
 代码约定：
 - Python ≥ 3.10

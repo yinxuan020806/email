@@ -100,6 +100,12 @@ class SafeLinks:
         return cls._SAFELINK_PATTERN.sub(lambda m: cls.unwrap(m.group(0)), text)
 
 
+# 单条 sender/subject 通配符的最大字符数
+_MAX_PATTERN_LEN = 100
+# 单条 code/link 正则的最大字符数（防 ReDoS：超长嵌套量词通常需要更长正则）
+_MAX_REGEX_LEN = 200
+
+
 @dataclass
 class Extractor:
     """单条提取规则。"""
@@ -124,7 +130,12 @@ class Extractor:
         priority: int = 0,
         rule_id: Optional[int] = None,
     ) -> "Extractor":
-        """从字符串模式构造，sender/subject 用通配符（``*``→``.*``）+ 大小写不敏感。"""
+        """从字符串模式构造，sender/subject 用通配符（``*``→``.*``）+ 大小写不敏感。
+
+        防 ReDoS：``code_regex`` / ``link_regex`` 单条 > ``_MAX_REGEX_LEN`` 字符直接拒绝；
+        ``sender_pattern`` / ``subject_pattern`` 拆分后每段 > ``_MAX_PATTERN_LEN`` 拒绝。
+        管理员可通过 DB 写规则，限制能挡住"无限灰度回溯"型恶意正则。
+        """
 
         def _split_compile_patterns(s: str) -> List[re.Pattern]:
             if not s:
@@ -133,6 +144,12 @@ class Extractor:
             for raw in s.split("|"):
                 raw = raw.strip()
                 if not raw:
+                    continue
+                if len(raw) > _MAX_PATTERN_LEN:
+                    logger.warning(
+                        "跳过过长发件人/主题模式（%d > %d 字符）",
+                        len(raw), _MAX_PATTERN_LEN,
+                    )
                     continue
                 escaped = re.escape(raw).replace(r"\*", ".*")
                 try:
@@ -143,6 +160,11 @@ class Extractor:
 
         def _safe_compile(s: str) -> Optional[re.Pattern]:
             if not s:
+                return None
+            if len(s) > _MAX_REGEX_LEN:
+                logger.warning(
+                    "跳过过长正则（%d > %d 字符），防 ReDoS", len(s), _MAX_REGEX_LEN,
+                )
                 return None
             try:
                 return re.compile(s, re.IGNORECASE | re.DOTALL)

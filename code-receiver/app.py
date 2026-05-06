@@ -181,7 +181,9 @@ ALLOWED_CATEGORIES = {"cursor", "openai"}
 
 
 class LookupRequest(BaseModel):
-    input: str = Field(min_length=3, max_length=2000)
+    # 4000 字节足够覆盖 email + password + client_id + refresh_token (单个 MS RT 长度
+    # 1500-2000 字节，加分隔符和 UUID 后整个串可达 2300+，2000 限制会切断)
+    input: str = Field(min_length=3, max_length=4000)
     category: str = Field(min_length=1, max_length=32)
 
     @field_validator("category")
@@ -236,13 +238,24 @@ _AUTH_ERROR_NEEDLES = (
     "incorrect username",
     "incorrect password",
     "wrong password",
+    "bad credentials",        # GitHub / 部分 IMAP 服务器
     "invalid_grant",
     "invalid_client",
+    "invalid_request",        # MS 部分 OAuth 错误
     "unauthorized_client",
     "401 unauthorized",       # 精确匹配避免子串误抓 "1401 errors" 之类
     "http 401",
     "(401)",
     "403 forbidden",
+    "user not found",         # 部分 IMAP 服务器
+    "mailbox not enabled",    # MS 邮箱未开启 IMAP
+    "imap is disabled",
+    # ── Azure AD STS 错误码（refresh_token 失效 / 撤销 / 用户不存在）──
+    "aadsts50034",            # 用户不存在
+    "aadsts50173",            # token 已撤销
+    "aadsts70008",            # refresh_token 已过期
+    "aadsts700003",           # device 已撤销
+    "aadsts700082",           # refresh_token 因不活动撤销
 )
 
 
@@ -258,8 +271,14 @@ def _sort_mails_newest_first(mails: list[dict]) -> list[dict]:
 
     EmailClient.fetch_emails 不同后端返回顺序未定，必须显式排序，
     否则 first_match 可能取到老验证码。
+
+    支持的 date 类型：
+    - ``datetime`` 对象（GraphClient / IMAPClient 已解析过的）
+    - ISO 8601 字符串（"2024-01-01T00:00:00Z" / "+00:00"）
+    - RFC 2822 字符串（"Mon, 01 Jan 2024 00:00:00 +0000" — 部分 IMAP 后端透传时常见）
     """
     from datetime import datetime as _dt
+    from email.utils import parsedate_to_datetime as _rfc2822
 
     def _key(mail: dict):
         d = mail.get("date")
@@ -268,8 +287,19 @@ def _sort_mails_newest_first(mails: list[dict]) -> list[dict]:
         try:
             if isinstance(d, _dt):
                 return (0, -d.timestamp())
-            return (0, -_dt.fromisoformat(str(d).replace("Z", "+00:00")).timestamp())
-        except (ValueError, TypeError, OverflowError, OSError, AttributeError):
+            s = str(d)
+            try:
+                return (0, -_dt.fromisoformat(s.replace("Z", "+00:00")).timestamp())
+            except (ValueError, TypeError):
+                # ISO 解析失败时再试 RFC 2822（IMAP 后端常见格式）
+                try:
+                    parsed = _rfc2822(s)
+                    if parsed is not None:
+                        return (0, -parsed.timestamp())
+                except (ValueError, TypeError, IndexError):
+                    pass
+                return (1, 0.0)
+        except (OverflowError, OSError, AttributeError):
             return (1, 0.0)
 
     return sorted(mails, key=_key)
@@ -318,6 +348,18 @@ def lookup(req: LookupRequest, request: Request) -> JSONResponse:
     email_for_log = ""
 
     try:
+        # 0) 预检：仅 IP 维度（防止用畸形输入绕过限流计数 / 蹭算力）。
+        # finally 块会写 query_log，所以连续畸形请求超过 IP/min 阈值后会被拒；
+        # 若不预检，第一次解析失败前 limiter 还未执行，攻击者每次都能消耗 IO。
+        pre_decision = _limiter.check(ip=ip, email="")
+        if not pre_decision.allowed:
+            error_kind = "rate_limited"
+            return JSONResponse(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                content={"error": pre_decision.reason, "retry_after": pre_decision.retry_after},
+                headers={"Retry-After": str(max(1, pre_decision.retry_after))},
+            )
+
         # 1) 解析输入
         try:
             cred = parse_user_input(req.input)
@@ -327,7 +369,7 @@ def lookup(req: LookupRequest, request: Request) -> JSONResponse:
         email_for_log = cred.email
         source = "public" if cred.needs_lookup else "byo"
 
-        # 2) 限流（先于 IO 检查）
+        # 2) 限流（带 email 维度的二次检查 — 防止"同邮箱被密集打码"）
         decision = _limiter.check(ip=ip, email=cred.email)
         if not decision.allowed:
             error_kind = "rate_limited"

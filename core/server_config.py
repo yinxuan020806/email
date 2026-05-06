@@ -87,22 +87,25 @@ _DOMAIN_MAP: dict[str, str] = {
 def detect_server(email_addr: str) -> Optional[ServerProfile]:
     """根据邮箱地址自动识别服务器配置。
 
+    匹配策略（严格优先精确）：
+    1. 精确域名命中 _DOMAIN_MAP（如 outlook.com / gmail.com）
+    2. 真子域命中（如 corp.gmail.com / mail.outlook.com）—— 用 ``endswith('.<key>')``
+       而不是 ``startswith('outlook.')``，避免 ``outlook.evil.com`` 这类伪装域被
+       路由到 Outlook 服务器（启用 OAuth 路径）
+
     Returns:
         ServerProfile 如果匹配，否则 None。
         返回 None 时调用方应使用 imap.{domain} / smtp.{domain} 作为默认值。
     """
-    domain = email_addr.split('@')[-1].lower()
+    if not email_addr or "@" not in email_addr:
+        return None
+    domain = email_addr.rsplit('@', 1)[-1].lower()
 
     # 精确匹配
     if domain in _DOMAIN_MAP:
         return _PROFILES[_DOMAIN_MAP[domain]]
 
-    # 前缀匹配（处理区域域名如 outlook.co.uk）
-    for prefix in ('outlook.', 'hotmail.', 'live.'):
-        if domain.startswith(prefix):
-            return _PROFILES["outlook"]
-
-    # 后缀匹配（处理子域名如 corp.gmail.com）
+    # 真子域匹配（必须以 `.<key>` 结尾，而非 `<key>` 前缀）
     for suffix, profile_name in _DOMAIN_MAP.items():
         if domain.endswith('.' + suffix):
             return _PROFILES[profile_name]

@@ -58,14 +58,24 @@ class OAuth2Helper:
         self.client_id = client_id or get_default_client_id()
         self.redirect_uri = get_redirect_uri()
 
-    def get_auth_url(self, email: str = "") -> str:
+    def get_auth_url(self, email: str = "", state: Optional[str] = None) -> str:
+        """构造 Microsoft OAuth2 授权 URL。
+
+        ``state`` 留空会随机生成（向后兼容老调用）。生产代码应**显式**传入
+        服务端记录的 state（绑定到当前登录会话），并在 ``/api/oauth2/exchange``
+        中校验 redirect_url 中返回的 state 与服务端记录一致，防止：
+        - CSRF：攻击者诱导受害者完成授权后把 RT 绑到攻击者账号；
+        - 跨标签污染：用户连续打开两次授权流时混用 code。
+        服务端记录可以是短期内存（见 ``web_app._pending_oauth_states``）或
+        签名 cookie。
+        """
         params = {
             "client_id": self.client_id,
             "response_type": "code",
             "redirect_uri": self.redirect_uri,
             "response_mode": "query",
             "scope": " ".join(SCOPES),
-            "state": secrets.token_urlsafe(16),
+            "state": state or secrets.token_urlsafe(16),
         }
         if email:
             params["login_hint"] = email
@@ -102,15 +112,28 @@ class OAuth2Helper:
             }
             resp = requests.post(TOKEN_URL, data=data, timeout=30, verify=certifi.where())
             if resp.status_code != 200:
-                err = resp.json().get("error_description", resp.text)
+                # 微软在 5xx / WAF 拦截时可能返回 HTML 或空响应，resp.json() 会抛 ValueError
+                try:
+                    err = resp.json().get("error_description", resp.text)
+                except ValueError:
+                    err = (resp.text or f"HTTP {resp.status_code}")[:300]
                 return None, None, f"获取 Token 失败: {err}"
-            refresh_token = resp.json().get("refresh_token")
+            try:
+                payload = resp.json()
+            except ValueError:
+                return None, None, "Token 端点返回了非 JSON 响应"
+            refresh_token = payload.get("refresh_token")
             if not refresh_token:
                 return None, None, "服务器未返回 refresh_token"
             return self.client_id, refresh_token, None
         except requests.RequestException as exc:
             logger.exception("OAuth2 网络异常")
             return None, None, f"网络错误: {exc}"
-        except Exception as exc:
+        except (ValueError, KeyError, TypeError, IndexError) as exc:
+            # ValueError: parse_qs / urlparse 收到畸形 URL（含控制字符等）
+            # KeyError / IndexError: qs 缺少 code
+            # TypeError: redirect_url 不是 str
+            # 其它未列出的 Exception 让它向上抛，由 FastAPI 落在 500 + 完整堆栈日志，
+            # 这样运维能看到真正的代码 bug，而不是被一个 "授权过程出错: ..." 字符串遮蔽。
             logger.exception("OAuth2 解析异常")
-            return None, None, f"授权过程出错: {exc}"
+            return None, None, f"授权过程出错: {type(exc).__name__}"

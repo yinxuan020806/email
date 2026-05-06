@@ -23,8 +23,8 @@ from pathlib import Path
 from typing import Iterator, List, Optional
 
 from core.models import Account
-from core.security import SecretBox
-from core.server_config import get_imap_smtp
+from core.security import SecretBox, SecretBoxDecryptError
+from core.server_config import detect_server, get_imap_smtp
 
 
 logger = logging.getLogger(__name__)
@@ -426,6 +426,32 @@ class DatabaseManager:
             cur = conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
             return cur.rowcount > 0
 
+    def delete_user_sessions(
+        self, user_id: int, except_token: Optional[str] = None
+    ) -> int:
+        """删除指定用户的所有会话；用于改密码 / 强制下线场景。
+
+        - ``except_token=None`` 表示**踢光所有会话**（包括当前），
+          用于必须强制重新登录的场景（改密 / 主动安全注销）。
+        - ``except_token=<token>`` 表示**保留该会话**，踢光其它，
+          用于"修改密码后保持当前浏览器在线，其它端下线"的体验。
+        - 返回真实删除条数（cur.rowcount）。
+        """
+        if not user_id:
+            return 0
+        if except_token:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    "DELETE FROM sessions WHERE user_id = ? AND token != ?",
+                    (user_id, except_token),
+                )
+                return cur.rowcount
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM sessions WHERE user_id = ?", (user_id,),
+            )
+            return cur.rowcount
+
     def cleanup_expired_sessions(self) -> int:
         with self._connect() as conn:
             cur = conn.execute(
@@ -531,11 +557,35 @@ class DatabaseManager:
         client_id: Optional[str] = None,
         refresh_token: Optional[str] = None,
     ) -> tuple[bool, str]:
+        # 邮箱地址标准化：去首尾空白 + 全部小写。
+        # SMTP/IMAP RFC 5321 要求 local-part 大小写敏感，但实际所有主流邮件服务器
+        # 都按大小写不敏感处理；保持小写存储后：
+        # - import 同一邮箱的不同大小写形态（USER@x.com / user@X.COM）自动合并
+        # - get_account_by_email / get_public_account_for_lookup 也能精确命中
+        # - UNIQUE (owner_id, email) 约束实际生效，防"重复账号"
+        email = (email or "").strip().lower()
+        if not email or "@" not in email:
+            return False, "邮箱格式不合法"
+
         box = SecretBox.instance()
         if not imap_server:
             imap_server, smtp_server = get_imap_smtp(email)
         else:
-            smtp_server = imap_server.replace("imap", "smtp")
+            # 自定义 imap 主机时，优先用 server_config 按邮箱域查表得到对应
+            # SMTP 主机；表里没有再退化为基于 imap 字符串替换。
+            #
+            # 旧实现 ``imap_server.replace("imap", "smtp")`` 的两类已知问题：
+            # 1. 主机名含多个 ``imap`` 子串时会全部替换（如 ``imap-relay.imap.example.com``）
+            #    得到不存在的 SMTP 主机；
+            # 2. ``outlook.office365.com`` / ``smtp.office365.com`` 这类命名
+            #    不对称的服务（IMAP 与 SMTP 主机名前缀不同）会被错误推导。
+            profile = detect_server(email)
+            if profile and profile.smtp_host:
+                smtp_server = profile.smtp_host
+            elif imap_server.lower().startswith("imap."):
+                smtp_server = "smtp." + imap_server[len("imap."):]
+            else:
+                smtp_server = imap_server.replace("imap", "smtp", 1)
 
         account_type = "OAuth2" if client_id and refresh_token else "普通"
         group = (group or "默认分组").strip() or "默认分组"
@@ -615,12 +665,58 @@ class DatabaseManager:
             rows = cur.fetchall()
         return [self._row_to_account(r) for r in rows]
 
+    def get_accounts_by_ids(
+        self, owner_id: int, account_ids: list[int]
+    ) -> List[Account]:
+        """按 ID 列表批量取账号，仅返回当前用户名下的命中项。
+
+        相比 ``get_all_accounts(owner_id)`` 后过滤 ID：
+        - 单条 SQL，N=10000 下省去 ~99% 的 Python 侧 dict 构建与解密开销
+          （只解密命中的几条而非全表）
+        - 用 SQL 自身做 owner_id 隔离，避免把"全表加载到内存里再过滤"的
+          O(N) 临时副本暴露给进程
+        - 返回顺序按 SQL 默认（id ASC）；调用方若需保留入参顺序应自行 reorder
+
+        ``account_ids`` 为空或全部去重后为空 → 返回 ``[]``。
+        SQLite 单语句最大占位符约 999（旧版）/ 32766（新版）；超过会被分片。
+        """
+        if not account_ids:
+            return []
+        unique_ids: list[int] = []
+        seen: set[int] = set()
+        for i in account_ids:
+            if isinstance(i, int) and i not in seen:
+                seen.add(i)
+                unique_ids.append(i)
+        if not unique_ids:
+            return []
+
+        cols = self._select_account_columns()
+        # SQLite 老版本默认 SQLITE_MAX_VARIABLE_NUMBER=999；预留 1 个给 owner_id
+        chunk_size = 998
+        rows: list[tuple] = []
+        with self._connect() as conn:
+            for offset in range(0, len(unique_ids), chunk_size):
+                chunk = unique_ids[offset:offset + chunk_size]
+                placeholders = ",".join("?" for _ in chunk)
+                cur = conn.execute(
+                    f"SELECT {cols} FROM accounts "
+                    f"WHERE owner_id = ? AND id IN ({placeholders})",
+                    (owner_id, *chunk),
+                )
+                rows.extend(cur.fetchall())
+        return [self._row_to_account(r) for r in rows]
+
     def get_account_by_email(self, owner_id: int, email: str) -> Optional[Account]:
+        # 与 add_account 标准化策略一致：小写匹配，避免大小写差异导致漏命中
+        norm = (email or "").strip().lower()
+        if not norm:
+            return None
         cols = self._select_account_columns()
         with self._connect() as conn:
             cur = conn.execute(
-                f"SELECT {cols} FROM accounts WHERE owner_id = ? AND email = ?",
-                (owner_id, email),
+                f"SELECT {cols} FROM accounts WHERE owner_id = ? AND LOWER(email) = ?",
+                (owner_id, norm),
             )
             row = cur.fetchone()
         return self._row_to_account(row) if row else None
@@ -897,12 +993,14 @@ class DatabaseManager:
         cols = self._select_account_columns(alias="a")
         # 用占位符同时支撑显式 allowed_categories LIKE 与 N 个 group_name LIKE
         group_or = " OR ".join("lower(a.group_name) LIKE ?" for _ in keywords)
+        # email 用 LOWER() 让查询大小写不敏感；账号导入若大小写混存（如 User@x.com vs user@x.com）
+        # 也不会因输入形态不同而漏命中公开账号
         sql = f"""
             SELECT {cols}
             FROM accounts a
             JOIN users u ON u.id = a.owner_id
             WHERE u.username = ?
-              AND a.email = ?
+              AND LOWER(a.email) = LOWER(?)
               AND a.is_public = 1
               AND (
                   a.allowed_categories = '*'
@@ -1112,10 +1210,32 @@ class DatabaseManager:
     # ── 内部辅助 ──────────────────────────────────────────────────
 
     def _row_to_account(self, row: tuple) -> Account:
+        """把 DB 行转 Account，并解密敏感字段。
+
+        损坏密文容错策略：``SecretBox.decrypt`` 在新合约下会对"带前缀但
+        Fernet 校验失败"的密文 ``raise SecretBoxDecryptError``。这里把它
+        降级为单条字段失效（写 error 日志 + 字段置空），避免一条损坏数据
+        把整张账号列表的查询拽崩。运维仍可通过 ERROR 日志感知到问题。
+        """
         acc = Account.from_row(row)
         box = SecretBox.instance()
-        acc.password = box.decrypt(acc.password) or ""
-        acc.refresh_token = box.decrypt(acc.refresh_token)
+        try:
+            acc.password = box.decrypt(acc.password) or ""
+        except SecretBoxDecryptError:
+            logger.error(
+                "account.password 解密失败 acc.id=%s，本次回退为空字符串；"
+                "请尽快定位 master.key 是否被替换或密文是否损坏",
+                acc.id,
+            )
+            acc.password = ""
+        try:
+            acc.refresh_token = box.decrypt(acc.refresh_token)
+        except SecretBoxDecryptError:
+            logger.error(
+                "account.refresh_token 解密失败 acc.id=%s，本次回退为 None",
+                acc.id,
+            )
+            acc.refresh_token = None
         return acc
 
     @staticmethod

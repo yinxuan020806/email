@@ -33,7 +33,15 @@ class _Entry:
 
 
 class LoginRateLimiter:
-    """线程安全的内存限流器。"""
+    """线程安全的内存限流器。
+
+    自我维护策略：
+    - 每隔 ``GC_INTERVAL`` 秒清理一次 ``_store``，删除"既无 lock 也无 valid fails"的死 entry，
+      防止攻击者用大量随机 (username, ip) 组合让进程内存膨胀（DoS）。
+    - GC 在 ``check / record_failure`` 路径中惰性触发，无需额外线程。
+    """
+
+    GC_INTERVAL: float = 60.0  # 最低 GC 间隔（秒）
 
     def __init__(
         self,
@@ -46,16 +54,37 @@ class LoginRateLimiter:
         self.lock_duration = lock_duration
         self._store: Dict[Tuple[str, str], _Entry] = {}
         self._lock = threading.Lock()
+        self._last_gc: float = time.time()
 
     @staticmethod
     def _key(username: str, ip: str) -> Tuple[str, str]:
         return ((username or "").strip().lower(), (ip or "0.0.0.0").strip())
+
+    def _maybe_gc_locked(self, now: float) -> None:
+        """**调用方必须已持有 self._lock**。
+
+        惰性 GC：超过 ``GC_INTERVAL`` 秒未清理时，扫一遍丢掉死 entry。
+        死 entry = 锁定已结束 + 计数窗口内无失败记录。
+        """
+        if now - self._last_gc < self.GC_INTERVAL:
+            return
+        cutoff = now - self.window
+        dead: list = []
+        for k, e in self._store.items():
+            still_locked = e.locked_until > now
+            has_recent_fail = any(ts >= cutoff for ts in e.fails)
+            if not still_locked and not has_recent_fail:
+                dead.append(k)
+        for k in dead:
+            self._store.pop(k, None)
+        self._last_gc = now
 
     def check(self, username: str, ip: str) -> Tuple[bool, int]:
         """检查是否允许尝试。返回 (allowed, retry_after_seconds)。"""
         now = time.time()
         key = self._key(username, ip)
         with self._lock:
+            self._maybe_gc_locked(now)
             entry = self._store.get(key)
             if not entry:
                 return True, 0
@@ -68,6 +97,7 @@ class LoginRateLimiter:
         now = time.time()
         key = self._key(username, ip)
         with self._lock:
+            self._maybe_gc_locked(now)
             entry = self._store.setdefault(key, _Entry())
             cutoff = now - self.window
             while entry.fails and entry.fails[0] < cutoff:
@@ -89,6 +119,7 @@ class LoginRateLimiter:
         """测试或运维场景一键清空。"""
         with self._lock:
             self._store.clear()
+            self._last_gc = time.time()
 
     def remaining_attempts(self, username: str, ip: str) -> Optional[int]:
         """返回剩余可尝试次数；锁定中返回 None。"""
@@ -103,6 +134,11 @@ class LoginRateLimiter:
             cutoff = now - self.window
             valid = sum(1 for ts in entry.fails if ts >= cutoff)
             return max(0, self.max_fails - valid)
+
+    def size(self) -> int:
+        """返回当前跟踪的会话数（测试 / 运维可见）。"""
+        with self._lock:
+            return len(self._store)
 
 
 login_limiter = LoginRateLimiter()

@@ -79,15 +79,40 @@ def test_login_creates_audit_entry(client):
 
 
 def test_failed_login_creates_failure_audit(client):
-    """登录失败应记录 success=false 的审计。"""
+    """登录失败应记录 success=false 的审计。
+
+    旧版用 ``only_self=false`` 看全库审计才能看到自己的失败登录，因为旧实现
+    没给失败登录写 user_id。新合约：失败登录如已知用户存在，写 user_id；
+    所以"仅看自己"也能看到自己失败的尝试。
+    （越权读全库的能力被关闭，详见 web_app.py list_audit_log。）
+    """
     client.post("/api/auth/logout")
     client.post("/api/auth/login", json={"username": "alice", "password": "wrong"})
     # 重新登录后才能访问审计
     client.post("/api/auth/login", json={"username": "alice", "password": "pwd-alice"})
-    r = client.get("/api/audit?only_self=false&action=login")
+    r = client.get("/api/audit?action=login")
     assert r.status_code == 200
     items = r.json()["items"]
-    assert any(i["action"] == "login" and not i["success"] for i in items)
+    assert any(i["action"] == "login" and not i["success"] for i in items), (
+        "失败登录的审计（含 user_id）必须出现在用户自己的审计列表里"
+    )
+
+
+def test_audit_only_self_param_no_longer_widens_scope(client2):
+    """回归：传 ``only_self=false`` 不能再被任何用户用来读全库审计。
+
+    新版 ``list_audit_log`` 不再接受 ``only_self`` 参数，FastAPI 会忽略未声明
+    的 query 参数（不会 422），但服务端始终按 ``user_id=current_user`` 过滤。
+    """
+    a, b = client2
+    # bob 触发一些动作产生审计
+    b.post("/api/auth/logout")
+    b.post("/api/auth/login", json={"username": "bob", "password": "pwd-bob"})
+    # alice 尝试用旧版越权姿势读全库
+    items = a.get("/api/audit?only_self=false").json()["items"]
+    assert all(
+        i["username"] != "bob" for i in items if i["username"]
+    ), "alice 不应在自己的审计里看到 bob 的记录"
 
 
 def test_change_password_audited(client):

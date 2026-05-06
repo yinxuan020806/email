@@ -55,11 +55,29 @@ def test_persisted_key_reused(tmp_path):
     assert b2.decrypt(secret) == "xyz"
 
 
-def test_corrupted_key_regenerated(tmp_path, caplog):
+def test_corrupted_key_raises_runtime_error(tmp_path):
+    """损坏的 master.key 必须 raise，绝不静默覆盖（覆盖会导致旧密文不可解）。
+
+    新合约（替代旧的"自动重新生成"行为）：
+    - 内容非法 → 启动失败，raise RuntimeError
+    - 真要重置：调用方手动删除 .master.key 后再启动
+    """
+    import pytest
     SecretBox._instance = None  # noqa: SLF001
     key_file = tmp_path / ".master.key"
     key_file.write_bytes(b"not-a-valid-key")
+    with pytest.raises(RuntimeError, match=r"主密钥.*内容非法"):
+        SecretBox(key_path=key_file)
+    # 文件应保持原样（损坏内容仍在，便于运维取证）
+    assert key_file.read_bytes() == b"not-a-valid-key"
+
+
+def test_missing_key_auto_generates(tmp_path):
+    """不存在的 master.key 仍允许首次自动生成（首次部署 / 全新环境）。"""
+    SecretBox._instance = None  # noqa: SLF001
+    key_file = tmp_path / ".master.key"
+    assert not key_file.exists()
     b = SecretBox(key_path=key_file)
-    # 应能正常使用（已重新生成新 key）
     enc = b.encrypt("v")
     assert b.decrypt(enc) == "v"
+    assert key_file.exists()

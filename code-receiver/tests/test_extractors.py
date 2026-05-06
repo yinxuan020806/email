@@ -209,3 +209,59 @@ def test_safelinks_unwrap_extracts_url():
         "https%3A%2F%2Fauth.openai.com%2Flog-in%2F&data=z"
     )
     assert SafeLinks.unwrap(wrapped) == "https://auth.openai.com/log-in/"
+
+
+# ── ReDoS 防护：正则长度限制 ────────────────────────────────
+
+
+def test_extractor_rejects_oversize_code_regex():
+    """``code_regex`` 超过 200 字符不应被编译（防 ReDoS / 避免管理员误用）。"""
+    from extractors.base import Extractor
+
+    long_pattern = r"(?P<code>" + r"\d" * 300 + r")"
+    ex = Extractor.from_strings(category="cursor", code_regex=long_pattern)
+    assert ex.code_regex is None, "超长 code_regex 必须被静默拒绝"
+
+
+def test_extractor_rejects_oversize_link_regex():
+    from extractors.base import Extractor
+
+    long_pattern = r"(?P<link>" + r"[a-z]" * 300 + r")"
+    ex = Extractor.from_strings(category="cursor", link_regex=long_pattern)
+    assert ex.link_regex is None
+
+
+def test_extractor_rejects_oversize_sender_pattern():
+    """通配符 sender_pattern 单条 > 100 字符直接丢弃，但其它 segment 正常用。"""
+    from extractors.base import Extractor
+
+    huge = "x" * 200
+    ex = Extractor.from_strings(
+        category="cursor",
+        sender_pattern=f"{huge}|*@cursor.sh",
+    )
+    # 只剩 *@cursor.sh 一个有效 pattern
+    assert len(ex.sender_patterns) == 1
+
+
+def test_extractor_accepts_normal_regex():
+    """正常长度的正则正常工作（确保限制没误伤合法规则）。"""
+    from extractors.base import Extractor
+
+    ex = Extractor.from_strings(
+        category="cursor",
+        code_regex=r"(?P<code>\d{6})",
+        link_regex=r"(?P<link>https?://cursor\.com/[^\s]+)",
+        sender_pattern="*@cursor.com|*@cursor.sh",
+    )
+    assert ex.code_regex is not None
+    assert ex.link_regex is not None
+    assert len(ex.sender_patterns) == 2
+
+
+def test_extractor_invalid_regex_returns_none():
+    """非法正则 (unbalanced paren) 必须被吞掉而非抛异常。"""
+    from extractors.base import Extractor
+
+    ex = Extractor.from_strings(category="cursor", code_regex="(unclosed")
+    assert ex.code_regex is None

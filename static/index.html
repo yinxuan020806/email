@@ -34,7 +34,7 @@
       <span data-i18n="btn_logout">退出登录</span>
     </button>
     <div class="sb-bottom">
-      <button class="icon-btn" id="themeBtn" title="theme">☀️</button>
+      <button class="icon-btn" id="themeBtn" data-i18n-title="theme_btn_title" title="切换主题">☀️</button>
       <button class="lang-btn" id="langBtn" data-i18n="btn_lang">中/EN</button>
     </div>
   </aside>
@@ -149,9 +149,11 @@ email----password----client_id----refresh_token$$--------组名
     <div class="form-group">
       <label data-i18n="modal_export_range">导出范围</label>
       <select id="exportScope">
+        <option value="selected" data-i18n="modal_export_selected">仅选中的账号</option>
         <option value="current" data-i18n="modal_export_current">当前分组</option>
         <option value="all" data-i18n="modal_export_all">全部分组</option>
       </select>
+      <div id="exportSelectedHint" style="font-size:12px;color:var(--text2);margin-top:6px;display:none"></div>
     </div>
     <div class="form-row">
       <div class="form-group">

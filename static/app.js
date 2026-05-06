@@ -499,6 +499,7 @@ function renderAccounts() {
     }, t('btn_show'));
     pwdCell.appendChild(showBtn);
     pwdCell.appendChild(el('button', {
+      'aria-label': t('op_copy_pwd_aria'),
       onclick: () => copyText(a.password)
     }, t('btn_copy')));
     tr.appendChild(el('td', {}, pwdCell));
@@ -517,6 +518,16 @@ function renderAccounts() {
     tr.appendChild(tdRemark);
 
     const ops = el('div', { class: 'op-btns' });
+    ops.appendChild(el('button', {
+      title: t('op_copy_full_hint'),
+      'aria-label': t('op_copy_full_aria'),
+      onclick: () => {
+        const { text, dirty } = buildAccountFullString(a);
+        copyText(text, 'toast_copied_full', {
+          warningKey: dirty ? 'toast_copied_field_sanitized' : null,
+        });
+      },
+    }, t('btn_copy')));
     ops.appendChild(el('button', { onclick: () => viewEmails(a.id) }, t('btn_view')));
     ops.appendChild(el('button', { onclick: () => showDetail(a.id) }, t('btn_detail')));
     ops.appendChild(el('button', { class: 'danger', onclick: () => deleteSingle(a.id) }, t('btn_del')));
@@ -537,11 +548,99 @@ function toggleSel(id, checked) {
   renderAccounts();
 }
 
-function copyText(text, toastKey = 'toast_copied') {
-  navigator.clipboard.writeText(text || '').then(
-    () => toast(t(toastKey), 'success'),
-    () => toast(t('toast_clip_fail'), 'error'),
-  );
+/**
+ * 把字符串里的 CR/LF 与 ``----`` 序列剥离，避免它们污染按 ``----`` 分隔的
+ * 一行导入串。
+ * - ``\r`` / ``\n`` 出现在密码 / refresh_token 中时罕见但可能（导入时容错），
+ *   留在复制串里会让回导入解析错位甚至变成多账号
+ * - ``----`` 是字段分隔符；字段内含它就破坏导入语义
+ *
+ * 返回 ``[cleaned, dirty]``：dirty 为 true 表示真的清理过，调用方可
+ * 用提示用户复制内容已被修正。
+ */
+function sanitizeImportField(s) {
+  const raw = String(s || '');
+  if (!raw) return [raw, false];
+  let cleaned = raw.replace(/[\r\n]+/g, ' ');
+  cleaned = cleaned.split('----').join('-­-­-­-');  // 软连字号占位，肉眼难辨但分隔符语义打破
+  return [cleaned, cleaned !== raw];
+}
+
+/**
+ * 用 ``navigator.clipboard`` 写剪贴板，HTTP 局域网 / 旧浏览器不可用时回退
+ * 到 ``document.execCommand('copy')`` 兜底。失败显式 toast。
+ *
+ * ``opts.warningKey`` 不空时表示"复制成功但内容被修正过"，用 warning 类型 toast
+ * 替代 success（让用户看见修正提醒）。
+ */
+function copyText(text, toastKey = 'toast_copied', opts = {}) {
+  const value = String(text == null ? '' : text);
+  const successToast = () => {
+    if (opts.warningKey) toast(t(opts.warningKey), 'warning');
+    else toast(t(toastKey), 'success');
+  };
+  const failToast = () => toast(t('toast_clip_fail'), 'error');
+
+  // 路径 1：现代 Clipboard API（仅 secure context 可用）
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(value).then(successToast, () => {
+      if (!_copyTextFallback(value)) failToast();
+      else successToast();
+    });
+    return;
+  }
+  // 路径 2：execCommand 兜底（HTTP/局域网部署）
+  if (_copyTextFallback(value)) successToast();
+  else toast(t('toast_clip_fallback_failed'), 'error');
+}
+
+function _copyTextFallback(value) {
+  // execCommand('copy') 已被 W3C 标记 deprecated，但所有现役桌面浏览器还在用；
+  // 主路径用 navigator.clipboard，这里仅作 HTTP 部署的兜底。
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = value;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand && document.execCommand('copy');
+    document.body.removeChild(ta);
+    return !!ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 构造账号一键复制串：
+ *   普通账号       -> email----password
+ *   OAuth2 账号    -> email----password----client_id----refresh_token
+ *
+ * 旧实现仅当 ``client_id && refresh_token`` 同时存在时才输出 4 段；只有其中
+ * 一个时另一个被静默丢弃。新版"任一存在就用空字符串占位补足 4 段"，避免
+ * 数据丢失，代价是回导入时遇到含空字段的 4 段需要识别为半成品。
+ *
+ * 同时 sanitize 字段内的换行 / ``----`` 序列，避免污染分隔结构（详见
+ * ``sanitizeImportField``）。``dirty`` 表示是否做过实际修正，调用方
+ * 可以用 warning toast 提示用户。
+ *
+ * 返回 ``{text, dirty}``。
+ */
+function buildAccountFullString(a) {
+  const fields = [a.email || '', a.password || ''];
+  if (a.client_id || a.refresh_token) {
+    fields.push(a.client_id || '');
+    fields.push(a.refresh_token || '');
+  }
+  let dirty = false;
+  const cleaned = fields.map((s) => {
+    const [c, d] = sanitizeImportField(s);
+    if (d) dirty = true;
+    return c;
+  });
+  return { text: cleaned.join('----'), dirty };
 }
 
 async function editRemark(id, oldVal) {
@@ -611,13 +710,49 @@ async function doImport() {
 }
 
 // ───────── Export ─────────
+/**
+ * 根据范围下拉的当前选项更新提示文字 + 锁定 / 启用「按选中」选项。
+ * 「按选中」只有在用户至少勾选了一个账号时才可选；否则文字降级提示。
+ */
+function refreshExportScopeHint() {
+  const sel = $('exportScope');
+  const hintEl = $('exportSelectedHint');
+  const selectedCount = S.selected.size;
+  const selectedOpt = sel.querySelector('option[value="selected"]');
+  if (selectedOpt) {
+    if (selectedCount > 0) {
+      selectedOpt.disabled = false;
+      selectedOpt.textContent = t('modal_export_selected_n', { n: selectedCount });
+    } else {
+      selectedOpt.disabled = true;
+      selectedOpt.textContent = t('modal_export_selected_empty');
+    }
+  }
+  if (sel.value === 'selected') {
+    hintEl.style.display = '';
+    hintEl.textContent = selectedCount > 0
+      ? t('modal_export_selected_hint', { n: selectedCount })
+      : t('modal_export_selected_empty');
+  } else {
+    hintEl.style.display = 'none';
+    hintEl.textContent = '';
+  }
+}
+
 function showExportModal() {
   $('exportPassword').value = '';
   $('exportErr').textContent = '';
-  // 默认范围：当前如果不在"全部"，默认导出当前分组；否则全部
-  $('exportScope').value = (S.currentGroup && S.currentGroup !== '全部') ? 'current' : 'all';
+  // 默认范围（按优先级）：勾选不空 → selected；否则当前分组非全部 → current；否则 all
+  if (S.selected.size > 0) {
+    $('exportScope').value = 'selected';
+  } else if (S.currentGroup && S.currentGroup !== '全部') {
+    $('exportScope').value = 'current';
+  } else {
+    $('exportScope').value = 'all';
+  }
   $('exportSeparator').value = 'newline';
   $('exportIncludeGroup').checked = true;
+  refreshExportScopeHint();
   openModal('exportModal');
   setTimeout(() => $('exportPassword').focus(), 60);
 }
@@ -633,8 +768,23 @@ async function doExport() {
   const scope = $('exportScope').value;
   const includeGroup = $('exportIncludeGroup').checked;
   const separator = $('exportSeparator').value;
-  const groupParam = (scope === 'current' && S.currentGroup && S.currentGroup !== '全部')
-    ? S.currentGroup : null;
+
+  const payload = {
+    password: pwd,
+    include_group: includeGroup,
+    separator,
+  };
+  if (scope === 'selected') {
+    const ids = [...S.selected];
+    if (!ids.length) {
+      errEl.textContent = t('modal_export_selected_empty');
+      return;
+    }
+    payload.ids = ids;
+  } else if (scope === 'current' && S.currentGroup && S.currentGroup !== '全部') {
+    payload.group = S.currentGroup;
+  }
+  // scope === 'all' 时既不传 ids 也不传 group → 后端走全部账号
 
   const btn = $('btnDoExport');
   btn.disabled = true;
@@ -643,12 +793,7 @@ async function doExport() {
   try {
     const r = await request('/api/accounts/export', {
       method: 'POST',
-      body: JSON.stringify({
-        password: pwd,
-        group: groupParam,
-        include_group: includeGroup,
-        separator,
-      }),
+      body: JSON.stringify(payload),
       headers: { 'Content-Type': 'application/json' },
     });
     if (!r.ok) {
@@ -658,11 +803,14 @@ async function doExport() {
     }
     const blob = await r.blob();
     const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const a = el('a', {
-      href: URL.createObjectURL(blob),
-      download: `accounts_export_${ts}.txt`,
-    });
+    const url = URL.createObjectURL(blob);
+    const a = el('a', { href: url, download: `accounts_export_${ts}.txt` });
     document.body.appendChild(a); a.click(); a.remove();
+    // 浏览器需要一点时间发起下载请求；用 setTimeout 而不是立即 revoke。
+    // 不 revoke 的话同一会话反复导出会让 blob URL 持续累积，浏览器不主动清理。
+    setTimeout(() => {
+      try { URL.revokeObjectURL(url); } catch { /* 老浏览器忽略 */ }
+    }, 60_000);
     closeModal('exportModal');
     toast(t('toast_export_started'), 'success');
   } catch (e) {
@@ -742,14 +890,24 @@ function viewEmails(accountId) {
   loadEmails();
 }
 
+// 邮件列表请求计数器：用户连点几次刷新或快速切换文件夹时，慢的旧请求
+// 返回后会覆盖掉新请求的结果（"先发后到"竞态）。每次开新请求自增此计数，
+// 在 await 后 if 自增过就丢弃响应。
+S._emailListReqId = 0;
+
 async function loadEmails() {
   if (!S.emailAccount) return;
   const folder = $('emailFolder').value;
   const list = $('emailList');
   clear(list);
   list.appendChild(el('div', { class: 'empty-state' }, t('email_loading')));
+  const myReqId = ++S._emailListReqId;
+  const myAccId = S.emailAccount.id;
   try {
-    const r = await api.get(`/api/accounts/${S.emailAccount.id}/emails?folder=${folder}`);
+    const r = await api.get(`/api/accounts/${myAccId}/emails?folder=${folder}`);
+    // 后发先至防御：若期间用户切换了账号 / 切换了文件夹再刷新，丢弃本次结果
+    if (myReqId !== S._emailListReqId) return;
+    if (!S.emailAccount || S.emailAccount.id !== myAccId) return;
     S.allEmails = r.emails || [];
     S.emails = [...S.allEmails];
     S.currentEmail = null;
@@ -760,6 +918,7 @@ async function loadEmails() {
       prefetchEmailBody(i);
     }
   } catch {
+    if (myReqId !== S._emailListReqId) return;
     clear(list);
     list.appendChild(el('div', { class: 'empty-state', style: 'color:var(--danger)' }, t('email_load_fail')));
   }
@@ -1140,10 +1299,12 @@ function copyAccountInfo() {
     `${t('d_status')}: ${a.status}`,
     `${t('d_type')}: ${a.type}`,
   ];
-  if (a.client_id) lines.push(`Client ID: ${a.client_id}`);
-  if (a.refresh_token) lines.push(`Refresh Token: ${a.refresh_token}`);
+  // 旧版硬编码 ``Client ID`` / ``Refresh Token`` 英文，与 zh 界面格格不入；
+  // 改走 i18n（i18n.js 中 ``d_client_id`` / ``d_refresh_token`` 已存在）
+  if (a.client_id) lines.push(`${t('d_client_id')}: ${a.client_id}`);
+  if (a.refresh_token) lines.push(`${t('d_refresh_token')}: ${a.refresh_token}`);
   if (a.remark) lines.push(`${t('d_remark')}: ${a.remark}`);
-  navigator.clipboard.writeText(lines.join('\n')).then(() => toast(t('toast_copied'), 'success'));
+  copyText(lines.join('\n'), 'toast_copied');
 }
 
 // ───────── Views ─────────
@@ -1413,6 +1574,7 @@ $('btnDoExport').addEventListener('click', doExport);
 $('exportPassword').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') doExport();
 });
+$('exportScope').addEventListener('change', refreshExportScopeHint);
 $('btnMove').addEventListener('click', showMoveGroup);
 $('btnBatchCheck').addEventListener('click', batchCheck);
 $('btnBatchSend').addEventListener('click', showBatchSend);

@@ -82,6 +82,32 @@ def test_reset_clears_all():
     assert rl.check("u", "1.1.1.1")[0]
 
 
+def test_lazy_gc_evicts_dead_entries():
+    """超过 GC_INTERVAL 后调用 check，"既未锁定也无有效失败计数"的死 entry 应被清。
+
+    这里用短的 window=1s + GC_INTERVAL=0.05s 让测试快。
+    """
+    rl = LoginRateLimiter(max_fails=10, window=1, lock_duration=60)
+    rl.GC_INTERVAL = 0.05
+    rl.record_failure("u", "1.1.1.1")
+    assert rl.size() == 1
+
+    # 等待时长超过 window，entry 变"有 fails 但都在窗外"的状态
+    time.sleep(1.2)
+    # check 一个不同 key，触发 GC，旧的 ('u', '1.1.1.1') 被清
+    rl.check("v", "9.9.9.9")
+    # 刚访问过的 ('v', '9.9.9.9') 也不会被创建（只读不写）
+    assert rl.size() == 0, f"GC 后应为空，实际 size={rl.size()}"
+
+
+def test_size_reflects_tracked_entries():
+    rl = LoginRateLimiter(max_fails=3, window=60, lock_duration=60)
+    assert rl.size() == 0
+    rl.record_failure("u1", "1.1.1.1")
+    rl.record_failure("u2", "2.2.2.2")
+    assert rl.size() == 2
+
+
 # ── 端点集成测试 ────────────────────────────────────────────
 
 

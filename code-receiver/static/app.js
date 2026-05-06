@@ -1,13 +1,29 @@
+/* eslint-disable no-var */
 (function () {
   'use strict';
 
-  const form = document.getElementById('lookup-form');
-  const inputEl = document.getElementById('input-credential');
-  const btn = document.getElementById('submit-btn');
-  const resultEl = document.getElementById('result');
+  var form = document.getElementById('lookup-form');
+  var inputEl = document.getElementById('input-credential');
+  var btn = document.getElementById('submit-btn');
+  var resultEl = document.getElementById('result');
 
-  function escapeText(s) {
-    return (s == null ? '' : String(s));
+  /** 从原始 sender 中抽取 user@host 形式（去掉 "Name <addr>" 包装）。 */
+  function pickAddr(s) {
+    if (!s) return '';
+    var m = /<([^>]+)>/.exec(String(s));
+    return m ? m[1] : String(s).trim();
+  }
+
+  /**
+   * 仅允许 http(s) 协议的 URL 通过；阻挡 javascript: / data: / vbscript: 等
+   * 可能被注入的 magic-link，防止后端被攻破或邮件提取规则被恶意构造时
+   * 触发存储型 XSS（点击链接执行任意 JS）。
+   */
+  function safeHttpUrl(s) {
+    if (typeof s !== 'string' || !s) return '';
+    var trimmed = s.trim();
+    if (!/^https?:\/\//i.test(trimmed)) return '';
+    return trimmed;
   }
 
   function copyToClipboard(text) {
@@ -31,121 +47,224 @@
         ta.setSelectionRange(0, text.length);
         var ok = document.execCommand && document.execCommand('copy');
         document.body.removeChild(ta);
-        if (ok) {
-          resolve();
-        } else {
-          reject(new Error('execCommand copy failed'));
-        }
+        ok ? resolve() : reject(new Error('execCommand copy failed'));
       } catch (e) {
         reject(e);
       }
     });
   }
 
-  function renderEmpty(msg) {
+  /** SVG icon 工厂：避免每次手写 inline SVG。 */
+  function svgIcon(viewBox, paths, opts) {
+    opts = opts || {};
+    var ns = 'http://www.w3.org/2000/svg';
+    var s = document.createElementNS(ns, 'svg');
+    s.setAttribute('viewBox', viewBox);
+    s.setAttribute('width', String(opts.size || 18));
+    s.setAttribute('height', String(opts.size || 18));
+    s.setAttribute('fill', 'none');
+    s.setAttribute('stroke', 'currentColor');
+    s.setAttribute('stroke-width', String(opts.stroke || 2));
+    s.setAttribute('stroke-linecap', 'round');
+    s.setAttribute('stroke-linejoin', 'round');
+    s.setAttribute('aria-hidden', 'true');
+    paths.forEach(function (p) {
+      var [tag, attrs] = p;
+      var el = document.createElementNS(ns, tag);
+      Object.keys(attrs).forEach(function (k) { el.setAttribute(k, attrs[k]); });
+      s.appendChild(el);
+    });
+    return s;
+  }
+
+  /** 时间格式化：把后端返回的 ISO / Date 字符串转成更易读的 "YYYY-MM-DD HH:mm"。 */
+  function formatDate(s) {
+    if (!s) return '';
+    try {
+      var d = new Date(s);
+      if (isNaN(d.getTime())) return String(s);
+      var pad = function (n) { return n < 10 ? '0' + n : '' + n; };
+      return (
+        d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+        ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes())
+      );
+    } catch (_) {
+      return String(s);
+    }
+  }
+
+  function renderEmpty(title, desc) {
     resultEl.replaceChildren();
-    const wrap = document.createElement('div');
+    var wrap = document.createElement('div');
     wrap.className = 'empty';
-    wrap.innerHTML =
-      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"' +
-      ' stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18"' +
-      ' height="14" rx="2"></rect><polyline points="3,7 12,13 21,7"></polyline></svg>';
-    const t = document.createElement('p');
-    t.style.fontSize = '15px';
-    t.textContent = msg || '暂无邮件';
+
+    var iconBox = document.createElement('div');
+    iconBox.className = 'empty-icon';
+    iconBox.appendChild(svgIcon('0 0 24 24', [
+      ['rect', { x: '3', y: '5', width: '18', height: '14', rx: '2' }],
+      ['polyline', { points: '3,7 12,13 21,7' }],
+    ], { size: 28, stroke: 1.6 }));
+    wrap.appendChild(iconBox);
+
+    var t = document.createElement('p');
+    t.className = 'empty-title';
+    t.textContent = title || '暂无匹配邮件';
     wrap.appendChild(t);
-    const sub = document.createElement('p');
-    sub.style.fontSize = '12px';
-    sub.textContent = '没有找到邮件，可能尚未送达，请稍后再试';
+
+    var sub = document.createElement('p');
+    sub.className = 'empty-desc';
+    sub.textContent = desc || '若验证邮件还在路上，请几秒后重试';
     wrap.appendChild(sub);
+
     resultEl.appendChild(wrap);
   }
 
-  function renderError(msg) {
+  function renderLoading() {
     resultEl.replaceChildren();
-    const box = document.createElement('div');
+    var wrap = document.createElement('div');
+    wrap.className = 'loading';
+
+    for (var i = 0; i < 3; i++) {
+      var dot = document.createElement('span');
+      dot.className = 'loading-dot';
+      wrap.appendChild(dot);
+    }
+    var t = document.createElement('span');
+    t.className = 'loading-text';
+    t.textContent = '正在拉取最新邮件…';
+    wrap.appendChild(t);
+    resultEl.appendChild(wrap);
+  }
+
+  function renderError(msg, extra) {
+    resultEl.replaceChildren();
+    var box = document.createElement('div');
     box.className = 'error-card';
-    box.textContent = msg || '请求失败';
+    box.appendChild(svgIcon('0 0 24 24', [
+      ['circle', { cx: '12', cy: '12', r: '10' }],
+      ['line', { x1: '12', y1: '8', x2: '12', y2: '12' }],
+      ['line', { x1: '12', y1: '16', x2: '12.01', y2: '16' }],
+    ], { size: 18, stroke: 2 }));
+    box.firstChild.classList.add('error-icon');
+
+    var p = document.createElement('div');
+    p.style.flex = '1 1 auto';
+    var t = document.createElement('div');
+    t.style.fontWeight = '600';
+    t.textContent = msg || '请求失败';
+    p.appendChild(t);
+    if (extra) {
+      var s = document.createElement('div');
+      s.style.fontSize = '13px';
+      s.style.opacity = '0.8';
+      s.style.marginTop = '4px';
+      s.textContent = extra;
+      p.appendChild(s);
+    }
+    box.appendChild(p);
     resultEl.appendChild(box);
   }
 
   function renderResult(data) {
     resultEl.replaceChildren();
-    const card = document.createElement('div');
+    var card = document.createElement('section');
     card.className = 'card';
 
-    const meta = document.createElement('div');
-    meta.className = 'meta';
-    const senderLine = document.createElement('div');
-    senderLine.innerHTML = '来自：';
-    const senderStrong = document.createElement('strong');
-    senderStrong.textContent = escapeText(data.sender) || '(未知)';
-    senderLine.appendChild(senderStrong);
-    meta.appendChild(senderLine);
+    /* 元数据 */
+    var meta = document.createElement('dl');
+    meta.className = 'card-meta';
 
-    if (data.subject) {
-      const sub = document.createElement('div');
-      sub.textContent = '主题：' + data.subject;
-      meta.appendChild(sub);
+    function addRow(label, value) {
+      if (!value) return;
+      var dt = document.createElement('dt');
+      dt.textContent = label;
+      var dd = document.createElement('dd');
+      var strong = document.createElement('strong');
+      strong.textContent = String(value);
+      dd.appendChild(strong);
+      meta.appendChild(dt);
+      meta.appendChild(dd);
     }
-    if (data.received_at) {
-      const t = document.createElement('div');
-      t.textContent = '时间：' + data.received_at;
-      meta.appendChild(t);
-    }
-    card.appendChild(meta);
 
+    addRow('来自', pickAddr(data.sender) || data.sender);
+    addRow('主题', data.subject);
+    addRow('时间', formatDate(data.received_at));
+    if (meta.children.length > 0) card.appendChild(meta);
+
+    /* 验证码 */
     if (data.code) {
-      const codeBox = document.createElement('div');
+      var codeBox = document.createElement('div');
       codeBox.className = 'code-box';
-      const left = document.createElement('div');
-      const lbl = document.createElement('div');
-      lbl.className = 'label';
-      lbl.textContent = '验证码';
-      const val = document.createElement('div');
+
+      var info = document.createElement('div');
+      info.className = 'code-info';
+      var lbl = document.createElement('span');
+      lbl.className = 'code-label';
+      lbl.textContent = 'Verification Code';
+      var val = document.createElement('div');
       val.className = 'code-value';
       val.textContent = data.code;
-      left.appendChild(lbl);
-      left.appendChild(val);
-      const cp = document.createElement('button');
+      info.appendChild(lbl);
+      info.appendChild(val);
+
+      var cp = document.createElement('button');
       cp.type = 'button';
       cp.className = 'copy-btn';
-      cp.textContent = '复制';
+      cp.appendChild(svgIcon('0 0 24 24', [
+        ['rect', { x: '9', y: '9', width: '13', height: '13', rx: '2' }],
+        ['path', { d: 'M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1' }],
+      ], { size: 14, stroke: 2 }));
+      var cpText = document.createElement('span');
+      cpText.textContent = '复制';
+      cp.appendChild(cpText);
+
       cp.addEventListener('click', function () {
         copyToClipboard(data.code).then(
           function () {
-            cp.textContent = '已复制';
+            cp.classList.add('is-copied');
+            cpText.textContent = '已复制';
             setTimeout(function () {
-              cp.textContent = '复制';
+              cp.classList.remove('is-copied');
+              cpText.textContent = '复制';
             }, 1500);
           },
           function () {
-            cp.textContent = '复制失败';
-            setTimeout(function () {
-              cp.textContent = '复制';
-            }, 1500);
+            cpText.textContent = '复制失败';
+            setTimeout(function () { cpText.textContent = '复制'; }, 1500);
           }
         );
       });
-      codeBox.appendChild(left);
+
+      codeBox.appendChild(info);
       codeBox.appendChild(cp);
       card.appendChild(codeBox);
     }
 
-    if (data.link) {
-      const linkBox = document.createElement('div');
+    /* 链接 */
+    var safeLink = safeHttpUrl(data.link);
+    if (safeLink) {
+      var linkBox = document.createElement('div');
       linkBox.className = 'link-box';
-      const a = document.createElement('a');
-      a.href = data.link;
+      var icon = svgIcon('0 0 24 24', [
+        ['path', { d: 'M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71' }],
+        ['path', { d: 'M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71' }],
+      ], { size: 16, stroke: 2 });
+      icon.classList.add('link-icon');
+      linkBox.appendChild(icon);
+
+      var a = document.createElement('a');
+      a.href = safeLink;
       a.target = '_blank';
       a.rel = 'noopener noreferrer';
-      a.textContent = data.link;
+      a.textContent = safeLink;
       linkBox.appendChild(a);
+
       card.appendChild(linkBox);
     }
 
+    /* 预览 */
     if (data.preview) {
-      const pv = document.createElement('div');
+      var pv = document.createElement('div');
       pv.className = 'preview';
       pv.textContent = data.preview;
       card.appendChild(pv);
@@ -154,24 +273,29 @@
     resultEl.appendChild(card);
   }
 
+  function setLoading(v) {
+    btn.disabled = !!v;
+    if (v) btn.classList.add('is-loading');
+    else btn.classList.remove('is-loading');
+  }
+
   form.addEventListener('submit', async function (e) {
     e.preventDefault();
-    const input = (inputEl.value || '').trim();
-    const category =
+    var input = (inputEl.value || '').trim();
+    var category =
       (document.querySelector('input[name="category"]:checked') || {}).value ||
       'openai';
+
     if (!input) {
-      renderError('请填写邮箱或邮箱----密码');
+      renderError('请填写邮箱', '可输入"邮箱"或"邮箱----密码"');
+      inputEl.focus();
       return;
     }
-    btn.disabled = true;
-    resultEl.replaceChildren();
-    const loading = document.createElement('div');
-    loading.className = 'empty';
-    loading.textContent = '正在拉取邮件…';
-    resultEl.appendChild(loading);
 
-    let resp;
+    setLoading(true);
+    renderLoading();
+
+    var resp;
     try {
       resp = await fetch('/api/lookup', {
         method: 'POST',
@@ -180,40 +304,42 @@
         credentials: 'omit',
       });
     } catch (err) {
-      btn.disabled = false;
-      renderError('网络异常：' + err);
+      setLoading(false);
+      renderError('网络异常', String(err && err.message ? err.message : err));
       return;
     }
-    btn.disabled = false;
+    setLoading(false);
 
-    let body = {};
+    var body = {};
     try {
       body = await resp.json();
     } catch (_) {
-      renderError('返回格式异常 (HTTP ' + resp.status + ')');
+      renderError('返回格式异常', 'HTTP ' + resp.status);
       return;
     }
 
     if (!resp.ok) {
-      const msg =
+      var msg =
         (body && (body.error || body.detail || body.message)) ||
         '请求失败 (HTTP ' + resp.status + ')';
-      const retryAfter = body && body.retry_after;
-      renderError(retryAfter ? msg + '（约 ' + retryAfter + 's 后再试）' : msg);
+      var retryAfter = body && body.retry_after;
+      renderError(msg, retryAfter ? '约 ' + retryAfter + 's 后再试' : '');
       return;
     }
 
     if (body && body.found === false) {
-      renderEmpty(body.reason || '暂无匹配邮件');
+      renderEmpty(body.reason || '暂无匹配邮件', '若邮件还在路上，请稍后再试');
       return;
     }
 
     if (!body || (!body.code && !body.link)) {
-      renderEmpty('未提取到验证码或登录链接');
+      renderEmpty('未提取到验证码', '邮箱已到货，但未匹配到该分类的内容');
       return;
     }
+
     renderResult(body);
   });
 
-  renderEmpty('暂无邮件');
+  // 首屏占位
+  renderEmpty('准备就绪', '输入邮箱后点击"查询"即可');
 })();
