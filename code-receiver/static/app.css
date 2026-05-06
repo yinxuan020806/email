@@ -492,6 +492,15 @@ body[data-theme="cyber"] .btn-primary:focus-visible {
 .btn-primary.is-loading .btn-label { opacity: 0; }
 .btn-primary.is-loading .btn-spinner { opacity: 1; }
 
+/* ── Turnstile 槽位（启用时才显示）─────────────────────────── */
+.turnstile-slot {
+  margin-top: 12px;
+  display: flex;
+  justify-content: center;
+  min-height: 65px;
+}
+.turnstile-slot[hidden] { display: none; }
+
 /* ── 分类切换 chip ────────────────────────────────────────── */
 .category-row {
   display: flex;

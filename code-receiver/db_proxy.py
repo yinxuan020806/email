@@ -8,22 +8,27 @@
     * UPDATE accounts.query_count（自增 1，限定单条）
     * INSERT code_query_log
     * SELECT extractor_rules WHERE enabled=1
-    * SELECT COUNT(*) code_query_log（限流读）
+    * SELECT COUNT(*) code_query_log（限流读 / 失败计数读）
+    * DELETE code_query_log（仅按"超出保留期"清理，不能定向删除）
 
 约束方法：把 DatabaseManager 包一层，仅暴露白名单方法；其余调用一律 AttributeError。
 """
 
 from __future__ import annotations
 
-import hashlib
+import hmac
 import logging
+import os
+import secrets
+import stat
 import threading
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import List, Optional
 
 from core.models import Account
-from database.db_manager import DatabaseManager
+from database.db_manager import DatabaseManager, get_data_dir
 
 
 logger = logging.getLogger(__name__)
@@ -31,18 +36,63 @@ logger = logging.getLogger(__name__)
 # 提取规则缓存 TTL（秒）。规则属低频更新，缓存 30 秒能显著降 DB 压力。
 _RULES_CACHE_TTL = 30.0
 
+# Pepper：HMAC 的服务端密钥，与 master.key 同目录（``data/.code_log_pepper``）。
+# 不存在时启动自动生成。引入 pepper 是为了让 ``code_query_log`` 里的 ip_hash /
+# email_hash 即使整库泄露也无法在外部"反推 IP 字典"——攻击者必须同时拿到 pepper
+# 才能枚举 IPv4 (2^32) / 邮箱字典并匹配哈希。
+_PEPPER_FILENAME = ".code_log_pepper"
+_pepper_lock = threading.Lock()
+_pepper_cache: Optional[bytes] = None
 
-def _sha256_hex(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8", errors="ignore")).hexdigest()
+
+def _load_pepper() -> bytes:
+    """读取或生成 pepper；不存在时自动写一份新的 32 字节随机值。
+
+    设计取舍：
+    - pepper 一旦丢失会让"基于 hash 的限流统计"失去匹配能力（旧日志全部失效），
+      但**不会破坏**业务可用性（限流计数在重启后从零开始累加，最坏退化）。
+    - 与 ``.master.key`` 不同：master.key 丢失会让 accounts 加密字段无法解密
+      → 毁灭性；pepper 丢失只是限流"失忆一段时间"，可接受。
+    """
+    global _pepper_cache
+    if _pepper_cache is not None:
+        return _pepper_cache
+    with _pepper_lock:
+        if _pepper_cache is not None:
+            return _pepper_cache
+        path = Path(get_data_dir()) / _PEPPER_FILENAME
+        if path.exists():
+            data = path.read_bytes().strip()
+            if len(data) >= 16:
+                _pepper_cache = data
+                return data
+            logger.warning(
+                "%s 长度异常（<16B），将重新生成。旧限流计数将失效。", path,
+            )
+        data = secrets.token_bytes(32)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        try:
+            os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:
+            pass
+        logger.info("已生成 code-receiver pepper: %s", path)
+        _pepper_cache = data
+        return data
+
+
+def _hmac_hex(value: str) -> str:
+    msg = (value or "").strip().lower().encode("utf-8", errors="ignore")
+    return hmac.new(_load_pepper(), msg, "sha256").hexdigest()
 
 
 def hash_ip(ip: str) -> str:
-    """对 IP 做 SHA-256 摘要后存 DB，避免泄露原文。"""
-    return _sha256_hex((ip or "").strip().lower())
+    """对 IP 做 HMAC-SHA256(pepper) 后存 DB，避免泄露原文且抵御字典反推。"""
+    return _hmac_hex(ip)
 
 
 def hash_email(email: str) -> str:
-    return _sha256_hex((email or "").strip().lower())
+    return _hmac_hex(email)
 
 
 class CodeReceiverDB:
@@ -147,3 +197,29 @@ class CodeReceiverDB:
             ip_hash=hash_ip(ip) if ip else None,
             email_hash=hash_email(email) if email else None,
         )
+
+    def count_auth_failures(self, ip: str, window_seconds: int) -> int:
+        """限流：最近 ``window_seconds`` 内某 IP 的"凭据失败"次数。
+
+        与 ``count_queries_in_window`` 区别：仅统计 ``error_kind='auth_failed'``
+        的行，用于失败锁定判定（FailureLocker）。
+        """
+        if not ip:
+            return 0
+        since = (datetime.now() - timedelta(seconds=window_seconds)).isoformat(
+            sep=" ", timespec="seconds"
+        )
+        return self._db.count_code_queries_since(
+            since_ts_iso=since,
+            ip_hash=hash_ip(ip),
+            error_kind="auth_failed",
+        )
+
+    # ── 维护：清理过期日志 ───────────────────────────────────────
+
+    def cleanup_old_query_log(self, retention_days: Optional[int] = None) -> int:
+        """删除 ``retention_days`` 天前的 ``code_query_log`` 行（仅日志，
+        不涉及 accounts / users）。无权限做定向删除。"""
+        if retention_days is None:
+            return self._db.cleanup_old_code_query_log()
+        return self._db.cleanup_old_code_query_log(retention_days=retention_days)

@@ -8,6 +8,69 @@
   var resultEl = document.getElementById('result');
   var themeBtn = document.getElementById('theme-toggle');
 
+  /* ── Cloudflare Turnstile（可选）─ 服务端 /api/config 决定是否启用 ── */
+  var TURNSTILE = { enabled: false, sitekey: '', widgetId: null };
+
+  function loadTurnstileScript() {
+    return new Promise(function (resolve, reject) {
+      if (window.turnstile) return resolve();
+      var s = document.createElement('script');
+      s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+      s.async = true;
+      s.defer = true;
+      s.onload = function () { resolve(); };
+      s.onerror = function () { reject(new Error('turnstile script load fail')); };
+      document.head.appendChild(s);
+    });
+  }
+
+  function renderTurnstile() {
+    if (!TURNSTILE.enabled || !TURNSTILE.sitekey) return;
+    var slot = document.getElementById('turnstile-slot');
+    if (!slot) return;
+    slot.removeAttribute('hidden');
+    loadTurnstileScript().then(function () {
+      try {
+        TURNSTILE.widgetId = window.turnstile.render(slot, {
+          sitekey: TURNSTILE.sitekey,
+          theme: 'auto',
+          appearance: 'always',
+        });
+      } catch (e) {
+        // 渲染失败时也不阻断查询，仅在 console 提示——后端会返回 403 被拦
+        // eslint-disable-next-line no-console
+        console.warn('turnstile render failed', e);
+      }
+    }).catch(function () {});
+  }
+
+  function readTurnstileToken() {
+    if (!TURNSTILE.enabled) return '';
+    if (window.turnstile && TURNSTILE.widgetId !== null) {
+      try { return window.turnstile.getResponse(TURNSTILE.widgetId) || ''; }
+      catch (_) { return ''; }
+    }
+    return '';
+  }
+
+  function resetTurnstileToken() {
+    if (window.turnstile && TURNSTILE.widgetId !== null) {
+      try { window.turnstile.reset(TURNSTILE.widgetId); } catch (_) {}
+    }
+  }
+
+  function bootstrapConfig() {
+    fetch('/api/config', { credentials: 'omit' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (cfg) {
+        if (!cfg || !cfg.turnstile || !cfg.turnstile.enabled) return;
+        TURNSTILE.enabled = true;
+        TURNSTILE.sitekey = String(cfg.turnstile.sitekey || '');
+        if (TURNSTILE.sitekey) renderTurnstile();
+      })
+      .catch(function () { /* 静默：未启用 / 网络错都按未启用处理 */ });
+  }
+
   /* ── 三主题切换：cyber → light → dark → cyber ── */
   var THEME_ORDER = ['cyber', 'light', 'dark'];
   var THEME_ICON = { cyber: '🌐', light: '☀️', dark: '🌙' };
@@ -331,6 +394,14 @@
       return;
     }
 
+    // Turnstile 启用时需要 token；未渲染好或用户未通过校验时给出提示并刷新挑战
+    var cfToken = readTurnstileToken();
+    if (TURNSTILE.enabled && !cfToken) {
+      renderError('请先完成人机校验', '若挑战未显示，请刷新页面');
+      resetTurnstileToken();
+      return;
+    }
+
     setLoading(true);
     renderLoading();
 
@@ -339,15 +410,22 @@
       resp = await fetch('/api/lookup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ input: input, category: category }),
+        body: JSON.stringify({
+          input: input,
+          category: category,
+          cf_token: cfToken || undefined,
+        }),
         credentials: 'omit',
       });
     } catch (err) {
       setLoading(false);
       renderError('网络异常', String(err && err.message ? err.message : err));
+      resetTurnstileToken();
       return;
     }
     setLoading(false);
+    // Turnstile token 是一次性的，无论成功失败都重置以备下一次
+    resetTurnstileToken();
 
     var body = {};
     try {
@@ -381,4 +459,7 @@
 
   // 首屏占位
   renderEmpty('准备就绪', '输入已加入接码白名单的邮箱后点击"查询"即可');
+
+  // 启动期：从 /api/config 异步拉取是否启用 Turnstile（启用则注入挑战 widget）
+  bootstrapConfig();
 })();

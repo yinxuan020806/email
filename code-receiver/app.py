@@ -21,14 +21,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
 import time
+from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
@@ -49,8 +52,11 @@ if EMAIL_PROJECT_DIR not in sys.path:
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
+import requests  # noqa: E402
+
 from core.email_client import EmailClient  # noqa: E402
 from core.models import Account  # noqa: E402
+from database.db_manager import QUERY_LOG_RETENTION_DAYS  # noqa: E402
 
 from db_proxy import CodeReceiverDB  # noqa: E402
 from extractors import get_extractors  # noqa: E402
@@ -77,6 +83,15 @@ logger = logging.getLogger("code_receiver")
 OWNER_USERNAME = os.getenv("CODE_OWNER_USERNAME", "xiaoxuan").strip()
 TRUST_PROXY = os.getenv("CRX_TRUST_PROXY", "").strip() in {"1", "true", "yes"}
 
+# ── Cloudflare Turnstile（可选）──────────────────────────────────
+# 默认未配置时跳过校验（向后兼容）；启用后所有 /api/lookup 请求必须带
+# 合法 token，配合 IP/邮箱限流形成"代理池也跑不动"的纵深防御。
+# 申请 sitekey / secret：https://dash.cloudflare.com/?to=/:account/turnstile
+TURNSTILE_SITEKEY = os.getenv("CRX_TURNSTILE_SITEKEY", "").strip()
+TURNSTILE_SECRET = os.getenv("CRX_TURNSTILE_SECRET", "").strip()
+TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+TURNSTILE_ENABLED = bool(TURNSTILE_SITEKEY and TURNSTILE_SECRET)
+
 # 注：byo（用户自带 IMAP/OAuth 凭据）路径已下线 — 前台只接受"邮箱地址"，
 # 且必须由站长在管理后台显式加入接码白名单（accounts.is_public=1）才能查码。
 # 因此 SSRF 防护（detect_server 域名白名单）不再需要：所有走到这里的邮箱
@@ -96,7 +111,63 @@ def _ensure_master_key_exists() -> None:
 
 _ensure_master_key_exists()
 
-app = FastAPI(title="Code Receiver", version="0.1.0", docs_url=None, redoc_url=None)
+
+# ── 周期清理 code_query_log（防表无限增长）─────────────────────
+# FastAPI 推荐用 lifespan 替代废弃的 on_event；启动后挂一个后台 task，
+# 每天清一次超过 QUERY_LOG_RETENTION_DAYS 的旧日志。
+_CLEANUP_INTERVAL_SEC = 24 * 3600
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    cleanup_task = asyncio.create_task(_cleanup_loop())
+    try:
+        yield
+    finally:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+
+async def _cleanup_loop() -> None:
+    """后台周期任务：删除 retention 期外的查询日志，避免限流 COUNT 越查越慢。"""
+    while True:
+        try:
+            await asyncio.sleep(_CLEANUP_INTERVAL_SEC)
+        except asyncio.CancelledError:
+            return
+        try:
+            # 阻塞 IO 放线程池，避免堵塞事件循环
+            deleted = await asyncio.to_thread(
+                _db.cleanup_old_query_log, QUERY_LOG_RETENTION_DAYS
+            )
+            if deleted:
+                logger.info(
+                    "code_query_log cleanup: deleted=%s retention_days=%s",
+                    deleted, QUERY_LOG_RETENTION_DAYS,
+                )
+        except Exception:
+            logger.exception("code_query_log cleanup 异常（已吞掉，下轮再试）")
+
+
+app = FastAPI(
+    title="Code Receiver", version="0.1.0",
+    docs_url=None, redoc_url=None,
+    lifespan=_lifespan,
+)
+
+# CORS：默认拒绝所有跨域。前台静态页与 /api 同源部署，跨域请求一律不需要。
+# 显式声明可避免被嵌入 / 跨站脚本利用 fetch 读响应体。
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
+    allow_credentials=False,
+    max_age=600,
+)
 
 
 @app.exception_handler(RequestValidationError)
@@ -163,10 +234,17 @@ async def add_security_headers(request: Request, call_next):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
+    # CSP 把 Cloudflare Turnstile 加白：未启用时也无副作用（只是策略层允许加载），
+    # 启用时挑战脚本与挑战 iframe 必须能从 challenges.cloudflare.com 加载。
     response.headers.setdefault(
         "Content-Security-Policy",
-        "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
-        "script-src 'self'; connect-src 'self'; frame-ancestors 'none'",
+        "default-src 'self'; "
+        "img-src 'self' data:; "
+        "style-src 'self' 'unsafe-inline'; "
+        "script-src 'self' https://challenges.cloudflare.com; "
+        "frame-src https://challenges.cloudflare.com; "
+        "connect-src 'self' https://challenges.cloudflare.com; "
+        "frame-ancestors 'none'",
     )
     response.headers.setdefault(
         "Permissions-Policy", "camera=(), microphone=(), geolocation=()"
@@ -176,7 +254,9 @@ async def add_security_headers(request: Request, call_next):
 
 # ── 模型 ────────────────────────────────────────────────────────
 
-ALLOWED_CATEGORIES = {"cursor", "openai"}
+# 与前端 chip（cursor / chatgpt）严格对齐：扩展到 anthropic / google 等需要
+# 同时改前端，否则就是"前台做了空白名单也没人能触发"。保留小集合更安全。
+ALLOWED_CATEGORIES = frozenset({"cursor", "openai"})
 
 
 class LookupRequest(BaseModel):
@@ -184,6 +264,9 @@ class LookupRequest(BaseModel):
     # 不再支持 ``email----password`` / OAuth2 等扩展格式（byo 路径已下线）。
     input: str = Field(min_length=3, max_length=256)
     category: str = Field(min_length=1, max_length=32)
+    # Cloudflare Turnstile 人机校验 token；仅在 TURNSTILE_ENABLED=True 时强制要求。
+    # 长度上限放宽到 4096 — 实测 cf-turnstile-response 大致 200~600 字符，预留余量。
+    cf_token: Optional[str] = Field(default=None, max_length=4096)
 
     @field_validator("input")
     @classmethod
@@ -326,6 +409,10 @@ def healthz():
     """健康检查：绕过缓存做真实 DB 探测 + extractor 注册表非空。
 
     返回 503 时，docker / k8s / 反代会感知到不健康从而触发重启或摘流量。
+
+    注意：响应里**绝不**返回 ``CODE_OWNER_USERNAME``——即便是只读探针，
+    /healthz 是公网未鉴权端点，泄露站长用户名会让攻击者拥有针对管理端
+    ``/login`` 的精确字典爆破目标。
     """
     db_ok, db_err = _db.healthcheck()
     rules_ok = bool(get_extractors("cursor")) and bool(get_extractors("openai"))
@@ -334,9 +421,69 @@ def healthz():
             logger.warning("healthz: DB 探测失败 err=%s", db_err)
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"ok": False, "db": db_ok, "db_err": db_err, "rules": rules_ok},
+            content={"ok": False, "db": db_ok, "rules": rules_ok},
         )
-    return {"ok": True, "owner": OWNER_USERNAME, "db": True, "rules": True}
+    return {"ok": True, "db": True, "rules": True}
+
+
+# 429 响应统一文案：不暴露具体限流维度（IP/min vs IP/hour vs email）和阈值，
+# 避免攻击者反推内部策略；reason 仅记入日志侧。
+_RATE_LIMITED_PUBLIC_MSG = "请求过于频繁，请稍后重试"
+
+
+def _verify_turnstile(token: Optional[str], remote_ip: str) -> tuple[bool, str]:
+    """Cloudflare Turnstile 校验。未启用时直接放行。
+
+    返回 (ok, error_kind)。ok=False 时附带可写入 query_log 的 error_kind。
+    超时 / 上游异常时**保守拒绝**，避免攻击者通过让 Cloudflare 不可达来绕过校验。
+    """
+    if not TURNSTILE_ENABLED:
+        return True, ""
+    if not token:
+        return False, "turnstile_missing"
+    try:
+        resp = requests.post(
+            TURNSTILE_VERIFY_URL,
+            data={
+                "secret": TURNSTILE_SECRET,
+                "response": token,
+                "remoteip": remote_ip or "",
+            },
+            timeout=8,
+            # 显式禁用重定向：Cloudflare siteverify 不会重定向；禁用是为了
+            # 防上游被攻破或 DNS 投毒时把 secret 随重定向请求转发到第三方主机。
+            allow_redirects=False,
+        )
+    except requests.RequestException as exc:
+        logger.warning("turnstile siteverify 异常 — 拒绝放行：%s", exc)
+        return False, "turnstile_upstream"
+    if resp.status_code != 200:
+        logger.warning("turnstile siteverify 非 200：%s", resp.status_code)
+        return False, "turnstile_upstream"
+    try:
+        body = resp.json()
+    except ValueError:
+        logger.warning("turnstile siteverify 响应非 JSON")
+        return False, "turnstile_upstream"
+    if body.get("success") is True:
+        return True, ""
+    codes = ",".join(str(c) for c in body.get("error-codes", [])[:3])
+    logger.info("turnstile 校验失败 codes=%s", codes)
+    return False, "turnstile_failed"
+
+
+@app.get("/api/config")
+def public_config() -> dict:
+    """供前端拉取启动期配置：Turnstile sitekey 等公开字段。
+
+    **绝不**返回 secret、owner、限流阈值等可被反推内部策略的字段。
+    """
+    return {
+        "turnstile": {
+            "enabled": TURNSTILE_ENABLED,
+            "sitekey": TURNSTILE_SITEKEY if TURNSTILE_ENABLED else "",
+        },
+    }
 
 
 @app.post("/api/lookup")
@@ -344,41 +491,35 @@ def lookup(req: LookupRequest, request: Request) -> JSONResponse:
     """核心：解析输入 → 查白名单公开账号 → 拉邮件 → 提码 → 返回。
 
     流程（全程**只走白名单路径**，byo 已下线）：
-    1. IP 限流预检（防畸形输入绕过计数）
-    2. ``parse_user_input`` 解析 — 必须 ``needs_lookup=True``（即纯邮箱）
-    3. IP + email 双维度限流
-    4. ``lookup_public_account`` 找站长名下、``is_public=1`` 且分类匹配的账号
-    5. IMAP/Graph 拉收件箱前 20 封
-    6. 按时间倒序排序后由分类 extractors 取首个 code/link
+    1. ``parse_user_input`` 解析 — 必须 ``needs_lookup=True``（即纯邮箱）
+    2. ``_limiter.begin`` 一次完成 IP + email 双维度判定 + in-flight 登记
+    3. ``lookup_public_account`` 找站长名下、``is_public=1`` 且分类匹配的账号
+    4. IMAP/Graph 拉收件箱前 20 封
+    5. 按时间倒序排序后由分类 extractors 取首个 code/link
+    6. ``finally`` 同时执行：落库 + 释放 in-flight + wipe 凭据
     """
     started = time.time()
     ip = _client_ip(request)
     ua = (request.headers.get("user-agent", "") or "")[:200]
     cred: Optional[ParsedCredential] = None
+    account: Optional[Account] = None
     matched_rule_id: Optional[int] = None
     error_kind: Optional[str] = None
     success = False
     source = "public"
     email_for_log = ""
+    inflight_started = False  # 限流 in-flight 是否已登记，决定 finally 是否 end
 
     try:
-        # 0) 预检：仅 IP 维度（防止用畸形输入绕过限流计数 / 蹭算力）。
-        # finally 块会写 query_log，所以连续畸形请求超过 IP/min 阈值后会被拒；
-        # 若不预检，第一次解析失败前 limiter 还未执行，攻击者每次都能消耗 IO。
-        pre_decision = _limiter.check(ip=ip, email="")
-        if not pre_decision.allowed:
-            error_kind = "rate_limited"
-            return JSONResponse(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                content={"error": pre_decision.reason, "retry_after": pre_decision.retry_after},
-                headers={"Retry-After": str(max(1, pre_decision.retry_after))},
-            )
-
-        # 1) 解析输入
+        # 1) 解析输入（解析失败仍按 IP 维度计入限流，避免畸形请求蹭算力）。
         try:
             cred = parse_user_input(req.input)
         except InputParseError as exc:
             error_kind = "parse"
+            # 解析失败时也启动 in-flight，让连续畸形请求被 IP/min 拦下
+            pre_decision = _limiter.begin(ip=ip, email="")
+            if pre_decision.allowed:
+                inflight_started = True
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"输入格式错误: {exc}")
         email_for_log = cred.email
 
@@ -392,15 +533,34 @@ def lookup(req: LookupRequest, request: Request) -> JSONResponse:
                 status.HTTP_400_BAD_REQUEST, "仅支持邮箱地址，请确认输入"
             )
 
-        # 2) 限流（带 email 维度的二次检查 — 防止"同邮箱被密集打码"）
-        decision = _limiter.check(ip=ip, email=cred.email)
+        # 1.7) Turnstile 人机校验（可选）：放在限流之前，校验失败也走 finally
+        # 落库，配合 IP 限流让单 IP 失败成本翻倍。未启用时立即返回 True 不耗时。
+        ok_turnstile, turnstile_err = _verify_turnstile(req.cf_token, ip)
+        if not ok_turnstile:
+            error_kind = turnstile_err
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, "人机校验失败，请刷新页面后重试"
+            )
+
+        # 2) 限流（IP + email 双维度，begin 通过即占用 in-flight 配额）
+        # 关键：DB 落库在 finally，期间靠 in-flight 内存计数补足，否则 N 个并发
+        # 请求会读到同样的旧 DB count 并全部通过——经典 race 漏洞。
+        decision = _limiter.begin(ip=ip, email=cred.email)
         if not decision.allowed:
             error_kind = "rate_limited"
+            logger.info(
+                "rate_limited reason=%s retry_after=%s cat=%s",
+                decision.reason, decision.retry_after, req.category,
+            )
             return JSONResponse(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                content={"error": decision.reason, "retry_after": decision.retry_after},
-                headers={"Retry-After": str(max(1, decision.retry_after))},
+                content={
+                    "error": _RATE_LIMITED_PUBLIC_MSG,
+                    "retry_after": int(decision.retry_after or 1),
+                },
+                headers={"Retry-After": str(max(1, int(decision.retry_after or 1)))},
             )
+        inflight_started = True
 
         # 3) 查接码白名单 — 必须存在 & is_public=1 & 分类匹配
         account = _db.lookup_public_account(cred.email, req.category)
@@ -411,7 +571,7 @@ def lookup(req: LookupRequest, request: Request) -> JSONResponse:
                 "该邮箱未加入接码白名单或不属于此分类",
             )
 
-        # 4) 拉邮件
+        # 4) 拉邮件（IMAP 已强制 socket timeout，避免恶意服务器吊死 worker）
         client = _build_client(account)
         try:
             mails, msg = client.fetch_emails(folder="inbox", limit=20, with_body=True)
@@ -423,9 +583,9 @@ def lookup(req: LookupRequest, request: Request) -> JSONResponse:
                 req.category, is_auth, type(exc).__name__,
             )
             error_kind = "auth_failed" if is_auth else "fetch_exception"
-            # 仅认证失败计入限流，避免因服务/网络抖动误锁用户
+            # 认证失败：不再走内存 record_failure，依赖 finally 落库的
+            # error_kind='auth_failed' 进入 FailureLocker.is_locked 的 DB 计数
             if is_auth:
-                _limiter.record_failure(ip)
                 raise HTTPException(
                     status.HTTP_401_UNAUTHORIZED, "邮箱凭据无效或已过期"
                 )
@@ -434,6 +594,15 @@ def lookup(req: LookupRequest, request: Request) -> JSONResponse:
             )
         finally:
             client.disconnect()
+            # wipe EmailClient 内部的密码 / refresh_token 副本（IMAPClient 也持有一份）。
+            # 与 finally 块里 wipe account.password 配合，让明文凭据在响应返回前被清。
+            try:
+                client.password = ""
+                client.refresh_token = None
+                if getattr(client, "_imap", None) is not None:
+                    client._imap.password = ""
+            except (AttributeError, TypeError):
+                pass
 
         if not mails:
             error_kind = "no_mails"
@@ -466,7 +635,6 @@ def lookup(req: LookupRequest, request: Request) -> JSONResponse:
 
         matched_rule_id = result.matched_rule_id
         success = True
-        _limiter.record_success(ip)
 
         # 6) 命中公开账号 → 自增 query_count（用于站长统计 & 反滥用基线）
         try:
@@ -510,6 +678,22 @@ def lookup(req: LookupRequest, request: Request) -> JSONResponse:
             )
         except Exception:
             logger.exception("写 code_query_log 失败")
+        # 释放 in-flight 计数（与 begin 配对）。注意：日志先落库、再 end，
+        # 这样后续请求的限流判定一定能数到这一笔（DB 计数 + 0 inflight）。
+        if inflight_started:
+            try:
+                _limiter.end(ip=ip, email=email_for_log)
+            except Exception:
+                logger.exception("limiter.end 异常（已吞掉）")
+        # 主动 wipe 公开账号的解密敏感字段。即便此函数返回后 account 对象
+        # 进入 GC，密码 / refresh_token 仍会在内存里活到下次 GC；显式置空
+        # 缩短暴露窗口（纵深防御，主密钥同机失守时减少攻击面）。
+        if account is not None:
+            try:
+                account.password = ""
+                account.refresh_token = None
+            except (AttributeError, TypeError):
+                pass
         # cred 是 ParsedCredential — byo 已下线，password / refresh_token 字段
         # 永远是空（needs_lookup=True 时这些字段都不会被填充），不需要再 _wipe。
 

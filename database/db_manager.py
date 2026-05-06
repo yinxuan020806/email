@@ -949,16 +949,24 @@ class DatabaseManager:
     ) -> bool:
         """管理端：把某个账号对前台公开 / 取消公开。
 
-        ``allowed_categories`` 留空或 None 表示允许所有分类，否则用逗号
-        分隔后入库（写入前会按 ALLOWED_CODE_CATEGORIES 过滤非法值）。
+        ``allowed_categories`` 取值约定：
+        - ``None`` / ``[]``：写入空串，前台按 ``group_name`` 自动推断分类
+          （历史行为，向后兼容）
+        - 含 ``'*'``：写入 ``'*'`` 通配，前台所有分类直接命中
+          （与 ``get_public_account_for_lookup`` 的 ``allowed_categories='*'``
+          分支配合；这是"加入接码白名单"按钮的默认语义）
+        - 其他：按 ``ALLOWED_CODE_CATEGORIES`` 过滤后逗号拼接
         """
         cats_str = ""
         if allowed_categories:
-            valid = [
-                c.strip().lower() for c in allowed_categories
-                if c and c.strip().lower() in ALLOWED_CODE_CATEGORIES
+            normalized = [
+                c.strip().lower() for c in allowed_categories if c and c.strip()
             ]
-            cats_str = ",".join(sorted(set(valid)))
+            if "*" in normalized:
+                cats_str = "*"
+            else:
+                valid = [c for c in normalized if c in ALLOWED_CODE_CATEGORIES]
+                cats_str = ",".join(sorted(set(valid)))
         with self._connect() as conn:
             cur = conn.execute(
                 "UPDATE accounts SET is_public = ?, allowed_categories = ? "
@@ -995,6 +1003,9 @@ class DatabaseManager:
         group_or = " OR ".join("lower(a.group_name) LIKE ?" for _ in keywords)
         # email 用 LOWER() 让查询大小写不敏感；账号导入若大小写混存（如 User@x.com vs user@x.com）
         # 也不会因输入形态不同而漏命中公开账号
+        # allowed_categories 用 token 严格匹配（前后包逗号，匹配 ',cursor,'）：
+        # 旧版 `LIKE '%cursor%'` 在未来引入 'cursor-disabled' / 'chatgpt-code' 之类
+        # 时会被误命中，token 匹配可彻底杜绝。
         sql = f"""
             SELECT {cols}
             FROM accounts a
@@ -1004,7 +1015,7 @@ class DatabaseManager:
               AND a.is_public = 1
               AND (
                   a.allowed_categories = '*'
-                  OR a.allowed_categories LIKE ?
+                  OR (',' || COALESCE(a.allowed_categories, '') || ',') LIKE ?
                   OR (
                       COALESCE(a.allowed_categories, '') = ''
                       AND ({group_or})
@@ -1015,7 +1026,7 @@ class DatabaseManager:
         params: list = [
             (owner_username or "").strip(),
             email.strip(),
-            f"%{cat}%",
+            f"%,{cat},%",
         ]
         params.extend(f"%{kw.lower()}%" for kw in keywords)
         with self._connect() as conn:
@@ -1082,8 +1093,13 @@ class DatabaseManager:
         since_ts_iso: str,
         ip_hash: Optional[str] = None,
         email_hash: Optional[str] = None,
+        error_kind: Optional[str] = None,
     ) -> int:
-        """限流读：统计 ``since_ts_iso`` 之后某 ip_hash / email_hash 的查询次数。"""
+        """限流读：统计 ``since_ts_iso`` 之后某 ip_hash / email_hash / error_kind 的查询次数。
+
+        ``error_kind`` 非空时仅统计该错误类型的行（用于 FailureLocker 的
+        ``auth_failed`` 计数）；为空时不限制错误类型（用于普通限流计数）。
+        """
         sql = "SELECT COUNT(*) FROM code_query_log WHERE ts >= ?"
         params: list = [since_ts_iso]
         if ip_hash:
@@ -1092,6 +1108,9 @@ class DatabaseManager:
         if email_hash:
             sql += " AND email_hash = ?"
             params.append(email_hash)
+        if error_kind:
+            sql += " AND error_kind = ?"
+            params.append(error_kind)
         with self._connect() as conn:
             cur = conn.execute(sql, params)
             return cur.fetchone()[0]

@@ -81,6 +81,50 @@ logger = logging.getLogger("email_web")
 
 app = FastAPI(title="邮箱管家 Web", version="3.0.0")
 
+
+@app.on_event("startup")
+def _audit_stale_public_accounts() -> None:
+    """启动扫描：找出**历史"假加入接码"**的账号 — `is_public=1` 但
+    ``allowed_categories`` 为空、且 ``group_name`` 不含 cursor/gpt 等关键字的行。
+
+    这类账号在管理端 UI 上显示"已开放"，但前台永远查不到验证码（语义不一致）。
+    本扫描只输出 WARNING 提醒站长用 UI 重新点一次"加入接码"按钮（修复后会写
+    ``allowed_categories='*'`` 让它真正生效），**绝不**自动 UPDATE 数据，
+    避免误扩权限（站长可能本意就只想让某分类命中）。
+    """
+    try:
+        with db._connect() as conn:  # noqa: SLF001
+            cur = conn.execute(
+                "SELECT id, email, group_name FROM accounts "
+                "WHERE is_public = 1 AND COALESCE(allowed_categories, '') = '' "
+                "AND lower(COALESCE(group_name, '')) NOT LIKE '%cursor%' "
+                "AND lower(COALESCE(group_name, '')) NOT LIKE '%gpt%' "
+                "AND lower(COALESCE(group_name, '')) NOT LIKE '%openai%' "
+                "AND lower(COALESCE(group_name, '')) NOT LIKE '%chatgpt%' "
+                "AND lower(COALESCE(group_name, '')) NOT LIKE '%anthropic%' "
+                "AND lower(COALESCE(group_name, '')) NOT LIKE '%claude%' "
+                "AND lower(COALESCE(group_name, '')) NOT LIKE '%google%' "
+                "AND lower(COALESCE(group_name, '')) NOT LIKE '%github%'"
+            )
+            stale = cur.fetchall()
+    except Exception:
+        logger.exception("扫描"假加入接码"账号失败（已吞掉，不影响启动）")
+        return
+    if not stale:
+        return
+    sample = ", ".join(f"id={r[0]}({r[1]}/{r[2] or ''})" for r in stale[:5])
+    logger.warning(
+        "发现 %d 个"假加入接码"账号（is_public=1 但 allowed_categories 为空且分组名不含分类关键字）"
+        " — 这些账号在 UI 上显示已开放，但接码前台永远查不到。"
+        " 修复方法：在管理端选中后再点一次"📡 加入接码"按钮即可。"
+        " 如需一次性 SQL 修复："
+        "UPDATE accounts SET allowed_categories='*' "
+        "WHERE is_public=1 AND COALESCE(allowed_categories,'')=''; "
+        "样例: %s",
+        len(stale), sample,
+    )
+
+
 _extra_cors = [s.strip() for s in os.getenv("EMAIL_WEB_CORS", "").split(",") if s.strip()]
 if _extra_cors:
     app.add_middleware(
@@ -1011,19 +1055,30 @@ def set_accounts_public(
     """
     _require_code_owner(user)
     cats = req.allowed_categories
+    # 前端"加入接码"按钮不会传 allowed_categories（None），历史会落到
+    # "按 group_name 自动推断"——分组名不含 cursor/gpt/... 关键字时
+    # 静默失效：UI 显示"已开放"而前台查不到。统一为放行所有分类，
+    # 让"加入接码白名单 ⟺ 前台所有分类都能查到"语义一致。
+    # is_public=False 时不补 '*'，由 DB 层把 allowed_categories 清空。
+    if req.is_public and not cats:
+        cats = ["*"]
     updated = 0
     for aid in req.ids:
         if db.set_account_public(
             user["id"], aid, req.is_public, allowed_categories=cats
         ):
             updated += 1
+    # audit 详情：明确区分"显式分类列表" / "通配 *" / "清空"。
+    # is_public=False 路径下 cats 必为 None（清空），is_public=True 路径下
+    # 路由层会把 None 升级为 ['*']，所以正常情况 cats 永远非空。
+    cats_label = ",".join(cats) if cats else ("cleared" if not req.is_public else "auto-group")
     db.log_audit(
         "set_account_public", user_id=user["id"], username=user["username"],
         ip=_client_ip(request), user_agent=request.headers.get("user-agent", ""),
         target=",".join(map(str, req.ids[:20])) + ("..." if len(req.ids) > 20 else ""),
         detail=(
             f"is_public={int(req.is_public)},updated={updated},"
-            f"requested={len(req.ids)},cats={','.join(cats) if cats else '*group*'}"
+            f"requested={len(req.ids)},cats={cats_label}"
         ),
     )
     return {"updated": updated, "requested": len(req.ids), "is_public": req.is_public}

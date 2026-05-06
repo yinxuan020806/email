@@ -66,6 +66,10 @@ class SafeLinks:
 
     示例:
         https://nam11.safelinks.protection.outlook.com/?url=https%3A%2F%2Fauth.openai.com%2Flog-in%2F...&data=...
+
+    安全约束：``unwrap`` 返回的 URL 必须以 ``http://`` 或 ``https://`` 开头；
+    任何非 http(s) 协议（``javascript:`` / ``data:`` / ``file:`` / 空字符串等）
+    一律返回原始包装 URL，避免 magic-link 被构造成可执行 payload 后透传到前端。
     """
 
     _SAFELINK_HOST = "safelinks.protection.outlook.com"
@@ -73,6 +77,13 @@ class SafeLinks:
         r"https?://[a-z0-9-]+\.safelinks\.protection\.outlook\.com/[^\s\"'>]+",
         re.IGNORECASE,
     )
+    _HTTP_PREFIXES = ("http://", "https://")
+
+    @classmethod
+    def _is_http_url(cls, url: str) -> bool:
+        if not url:
+            return False
+        return url.lower().startswith(cls._HTTP_PREFIXES)
 
     @classmethod
     def unwrap(cls, url: str) -> str:
@@ -86,7 +97,14 @@ class SafeLinks:
             target = qs.get("url", [None])[0]
             if not target:
                 return url
-            return unquote(target)
+            unwrapped = unquote(target)
+            if not cls._is_http_url(unwrapped):
+                logger.warning(
+                    "SafeLinks unwrap 拒绝非 http(s) 目标，回退原 URL；prefix=%r",
+                    unwrapped[:24],
+                )
+                return url
+            return unwrapped
         except (ValueError, TypeError):
             return url
 
@@ -234,7 +252,17 @@ class Extractor:
                 m = self.link_regex.search(subject)
             if m:
                 raw_link = m.group("link") if "link" in (m.groupdict() or {}) else m.group(0)
-                result.link = SafeLinks.unwrap(raw_link.strip())
+                candidate = SafeLinks.unwrap(raw_link.strip())
+                # 协议白名单：纵深防御。即使 DB 中的 link_regex 被站长写成
+                # ``(?P<link>.+)`` 这样的宽松模式抓到 ``javascript:...`` / ``data:...``，
+                # 也要在赋值前拦下，避免前端最终展示 / 用户点击触发 XSS。
+                if SafeLinks._is_http_url(candidate):
+                    result.link = candidate
+                else:
+                    logger.warning(
+                        "拒绝非 http(s) link：rule_id=%s prefix=%r",
+                        self.rule_id, candidate[:24],
+                    )
 
         return result
 

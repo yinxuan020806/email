@@ -77,11 +77,20 @@ class IMAPClient:
 
     # ── 连接管理 ────────────────────────────────────────────────
 
+    # IMAP 连接 / 操作的 socket 超时（秒）。
+    # 必须显式设置，否则 imaplib 默认 timeout=None 会让 connect/select/search/fetch
+    # 在恶意或异常 IMAP 服务器（DNS 黑洞、半开 TCP、登录后 hang）下永久阻塞，
+    # 整条 worker 被吃掉构成 DoS。Graph 路径有 requests timeout，IMAP 必须对齐。
+    _SOCKET_TIMEOUT_SEC = 15.0
+
     def connect(self) -> Tuple[bool, str]:
         try:
             ctx = ssl.create_default_context()
             self._connection = imaplib.IMAP4_SSL(
-                self.imap_server, self.imap_port, ssl_context=ctx
+                self.imap_server,
+                self.imap_port,
+                ssl_context=ctx,
+                timeout=self._SOCKET_TIMEOUT_SEC,
             )
             if self.token_manager is not None:
                 token, msg = self.token_manager.get()
