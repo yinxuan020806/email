@@ -62,6 +62,40 @@ jobs:
           set -euo pipefail
           NO_CACHE_ARG="${1:-}"
           cd /www/wwwroot/email
+
+          # ── inline self-heal：确保 deploy.sh 自身能被 pull 到最新 ──
+          # 死锁场景：当某次 commit 同时改了 docker-compose.yml 和 deploy.sh 时，
+          # 服务器上 docker-compose.yml 的本地改动会让 git pull 失败 → 跑的还是
+          # 旧 deploy.sh → 下次仍然走老逻辑、还是失败。这里在调用 deploy.sh 前
+          # 先在 workflow 端把 compose 隔离掉，让 pull 一定能拿到最新 deploy.sh，
+          # 之后就由新版 deploy.sh 自己处理 compose 备份/恢复。
+          if [ -f docker-compose.yml ] && [ -d .git ]; then
+              if git ls-files --error-unmatch docker-compose.yml >/dev/null 2>&1; then
+                  CURRENT_FLAGS=$(git ls-files -v docker-compose.yml | head -c 1)
+                  if [ "$CURRENT_FLAGS" = "S" ]; then
+                      git update-index --no-skip-worktree docker-compose.yml
+                  fi
+                  if ! git diff --quiet -- docker-compose.yml; then
+                      WF_BACKUP="docker-compose.yml.workflow-$(date +%Y%m%d_%H%M%S)"
+                      echo "[self-heal] docker-compose.yml dirty → 备份到 $WF_BACKUP"
+                      cp docker-compose.yml "$WF_BACKUP"
+                      git checkout HEAD -- docker-compose.yml
+                      WF_RESTORE="$WF_BACKUP"
+                  fi
+                  git update-index --skip-worktree docker-compose.yml || true
+              fi
+          fi
+
+          # 现在 pull 一次，确保 deploy.sh 是最新版
+          git fetch --all --prune || true
+          git pull --ff-only || echo "[self-heal] 首次 pull 仍失败（可能 deploy.sh 也无变更），由 deploy.sh 接力处理"
+
+          # 恢复 compose 本地改动
+          if [ -n "${WF_RESTORE:-}" ] && [ -f "$WF_RESTORE" ]; then
+              echo "[self-heal] 恢复 docker-compose.yml from $WF_RESTORE"
+              cp "$WF_RESTORE" docker-compose.yml
+          fi
+
           if [ "$NO_CACHE_ARG" = "true" ]; then
             bash scripts/deploy.sh --no-cache
           else
