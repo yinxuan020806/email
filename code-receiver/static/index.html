@@ -5,18 +5,20 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="referrer" content="no-referrer" />
   <meta name="theme-color" content="#0a0e17" />
-  <meta name="color-scheme" content="dark" />
+  <meta name="color-scheme" content="dark light" />
   <title>验证码助手 · 一键提取邮箱验证码</title>
   <link rel="icon" type="image/png" href="/static/icon.png" />
   <link rel="apple-touch-icon" href="/static/icon.png" />
   <link rel="stylesheet" href="/static/app.css" />
 </head>
-<body>
+<body data-theme="cyber">
   <div class="aurora" aria-hidden="true">
     <span class="aurora-blob blob-1"></span>
     <span class="aurora-blob blob-2"></span>
     <span class="aurora-blob blob-3"></span>
   </div>
+
+  <button type="button" id="theme-toggle" class="theme-toggle" aria-label="切换主题" title="切换主题">🌐</button>
 
   <main class="page">
     <header class="brand">
@@ -92,16 +94,6 @@
     </section>
 
     <section id="result" class="result" aria-live="polite"></section>
-
-    <footer class="hint">
-      <p class="hint-title">使用说明</p>
-      <ul class="hint-list">
-        <li>
-          <code>邮箱</code>
-          <span class="hint-desc">仅站长加入接码白名单的邮箱可被查询</span>
-        </li>
-      </ul>
-    </footer>
   </main>
 
   <script src="/static/app.js" defer></script>

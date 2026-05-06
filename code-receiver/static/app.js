@@ -6,6 +6,38 @@
   var inputEl = document.getElementById('input-credential');
   var btn = document.getElementById('submit-btn');
   var resultEl = document.getElementById('result');
+  var themeBtn = document.getElementById('theme-toggle');
+
+  /* ── 三主题切换：cyber → light → dark → cyber ── */
+  var THEME_ORDER = ['cyber', 'light', 'dark'];
+  var THEME_ICON = { cyber: '🌐', light: '☀️', dark: '🌙' };
+  var THEME_LABEL = { cyber: '赛博朋克', light: '浅色', dark: '深色' };
+  var THEME_KEY = 'cr_theme';
+
+  function applyTheme(name) {
+    if (THEME_ORDER.indexOf(name) === -1) name = 'cyber';
+    document.body.setAttribute('data-theme', name);
+    if (themeBtn) {
+      themeBtn.textContent = THEME_ICON[name];
+      themeBtn.title = '主题：' + THEME_LABEL[name] + '（点击切换）';
+      themeBtn.setAttribute('aria-label', themeBtn.title);
+    }
+    var meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', name === 'light' ? '#f5f5f7' : (name === 'dark' ? '#0d1117' : '#0a0e17'));
+    try { localStorage.setItem(THEME_KEY, name); } catch (_) {}
+  }
+  (function initTheme() {
+    var saved = null;
+    try { saved = localStorage.getItem(THEME_KEY); } catch (_) {}
+    applyTheme(saved || 'cyber');
+  })();
+  if (themeBtn) {
+    themeBtn.addEventListener('click', function () {
+      var cur = document.body.getAttribute('data-theme') || 'cyber';
+      var idx = THEME_ORDER.indexOf(cur);
+      applyTheme(THEME_ORDER[(idx + 1) % THEME_ORDER.length]);
+    });
+  }
 
   /** 从原始 sender 中抽取 user@host 形式（去掉 "Name <addr>" 包装）。 */
   function pickAddr(s) {

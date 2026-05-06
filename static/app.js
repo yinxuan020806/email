@@ -11,7 +11,7 @@ const t = (k, p) => (window.I18N ? window.I18N.t(k, p) : k);
 // ───────── State ─────────
 const S = {
   accounts: [], groups: [], currentGroup: '全部', selected: new Set(),
-  theme: 'light', lang: 'zh', view: 'table', searchText: '',
+  theme: 'cyber', lang: 'zh', view: 'table', searchText: '',
   emailAccount: null, emails: [], allEmails: [], currentEmail: null,
   detailAccount: null,
   user: null,
@@ -1507,8 +1507,8 @@ function renderSettings() {
     return r;
   };
   const themeSel = el('select', { onchange: (e) => setTheme(e.target.value) });
-  for (const v of ['light', 'dark']) {
-    const o = el('option', { value: v }, t(v === 'light' ? 'theme_light' : 'theme_dark'));
+  for (const v of ['cyber', 'dark', 'light']) {
+    const o = el('option', { value: v }, t('theme_' + v));
     if (S.theme === v) o.selected = true;
     themeSel.appendChild(o);
   }
@@ -1622,11 +1622,23 @@ async function submitOAuth() {
 }
 
 // ───────── Theme & Lang ─────────
-const toggleTheme = () => setTheme(S.theme === 'light' ? 'dark' : 'light');
+const THEME_ORDER = ['cyber', 'light', 'dark'];
+const THEME_ICON = { cyber: '🌐', light: '☀️', dark: '🌙' };
+const toggleTheme = () => {
+  const i = THEME_ORDER.indexOf(S.theme);
+  setTheme(THEME_ORDER[(i + 1) % THEME_ORDER.length] || 'cyber');
+};
 function setTheme(theme) {
+  if (!THEME_ORDER.includes(theme)) theme = 'cyber';
   S.theme = theme;
   document.body.dataset.theme = theme;
-  $('themeBtn').textContent = theme === 'dark' ? '🌙' : '☀️';
+  const btn = $('themeBtn');
+  if (btn) {
+    btn.textContent = THEME_ICON[theme];
+    btn.title = (window.I18N && window.I18N.t)
+      ? (window.I18N.t('theme_btn_title') + ' · ' + window.I18N.t('theme_' + theme))
+      : '';
+  }
   if (S.ready) api.put('/api/settings', { key: 'theme', value: theme }).catch(() => {});
   if (S.view === 'settings') renderSettings();
 }
@@ -1734,10 +1746,12 @@ async function init() {
     applyOwnerVisibility();
 
     const settings = await api.get('/api/settings');
-    S.theme = settings.theme || 'dark';  // 默认深色赛博朋克主题
+    const savedTheme = settings.theme;
+    S.theme = THEME_ORDER.includes(savedTheme) ? savedTheme : 'cyber';
     S.lang = settings.language || 'zh';
     document.body.dataset.theme = S.theme;
-    $('themeBtn').textContent = S.theme === 'dark' ? '🌙' : '☀️';
+    const themeBtnInit = $('themeBtn');
+    if (themeBtnInit) themeBtnInit.textContent = THEME_ICON[S.theme];
     $('langBtn').textContent = S.lang === 'zh' ? '中/EN' : 'EN/中';
     if (window.I18N) {
       window.I18N.setLang(S.lang);

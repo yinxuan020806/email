@@ -1,22 +1,30 @@
-:root{
+:root,[data-theme="light"]{
   --bg:#f5f5f7;--bg2:#f9fafb;--card:#fff;--border:#e5e7eb;
   --text:#1d1d1f;--text2:#6e6e73;--text3:#8e8e93;
   --accent:#0078d4;--accent-h:#0056cc;--success:#34c759;--danger:#ff3b30;--warning:#ff9500;
   --hover:#f3f4f6;--sel:#eff6ff;--sel-t:#2563eb;
   --inp-bg:#fff;--inp-bd:#d1d1d6;
   --shadow:0 2px 10px rgba(0,0,0,.06);--radius:8px;
-  /* 赛博朋克色卡（浅色主题下用于"加入接码"按钮、徽章等） */
   --cyber-cyan:#06b6d4;--cyber-purple:#8b5cf6;--cyber-pink:#ec4899;--cyber-green:#10b981;
   --cyber-gradient:linear-gradient(135deg,#06b6d4,#8b5cf6 55%,#ec4899);
 }
-[data-theme="dark"]{
-  /* 赛博朋克暗色：深底 + 青/紫/粉霓虹渐变 + 网格底纹（参考 cursor-manager） */
+[data-theme="cyber"]{
   --bg:#0a0e17;--bg2:#111827;--card:rgba(17,24,39,0.85);--border:rgba(6,182,212,0.22);
   --text:#e2e8f0;--text2:#94a3b8;--text3:#64748b;
   --accent:#06b6d4;--accent-h:#22d3ee;--success:#10b981;--danger:#ec4899;--warning:#f59e0b;
   --hover:rgba(6,182,212,0.08);--sel:rgba(139,92,246,0.18);--sel-t:#a78bfa;
   --inp-bg:rgba(0,0,0,0.4);--inp-bd:rgba(6,182,212,0.25);
   --shadow:0 6px 24px rgba(0,0,0,0.5),0 0 18px rgba(6,182,212,0.06);
+  --cyber-cyan:#06b6d4;--cyber-purple:#8b5cf6;--cyber-pink:#ec4899;--cyber-green:#10b981;
+  --cyber-gradient:linear-gradient(135deg,#06b6d4,#8b5cf6 55%,#ec4899);
+}
+[data-theme="dark"]{
+  --bg:#0d1117;--bg2:#161b22;--card:#21262d;--border:#30363d;
+  --text:#c9d1d9;--text2:#8b949e;--text3:#6e7681;
+  --accent:#58a6ff;--accent-h:#79b8ff;--success:#3fb950;--danger:#f85149;--warning:#d29922;
+  --hover:rgba(177,186,196,0.08);--sel:rgba(56,139,253,0.15);--sel-t:#79b8ff;
+  --inp-bg:#0d1117;--inp-bd:#30363d;
+  --shadow:0 4px 16px rgba(0,0,0,0.4);
   --cyber-cyan:#06b6d4;--cyber-purple:#8b5cf6;--cyber-pink:#ec4899;--cyber-green:#10b981;
   --cyber-gradient:linear-gradient(135deg,#06b6d4,#8b5cf6 55%,#ec4899);
 }
@@ -37,6 +45,7 @@ body{font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif;background
 .nav-count{margin-left:auto;background:var(--hover);color:var(--text2);font-size:11px;padding:1px 8px;border-radius:10px;font-weight:500;min-width:20px;text-align:center;line-height:1.4}
 .nav-btn.active .nav-count{background:rgba(0,120,212,.15);color:var(--sel-t)}
 [data-theme="dark"] .nav-btn.active .nav-count{background:rgba(88,166,255,.2);color:var(--sel-t)}
+[data-theme="cyber"] .nav-btn.active .nav-count{background:rgba(139,92,246,.22);color:var(--sel-t)}
 .sb-sec-h{display:flex;justify-content:space-between;align-items:center;padding:16px 20px 8px}
 .sb-sec-h span{font-size:12px;color:var(--text3);font-weight:500;letter-spacing:.5px}
 .sb-sec-h button{width:24px;height:24px;border-radius:12px;border:none;background:var(--hover);color:var(--text3);font-size:16px;cursor:pointer;line-height:1}
@@ -49,6 +58,7 @@ body{font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif;background
 .grp-item .grp-count{background:var(--hover);color:var(--text3);font-size:11px;padding:1px 7px;border-radius:10px;font-weight:500;min-width:18px;text-align:center;line-height:1.4;flex-shrink:0;margin-left:auto;transition:.15s}
 .grp-item.active .grp-count{background:rgba(0,120,212,.15);color:var(--sel-t)}
 [data-theme="dark"] .grp-item.active .grp-count{background:rgba(88,166,255,.2);color:var(--sel-t)}
+[data-theme="cyber"] .grp-item.active .grp-count{background:rgba(139,92,246,.22);color:var(--sel-t)}
 .grp-item:hover .grp-count{background:var(--card)}
 .grp-item .grp-ctx{opacity:0;cursor:pointer;font-size:16px;padding:0 4px;flex-shrink:0;margin-left:4px}
 .grp-item:hover .grp-ctx{opacity:.6}
@@ -233,7 +243,7 @@ body{font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif;background
 .import-help[open] summary{margin-bottom:8px;color:var(--text)}
 .import-help-pre{font-family:'Consolas','Courier New',monospace;font-size:12px;color:var(--text2);background:var(--inp-bg);border-radius:6px;padding:10px 12px;white-space:pre-wrap;word-break:break-all;line-height:1.5;margin:0}
 .export-warn{font-size:12px;color:var(--warning);background:rgba(255,149,0,.08);border:1px solid rgba(255,149,0,.2);border-radius:6px;padding:8px 12px;margin-bottom:14px}
-[data-theme="dark"] .export-warn{background:rgba(210,153,34,.1);border-color:rgba(210,153,34,.3)}
+[data-theme="dark"] .export-warn,[data-theme="cyber"] .export-warn{background:rgba(210,153,34,.1);border-color:rgba(210,153,34,.3)}
 
 /* ── 移动端汉堡按钮 & 蒙层（默认隐藏，仅 ≤768px 生效） ── */
 .sb-toggle{display:none;position:fixed;top:10px;left:10px;z-index:60;width:40px;height:40px;padding:0;border:1px solid var(--border);background:var(--card);border-radius:10px;cursor:pointer;align-items:center;justify-content:center;flex-direction:column;box-shadow:var(--shadow);transition:.15s}
@@ -312,7 +322,7 @@ body{font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif;background
   width:28px;height:28px;border-radius:8px;flex-shrink:0;
   filter:drop-shadow(0 4px 10px rgba(6,182,212,.25));
 }
-[data-theme="dark"] .sb-logo-img{
+[data-theme="cyber"] .sb-logo-img,[data-theme="dark"] .sb-logo-img{
   filter:drop-shadow(0 4px 12px rgba(139,92,246,.45));
 }
 
@@ -349,12 +359,12 @@ body{font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif;background
   background:rgba(148,163,184,.12);color:#64748b;
   border:1px solid rgba(148,163,184,.3);
 }
-[data-theme="dark"] .public-badge{
+[data-theme="cyber"] .public-badge,[data-theme="dark"] .public-badge{
   background:rgba(16,185,129,.18);color:#34d399;
   border-color:rgba(16,185,129,.45);
   box-shadow:0 0 10px rgba(16,185,129,.18);
 }
-[data-theme="dark"] .private-badge{
+[data-theme="cyber"] .private-badge,[data-theme="dark"] .private-badge{
   background:rgba(100,116,139,.18);color:#94a3b8;
   border-color:rgba(100,116,139,.35);
 }
@@ -362,7 +372,7 @@ body{font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif;background
 /* ── 暗色（赛博朋克）模式下的视觉强化 ────────────────── */
 
 /* 网格底纹（cursor-manager 同款） */
-body[data-theme="dark"]::before{
+body[data-theme="cyber"]::before{
   content:'';position:fixed;inset:0;pointer-events:none;z-index:-1;
   background:
     linear-gradient(90deg, rgba(6,182,212,.03) 1px, transparent 1px),
@@ -371,135 +381,162 @@ body[data-theme="dark"]::before{
 }
 
 /* 顶部标题用渐变色 */
-body[data-theme="dark"] .sb-logo span:last-child{
+body[data-theme="cyber"] .sb-logo span:last-child{
   background:var(--cyber-gradient);
   -webkit-background-clip:text;background-clip:text;
   -webkit-text-fill-color:transparent;color:transparent;
   letter-spacing:1px;font-weight:700;
 }
-body[data-theme="dark"] .toolbar h2{
+body[data-theme="cyber"] .toolbar h2{
   background:var(--cyber-gradient);
   -webkit-background-clip:text;background-clip:text;
   -webkit-text-fill-color:transparent;color:transparent;
   letter-spacing:.5px;
 }
-body[data-theme="dark"] .auth-title{
+body[data-theme="cyber"] .auth-title{
   background:var(--cyber-gradient);
   -webkit-background-clip:text;background-clip:text;
   -webkit-text-fill-color:transparent;color:transparent;
 }
 
 /* 侧边栏 / 卡片磨砂 + 霓虹边框 */
-body[data-theme="dark"] .sb{
+body[data-theme="cyber"] .sb{
   background:rgba(10,14,23,.85);
   backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
   border-right:1px solid var(--border);
 }
-body[data-theme="dark"] .tbl,
-body[data-theme="dark"] .dash-card,
-body[data-theme="dark"] .dash-section,
-body[data-theme="dark"] .settings-card,
-body[data-theme="dark"] .oauth-card,
-body[data-theme="dark"] .modal{
+body[data-theme="cyber"] .tbl,
+body[data-theme="cyber"] .dash-card,
+body[data-theme="cyber"] .dash-section,
+body[data-theme="cyber"] .settings-card,
+body[data-theme="cyber"] .oauth-card,
+body[data-theme="cyber"] .modal{
   background:var(--card);
   backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
   border:1px solid var(--border);
 }
 
 /* 主按钮（保留 btn-p / btn-s / btn-w / btn-d 语义颜色，仅暗色加发光） */
-body[data-theme="dark"] .btn-p{
+body[data-theme="cyber"] .btn-p{
   background:rgba(6,182,212,.18);color:var(--cyber-cyan);
   border:1px solid rgba(6,182,212,.4);
   box-shadow:0 0 0 transparent;
   transition:.18s;
 }
-body[data-theme="dark"] .btn-p:hover{
+body[data-theme="cyber"] .btn-p:hover{
   background:rgba(6,182,212,.3);
   box-shadow:0 0 14px rgba(6,182,212,.35);
   filter:none;
 }
-body[data-theme="dark"] .btn-s{
+body[data-theme="cyber"] .btn-s{
   background:rgba(16,185,129,.16);color:#34d399;
   border:1px solid rgba(16,185,129,.4);
 }
-body[data-theme="dark"] .btn-s:hover{
+body[data-theme="cyber"] .btn-s:hover{
   background:rgba(16,185,129,.28);
   box-shadow:0 0 14px rgba(16,185,129,.3);
   filter:none;
 }
-body[data-theme="dark"] .btn-w{
+body[data-theme="cyber"] .btn-w{
   background:rgba(245,158,11,.15);color:#fbbf24;
   border:1px solid rgba(245,158,11,.4);
 }
-body[data-theme="dark"] .btn-w:hover{
+body[data-theme="cyber"] .btn-w:hover{
   background:rgba(245,158,11,.28);
   box-shadow:0 0 14px rgba(245,158,11,.28);
   filter:none;
 }
-body[data-theme="dark"] .btn-d{
+body[data-theme="cyber"] .btn-d{
   background:rgba(236,72,153,.16);color:#f472b6;
   border:1px solid rgba(236,72,153,.4);
 }
-body[data-theme="dark"] .btn-d:hover{
+body[data-theme="cyber"] .btn-d:hover{
   background:rgba(236,72,153,.28);
   box-shadow:0 0 14px rgba(236,72,153,.32);
   filter:none;
 }
-body[data-theme="dark"] .btn-o{
+body[data-theme="cyber"] .btn-o{
   background:rgba(255,255,255,.04);color:var(--text2);
   border:1px solid var(--border);
 }
-body[data-theme="dark"] .btn-o:hover{
+body[data-theme="cyber"] .btn-o:hover{
   background:rgba(6,182,212,.1);color:var(--cyber-cyan);
   border-color:rgba(6,182,212,.35);
 }
 
 /* 输入框聚焦时青色发光 */
-body[data-theme="dark"] .form-group input:focus,
-body[data-theme="dark"] .form-group textarea:focus,
-body[data-theme="dark"] .form-group select:focus,
-body[data-theme="dark"] .search-inp:focus,
-body[data-theme="dark"] .settings-row input:focus,
-body[data-theme="dark"] .settings-row select:focus{
+body[data-theme="cyber"] .form-group input:focus,
+body[data-theme="cyber"] .form-group textarea:focus,
+body[data-theme="cyber"] .form-group select:focus,
+body[data-theme="cyber"] .search-inp:focus,
+body[data-theme="cyber"] .settings-row input:focus,
+body[data-theme="cyber"] .settings-row select:focus{
   box-shadow:0 0 0 3px rgba(6,182,212,.18);
 }
 
 /* 表格行 hover 时的青色边条 */
-body[data-theme="dark"] .tbl tr:hover td{
+body[data-theme="cyber"] .tbl tr:hover td{
   background:var(--hover);
 }
-body[data-theme="dark"] .tbl tr.selected td{
+body[data-theme="cyber"] .tbl tr.selected td{
   background:rgba(139,92,246,.14);
 }
 
 /* 选中复选框使用青色 */
-body[data-theme="dark"] .tbl input[type="checkbox"],
-body[data-theme="dark"] #selAll{
+body[data-theme="cyber"] .tbl input[type="checkbox"],
+body[data-theme="cyber"] #selAll{
   accent-color:var(--cyber-cyan);
 }
 
 /* 状态徽章在暗色下的颜色更亮 */
-body[data-theme="dark"] .badge-ok{
+body[data-theme="cyber"] .badge-ok{
   background:rgba(16,185,129,.18);color:#34d399;
   border:1px solid rgba(16,185,129,.4);
 }
-body[data-theme="dark"] .badge-err{
+body[data-theme="cyber"] .badge-err{
   background:rgba(236,72,153,.18);color:#f472b6;
   border:1px solid rgba(236,72,153,.4);
 }
-body[data-theme="dark"] .badge-unk{
+body[data-theme="cyber"] .badge-unk{
   background:rgba(245,158,11,.18);color:#fbbf24;
   border:1px solid rgba(245,158,11,.4);
 }
 
 /* 暗色模式下 auth-modal 的 logo 不再是 emoji 字号，按 img 自然布局 */
 .auth-logo img{display:block;margin:0 auto;border-radius:14px}
-[data-theme="dark"] .auth-logo img{
+[data-theme="cyber"] .auth-logo img,[data-theme="dark"] .auth-logo img{
   filter:drop-shadow(0 6px 18px rgba(139,92,246,.4));
 }
 
 /* Toast 在暗色下加霓虹阴影 */
-body[data-theme="dark"] .toast{
+body[data-theme="cyber"] .toast{
   box-shadow:0 8px 22px rgba(0,0,0,.55),0 0 14px rgba(139,92,246,.18);
+}
+
+/* ============================================================
+   普通深色（GitHub Dark 风格）— 与赛博朋克并列的另一种暗色
+   ============================================================ */
+body[data-theme="dark"] .btn-p{background:#1f6feb;color:#fff;border:1px solid rgba(240,246,252,.1)}
+body[data-theme="dark"] .btn-p:hover{background:#388bfd;filter:none}
+body[data-theme="dark"] .btn-s{background:#238636;color:#fff;border:1px solid rgba(240,246,252,.1)}
+body[data-theme="dark"] .btn-s:hover{background:#2ea043;filter:none}
+body[data-theme="dark"] .btn-w{background:#9e6a03;color:#fff;border:1px solid rgba(240,246,252,.1)}
+body[data-theme="dark"] .btn-w:hover{background:#bf8700;filter:none}
+body[data-theme="dark"] .btn-d{background:#da3633;color:#fff;border:1px solid rgba(240,246,252,.1)}
+body[data-theme="dark"] .btn-d:hover{background:#f85149;filter:none}
+body[data-theme="dark"] .btn-o{background:#21262d;color:var(--text);border:1px solid var(--border)}
+body[data-theme="dark"] .btn-o:hover{background:#30363d;border-color:var(--accent)}
+body[data-theme="dark"] .tbl input[type="checkbox"],
+body[data-theme="dark"] #selAll{accent-color:var(--accent)}
+body[data-theme="dark"] .toast{box-shadow:0 4px 16px rgba(0,0,0,.5)}
+
+/* 主题切换按钮在深色主题下弱化 */
+body[data-theme="cyber"] .icon-btn,
+body[data-theme="dark"] .icon-btn{
+  background:var(--card);border-color:var(--border);
+}
+body[data-theme="cyber"] .icon-btn:hover{
+  border-color:var(--cyber-cyan);
+  box-shadow:0 0 12px rgba(6,182,212,.3);
 }
 
