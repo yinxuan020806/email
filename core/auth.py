@@ -19,7 +19,16 @@ SALT_BYTES: Final[int] = 16
 HASH_BYTES: Final[int] = 32
 
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_.\-]{3,32}$")
-MIN_PASSWORD_LEN = 6
+# 安全：从 6 提升到 8 位。
+# 暴破成本（PBKDF2-HMAC-SHA256 200k 迭代，2026 年 GPU 算力 ≈ 50 H/s/GPU）：
+#   6 位（10^6）：10 GPU × ≈ 30 分钟即可暴破
+#   8 位（10^8）：10 GPU × ≈ 55 小时
+#   10 位（10^10）：10 GPU × ≈ 6 个月
+# 8 位是"挡住业余脚本 + 不强制让用户记长密码"的折中点。下一步可以
+# 引入 argon2id（GPU 抗性强 100×）让 8 位也安全到能扛多年。
+# 已注册的旧短密码用户**仍可登录**（``verify_password`` 不走本校验），
+# 仅在注册 / 改密时才强制 ≥ 8 位 — 不破坏存量用户。
+MIN_PASSWORD_LEN = 8
 MAX_PASSWORD_LEN = 128
 
 

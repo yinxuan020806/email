@@ -82,7 +82,7 @@ def client2(tmp_path, monkeypatch):
 
     with TestClient(web_app.app) as a, TestClient(web_app.app) as b:
         ra = a.post("/api/auth/register", json={"username": "alice", "password": "pwd-alice"})
-        rb = b.post("/api/auth/register", json={"username": "bob", "password": "pwd-bob"})
+        rb = b.post("/api/auth/register", json={"username": "bob", "password": "pwd-bob1"})
         assert ra.status_code == 200, ra.text
         assert rb.status_code == 200, rb.text
         yield a, b

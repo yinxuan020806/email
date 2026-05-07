@@ -142,3 +142,62 @@ class LoginRateLimiter:
 
 
 login_limiter = LoginRateLimiter()
+
+
+# ── 注册限流（IP 维度独立桶）──────────────────────────────────────
+# /api/auth/register 历史上完全无限流：公网开放注册时容易被脚本刷爆
+# PBKDF2 200k 哈希 CPU + 占满磁盘。复用 ``LoginRateLimiter``，
+# 把 "__register__" 当作固定 username 槽，让 ``_key`` 退化成纯 IP 维度
+# （所有注册请求的 username 都标记为同一字符串）。
+#
+# 阈值取舍（小团队 / 单用户工具）：
+# - 注册的合法重试场景多（用户名拼错 / 密码不达标 / 重名换名），
+#   阈值放得宽松一些
+# - 20 次 / 10 分钟 / 锁 5 分钟：够挡明显的脚本，又能容忍人类反复
+#   尝试不同用户名 / 密码组合，且锁的时间短让自我恢复快
+register_limiter = LoginRateLimiter(
+    max_fails=20, window=600, lock_duration=300,
+)
+"""注册限流器（IP 维度）。
+
+调用约定：
+- ``register_limiter.check("__register__", ip)`` 进入注册流程前调用
+- 注册校验失败 / 重名 / 内部错误：``record_failure``（计入失败配额）
+- 注册成功落库：``record_success``（清空当前 IP 的失败计数）
+"""
+
+REGISTER_LIMITER_KEY = "__register__"
+"""``register_limiter`` 使用的固定 username 槽位标识。"""
+
+
+# ── 登录的"纯 IP 维度"补充限流 ───────────────────────────────────
+# ``login_limiter`` 用 (username, ip) 双键，挡得住"同 username 反复
+# 试密码"的撞库；但**挡不住分布式撞库**：攻击者用代理池 + 上千个
+# username + 同一 IP 段，每个 (username, ip) 失败次数都不到阈值，
+# 但单 IP 总失败数可能轻松破万。
+#
+# ``ip_login_limiter`` 把 username 槽固定成 ``__login_ip__``，让 _key
+# 退化成纯 IP 维度，统计**该 IP 的所有登录失败数总和**。
+#
+# 阈值取舍（小团队 / 单用户工具的现实约束）：
+# - 真正的撞库脚本 1 秒能发 100+ 次，再低的阈值也挡不住"快"——只能
+#   挡"广（轮换 username）"。50 次窗口足以让 2-3 个真实用户在同一公网
+#   出口下偶尔输错密码而不被误锁，又能在攻击者扫到第 51 次时拦下。
+# - 锁 15 分钟而非 1 小时：即使误锁也快速恢复，反正攻击者重锁周期短一倍
+#   也意味着他要消耗 4 倍的代理 IP 才能维持原速度，防御 ROI 不变。
+# - 真要更激进可以通过监控 logger 看锁定频次，再调高 / 调低
+#
+# 双层防护语义：
+# - 单用户被反复试 → ``login_limiter`` 锁定 (username, ip) 桶
+# - 单 IP 被广泛试 → ``ip_login_limiter`` 锁定整 IP 桶
+# 任一触发都拒绝登录，无法绕过。
+ip_login_limiter = LoginRateLimiter(
+    max_fails=50, window=600, lock_duration=900,
+)
+"""登录的纯 IP 维度限流器（防分布式撞库 / 代理池横扫多用户名）。
+
+阈值 50 次 / 10 分钟 / 锁 15 分钟 —— 单用户 / 小团队场景下不会被自己
+日常使用触达，仅在明显异常的暴破节奏下兜底。"""
+
+IP_LOGIN_LIMITER_KEY = "__login_ip__"
+"""``ip_login_limiter`` 使用的固定 username 槽位标识。"""

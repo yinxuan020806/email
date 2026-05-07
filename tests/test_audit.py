@@ -107,7 +107,7 @@ def test_audit_only_self_param_no_longer_widens_scope(client2):
     a, b = client2
     # bob 触发一些动作产生审计
     b.post("/api/auth/logout")
-    b.post("/api/auth/login", json={"username": "bob", "password": "pwd-bob"})
+    b.post("/api/auth/login", json={"username": "bob", "password": "pwd-bob1"})
     # alice 尝试用旧版越权姿势读全库
     items = a.get("/api/audit?only_self=false").json()["items"]
     assert all(
@@ -132,7 +132,7 @@ def test_audit_isolated_per_user_endpoint(client2):
     a.post("/api/auth/logout")
     a.post("/api/auth/login", json={"username": "alice", "password": "pwd-alice"})
     b.post("/api/auth/logout")
-    b.post("/api/auth/login", json={"username": "bob", "password": "pwd-bob"})
+    b.post("/api/auth/login", json={"username": "bob", "password": "pwd-bob1"})
 
     a_items = a.get("/api/audit?only_self=true").json()["items"]
     b_items = b.get("/api/audit?only_self=true").json()["items"]

@@ -30,6 +30,7 @@ import sys
 import threading
 import time
 import urllib.parse
+from contextlib import asynccontextmanager
 from typing import List, Optional
 
 import anyio
@@ -45,9 +46,17 @@ from fastapi import (
     Response,
     status,
 )
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import (
+    FileResponse,
+    JSONResponse,
+    PlainTextResponse,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
+from starlette.types import Scope
 from pydantic import BaseModel, Field, field_validator
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -62,7 +71,13 @@ from core.auth import (  # noqa: E402
 from core.email_client import EmailClient  # noqa: E402
 from core.models import Account  # noqa: E402
 from core.oauth2_helper import OAuth2Helper, TOKEN_URL  # noqa: E402
-from core.rate_limit import login_limiter  # noqa: E402
+from core.rate_limit import (  # noqa: E402
+    IP_LOGIN_LIMITER_KEY,
+    REGISTER_LIMITER_KEY,
+    ip_login_limiter,
+    login_limiter,
+    register_limiter,
+)
 from core.security_check import emit_warnings  # noqa: E402
 from database.db_manager import (  # noqa: E402
     ALLOWED_SETTING_KEYS,
@@ -79,7 +94,106 @@ logger = logging.getLogger("email_web")
 
 # ── App & 中间件 ────────────────────────────────────────────────
 
-app = FastAPI(title="邮箱管家 Web", version="3.0.0")
+# 后台周期清理：管理端历史只在 ``main()`` 启动那一刻清理一次过期会话 /
+# 老审计 / 老接码日志 / 过期 token，长期跑的进程在两次重启之间没有任何
+# 自维护，audit_log 与 sessions 表会持续累积。接码前台早就有 ``_cleanup_loop``
+# 一日一跑；这里把同一思路搬过来，避免运维事故型部署（如永远不重启）。
+#
+# 频率 24h：审计 / 会话 / 查询日志的保留窗口都按"天"算（90 / 30 天），
+# 一日一跑足以追上累积；更频繁会徒增 DB 写压力。
+_CLEANUP_INTERVAL_SEC = 24 * 3600
+
+
+async def _periodic_cleanup() -> None:
+    """后台周期任务：清理过期会话 / 老审计 / 老接码查询日志 / 过期 token 缓存
+    / 跨用户的 OAuth 暂存桶。
+
+    任何步骤异常都仅 ``logger.exception`` 记录，不让单步失败拖垮整个 loop。
+    被 ``cancel()`` 后立即退出。注意：``asyncio.sleep`` 是天然的 cancellation point。
+    """
+    from core.oauth_token import evict_expired_token_cache  # noqa: WPS433
+    while True:
+        try:
+            await asyncio.sleep(_CLEANUP_INTERVAL_SEC)
+        except asyncio.CancelledError:
+            return
+        try:
+            n_sess = await asyncio.to_thread(db.cleanup_expired_sessions)
+            n_audit = await asyncio.to_thread(db.cleanup_old_audit)
+            n_qlog = await asyncio.to_thread(db.cleanup_old_code_query_log)
+            n_tok = await asyncio.to_thread(evict_expired_token_cache)
+            # OAuth 暂存桶 GC：``_gc_pending_oauth`` 操作的是模块级 dict +
+            # threading.Lock，纯 CPU 操作不阻塞事件循环（ms 级），无需
+            # to_thread；直接同步调用即可。
+            n_state, n_cred = _gc_pending_oauth()
+            if n_sess or n_audit or n_qlog or n_tok or n_state or n_cred:
+                logger.info(
+                    "周期清理: 过期会话=%d, 老审计=%d, 老接码日志=%d, "
+                    "过期 token=%d, OAuth state=%d, OAuth cred=%d",
+                    n_sess, n_audit, n_qlog, n_tok, n_state, n_cred,
+                )
+        except Exception:
+            logger.exception("周期清理异常（已吞掉，下轮再试）")
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """FastAPI 0.110+ 推荐的 lifespan 入口。
+
+    取代 deprecated 的 ``@app.on_event("startup"|"shutdown")``，让后台任务
+    与应用生命周期严格绑定。``finally`` 块确保即使 yield 期间抛异常，
+    后台 task 也会被正确取消、避免 stranded coroutine 警告。
+    """
+    cleanup_task = asyncio.create_task(_periodic_cleanup(), name="periodic_cleanup")
+    try:
+        yield
+    finally:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except (asyncio.CancelledError, Exception):
+            # 关停阶段任何异常都不能阻塞进程退出
+            pass
+
+
+# 安全：关闭 ``/docs`` ``/redoc`` ``/openapi.json``。Swagger UI 默认对外暴露
+# 全部 API schema、参数类型、返回结构 —— 让攻击者拿到一份"撞库爆破地图"
+# （知道哪些路由要 cookie、哪些校验规则、字段长度上限等）。接码前台
+# (code-receiver/app.py:157) 早已关掉，管理端历史漏配，这里补齐。
+app = FastAPI(
+    title="邮箱管家 Web",
+    version="3.0.0",
+    lifespan=_lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
+
+
+@app.exception_handler(RequestValidationError)
+async def _safe_validation_handler(  # noqa: WPS430
+    _request: Request, exc: RequestValidationError,
+) -> JSONResponse:
+    """安全：覆盖 FastAPI 默认 422 处理器。
+
+    默认 ``RequestValidationError`` 处理器会把出错字段的 ``input``（即用户
+    提交的原始值）放进响应 ``detail``。当用户提交的是登录密码、OAuth
+    refresh_token、二次密码导出请求等敏感字段时，校验失败会让这些值
+    随错误响应原样回显，泄露给浏览器扩展、CDN 日志、企业出口代理等
+    任何能看到 HTTP 响应体的环节。
+
+    本处理器只保留 ``loc + msg``，丢弃 ``input``，并把 msg 截到 200 字符
+    避免 pydantic 把原值嵌入错误消息。这与接码前台
+    (``code-receiver/app.py:_safe_validation_handler``) 共享同一防护。
+    """
+    safe_errors = []
+    for err in exc.errors():
+        msg_raw = str(err.get("msg") or "invalid")[:200]
+        safe_errors.append({"loc": list(err.get("loc", [])), "msg": msg_raw})
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"detail": "请求参数校验失败", "errors": safe_errors},
+    )
 
 
 # 注：此处曾有"假加入接码账号"启动扫描 hook，因字符串中嵌套了未转义的英文双引号
@@ -92,6 +206,13 @@ app = FastAPI(title="邮箱管家 Web", version="3.0.0")
 #    WHERE is_public=1 AND COALESCE(allowed_categories,'')='';
 
 
+# ── GZip 压缩 ─────────────────────────────────────────────────
+# /api/accounts、/api/audit、/api/accounts/{id}/emails 都返回 KB-MB 级 JSON，
+# 启用 gzip 后 90% 文本响应能压到原大小的 20-30%。SSE 不受影响（StreamingResponse
+# 走 chunked，GZipMiddleware 自身会跳过流式响应避免破坏 SSE 协议）。
+# minimum_size=1024 让小响应（健康检查 / 小列表）走原路径，省 CPU。
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
+
 _extra_cors = [s.strip() for s in os.getenv("EMAIL_WEB_CORS", "").split(",") if s.strip()]
 if _extra_cors:
     app.add_middleware(
@@ -102,11 +223,94 @@ if _extra_cors:
         allow_headers=["*"],
     )
 
+
+# ── 全局安全响应头中间件 ──────────────────────────────────────────
+# 接码前台 (code-receiver/app.py) 一直就有这套；管理端历史漏配，意味着
+# 攻击者可以把管理端嵌入 iframe 做点击劫持、浏览器 MIME-sniff
+# 把 application/json 当 HTML 解析、HTTPS 部署没有 HSTS 时被 SSL Strip。
+# 用 ``setdefault`` 写入，避免覆盖个别路由（例如 SSE 的 X-Accel-Buffering、
+# /api/health 自己设的 Cache-Control）已经精心调好的头。
+#
+# CSP 规则要点（管理端 SPA + 邮件 iframe sandbox 渲染）：
+# - default-src 'self'                  其它资源全部同源
+# - img-src 'self' data:                邮件正文偶有 data: 内嵌 inline icon
+# - style-src 'self' 'unsafe-inline'    前端 i18n 切换时存在动态 style；
+#   暂不强行去除 inline，避免大改前端
+# - script-src 'self'                   仅同源脚本，杜绝外站脚本注入
+# - frame-src 'self' data:              邮件 iframe 走 srcdoc，受 sandbox 隔离
+# - connect-src 'self'                  XHR / SSE 仅同源
+# - frame-ancestors 'none'              **核心**：彻底禁止被任何站嵌入 iframe
+#   （X-Frame-Options: DENY 是它的旧版兜底，部分老浏览器仍依赖）
+# - form-action 'self'                  POST 表单只能提交回同源
+# - base-uri 'self'                     杜绝 <base href> 注入劫持相对路径
+#
+# HSTS 仅在确认 HTTPS 时下发；HTTP 部署下发会让浏览器把当前 host 锁成
+# 强制 HTTPS，错误开关 / 域名调整时会陷入"再也访问不到 HTTP" 的死锁。
+_CSP_HEADER = (
+    "default-src 'self'; "
+    "img-src 'self' data:; "
+    "style-src 'self' 'unsafe-inline'; "
+    "script-src 'self'; "
+    "frame-src 'self' data:; "
+    "connect-src 'self'; "
+    "frame-ancestors 'none'; "
+    "form-action 'self'; "
+    "base-uri 'self'"
+)
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Content-Security-Policy", _CSP_HEADER)
+    response.headers.setdefault(
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=(), payment=()",
+    )
+    if _is_https(request):
+        # max-age=1 年；includeSubDomains 让所有子域同享。不加 ``preload``
+        # 避免被 hsts preload list 收录后想下线极难。
+        response.headers.setdefault(
+            "Strict-Transport-Security",
+            "max-age=31536000; includeSubDomains",
+        )
+    return response
+
+
 # ── 静态资源 ────────────────────────────────────────────────────
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 os.makedirs(STATIC_DIR, exist_ok=True)
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+class _CachedStaticFiles(StaticFiles):
+    """带长缓存头的 StaticFiles 子类。
+
+    入口 ``index.html`` 已经把 ``app.js`` / ``app.css`` / ``i18n.js`` /
+    ``icon.png`` 全部以 ``?v=__STATIC_VERSION__`` 形式 cache-bust（见
+    ``_compute_static_version``），文件 mtime 一变 query 就刷新，浏览器与
+    Cloudflare 都把它当新 URL 拉。这给我们一个等式：
+        ``/static/<path>?v=<mtime>`` 对同一份内容是稳定 URL。
+    所以把响应标记 ``Cache-Control: public, max-age=31536000, immutable``
+    完全安全 —— 哪怕用户改了 app.js 重启容器，新 URL 会立刻刷掉旧缓存。
+
+    例外：响应非 200（404 / 304 / range 等）维持原 ``StaticFiles`` 行为，
+    避免把 304 也打上 immutable，引发某些 CDN 异常。
+    """
+
+    _CACHE_HEADER = "public, max-age=31536000, immutable"
+
+    async def get_response(self, path: str, scope: Scope):
+        response = await super().get_response(path, scope)
+        if response.status_code == 200:
+            response.headers.setdefault("Cache-Control", self._CACHE_HEADER)
+        return response
+
+
+app.mount("/static", _CachedStaticFiles(directory=STATIC_DIR), name="static")
 
 # ── 数据库 ──────────────────────────────────────────────────────
 
@@ -771,23 +975,43 @@ def register(req: RegisterRequest, request: Request, response: Response) -> dict
                      success=False, detail="注册已禁用")
         raise HTTPException(status.HTTP_403_FORBIDDEN, "注册已禁用")
 
+    # 注册限流：IP 维度独立桶（10 分钟 10 次失败触发锁定）。
+    # 必须放在 PBKDF2 哈希之前，否则攻击者用错密码刷接口仍能耗光 CPU。
+    # ``DISABLE_REGISTER=1`` 时 403 路径不走 limiter — 注册关闭场景下接口
+    # 总是返回固定错误，不存在"被刷爆"问题，反而走 limiter 会让运维误判。
+    allowed, retry_after = register_limiter.check(REGISTER_LIMITER_KEY, ip)
+    if not allowed:
+        db.log_audit("register", username=req.username, ip=ip, user_agent=ua,
+                     success=False, detail=f"注册已锁定，剩余 {retry_after}s")
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"注册尝试次数过多，请 {retry_after // 60} 分钟后再试",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     username = normalize_username(req.username)
     ok, msg = validate_username(username)
     if not ok:
+        register_limiter.record_failure(REGISTER_LIMITER_KEY, ip)
         raise HTTPException(status.HTTP_400_BAD_REQUEST, msg)
     ok, msg = validate_password(req.password)
     if not ok:
+        register_limiter.record_failure(REGISTER_LIMITER_KEY, ip)
         raise HTTPException(status.HTTP_400_BAD_REQUEST, msg)
 
     if db.get_user_by_username(username):
+        register_limiter.record_failure(REGISTER_LIMITER_KEY, ip)
         db.log_audit("register", username=username, ip=ip, user_agent=ua,
                      success=False, detail="用户名已存在")
         raise HTTPException(status.HTTP_409_CONFLICT, "用户名已存在")
 
     user_id = db.create_user(username, hash_password(req.password))
     if not user_id:
+        register_limiter.record_failure(REGISTER_LIMITER_KEY, ip)
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "注册失败")
 
+    # 注册成功：清空当前 IP 的失败计数，允许后续合法重试不被卡
+    register_limiter.record_success(REGISTER_LIMITER_KEY, ip)
     token = db.create_session(user_id, ttl_seconds=COOKIE_TTL)
     _set_session_cookie(response, token, request)
     db.log_audit("register", user_id=user_id, username=username,
@@ -800,6 +1024,20 @@ def login(req: LoginRequest, request: Request, response: Response) -> dict:
     ip = _client_ip(request)
     ua = request.headers.get("user-agent", "")
     username = normalize_username(req.username)
+
+    # 双层登录限流：
+    # - ``login_limiter``  ：(username, ip) 双键，挡"同账号反复试密码"
+    # - ``ip_login_limiter``：纯 IP 维度桶，挡"同 IP 横扫多用户名"的分布式撞库
+    # 任一触发都拒绝，确保不能用代理池 + 字典轮 username 来绕开双键限流。
+    ip_allowed, ip_retry = ip_login_limiter.check(IP_LOGIN_LIMITER_KEY, ip)
+    if not ip_allowed:
+        db.log_audit("login", username=username, ip=ip, user_agent=ua,
+                     success=False, detail=f"IP 已锁定，剩余 {ip_retry}s")
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            f"登录失败次数过多，请 {ip_retry // 60} 分钟后再试",
+            headers={"Retry-After": str(ip_retry)},
+        )
 
     allowed, retry_after = login_limiter.check(username, ip)
     if not allowed:
@@ -814,6 +1052,10 @@ def login(req: LoginRequest, request: Request, response: Response) -> dict:
     user = db.get_user_by_username(username)
     if not user or not verify_password(req.password, user["password_hash"]):
         locked, lock_secs = login_limiter.record_failure(username, ip)
+        # IP 维度独立计失败：双键桶被绕过（用不同 username）时，IP 桶仍累计
+        ip_locked, ip_lock_secs = ip_login_limiter.record_failure(
+            IP_LOGIN_LIMITER_KEY, ip,
+        )
         remaining = login_limiter.remaining_attempts(username, ip)
         detail = (
             f"已锁定 {lock_secs // 60} 分钟" if locked
@@ -826,6 +1068,13 @@ def login(req: LoginRequest, request: Request, response: Response) -> dict:
         known_user_id = user["id"] if user else None
         db.log_audit("login", user_id=known_user_id, username=username,
                      ip=ip, user_agent=ua, success=False, detail=detail)
+        # IP 维度先锁优先级 ≥ username 维度（更广的封禁，更明确的告警）
+        if ip_locked:
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                f"登录失败次数过多，已锁定 {ip_lock_secs // 60} 分钟",
+                headers={"Retry-After": str(ip_lock_secs)},
+            )
         if locked:
             raise HTTPException(
                 status.HTTP_429_TOO_MANY_REQUESTS,
@@ -838,6 +1087,9 @@ def login(req: LoginRequest, request: Request, response: Response) -> dict:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, msg)
 
     login_limiter.record_success(username, ip)
+    # 登录成功也清掉该 IP 的失败计数；让用户拼错几次密码后成功登录不会
+    # 因 IP 桶残留计数被未来误锁
+    ip_login_limiter.record_success(IP_LOGIN_LIMITER_KEY, ip)
     token = db.create_session(user["id"], ttl_seconds=COOKIE_TTL)
     _set_session_cookie(response, token, request)
     db.log_audit("login", user_id=user["id"], username=user["username"],
@@ -869,11 +1121,18 @@ def me(user: dict = CurrentUser) -> dict:
 
     ``is_owner`` 标识当前用户是否是接码业务站长（CODE_OWNER_USERNAME），
     前端据此控制"加入接码 / 移出接码"按钮和"接码"列的显隐。
+
+    安全：``code_owner_username`` **仅在请求者本身就是站长时**才回显真实值。
+    旧版无差别返回，让任意已注册用户登录后都能拿到站长用户名 → 针对该
+    用户名做精确字典撞库（管理端登录限流是 (username, ip) 双键，
+    分布式代理池下仍能慢速尝试）。本字段对非 owner 永远是空串，
+    保证字段存在但无信息泄露。
     """
+    is_owner = user["username"] == CODE_OWNER_USERNAME
     return {
         "username": user["username"],
-        "is_owner": user["username"] == CODE_OWNER_USERNAME,
-        "code_owner_username": CODE_OWNER_USERNAME,
+        "is_owner": is_owner,
+        "code_owner_username": CODE_OWNER_USERNAME if is_owner else "",
     }
 
 
@@ -940,8 +1199,11 @@ def import_accounts(
 
     existing: set[str] = set()
     if req.skip_duplicate:
-        for a in db.get_all_accounts(user["id"]):
-            existing.add(a.email.lower())
+        # 旧实现走 ``get_all_accounts``，会把整张账号表（含 N 个 Fernet
+        # 密文 password / refresh_token）全部解密一次只为读 email 字段；
+        # N=10000 时是 ~2 万次 Fernet 操作，几乎是 import 接口的全部 CPU。
+        # ``get_existing_emails`` 只 ``SELECT LOWER(email)``，O(N) 但常数极小。
+        existing = db.get_existing_emails(user["id"])
 
     success = fail = skipped = 0
     groups_created: set[str] = set()
@@ -1651,13 +1913,15 @@ def list_audit_log(
 
 @app.get("/api/dashboard")
 def get_dashboard(user: dict = CurrentUser) -> dict:
-    accs = db.get_all_accounts(user["id"])
-    groups_map: dict[str, int] = {}
-    statuses: dict[str, int] = {"正常": 0, "异常": 0, "未检测": 0}
-    for a in accs:
-        groups_map[a.group_name] = groups_map.get(a.group_name, 0) + 1
-        statuses[a.status] = statuses.get(a.status, 0) + 1
-    return {"total": len(accs), "groups": groups_map, "statuses": statuses}
+    """仪表盘概览：总数 / 分组分布 / 状态分布。
+
+    旧实现走 ``get_all_accounts`` 全表加载 + Fernet 解密 + Python 侧
+    dict 计数；本接口只用聚合数字，password / refresh_token 完全不需要。
+    改走 ``get_dashboard_stats`` 的纯 SQL ``GROUP BY`` 后：
+    - N=1000 账号：~50ms（含 Fernet）→ ~2ms（仅 SQL 聚合）
+    - 减少 N 次 Fernet 解密的内存暴露面
+    """
+    return db.get_dashboard_stats(user["id"])
 
 
 # ── Settings ────────────────────────────────────────────────────
@@ -1804,6 +2068,47 @@ def _consume_oauth_state(user_id: int, state: str) -> bool:
         if not bucket:
             _pending_oauth_states.pop(user_id, None)
         return True
+
+
+def _gc_pending_oauth() -> tuple[int, int]:
+    """全局 GC：扫描所有用户的 OAuth 暂存桶，删除整体过期 / 已无活项的条目。
+
+    必要性：``_record_oauth_state`` 仅在写入"该用户"的桶时清理那个桶，
+    ``_consume_oauth_state`` 仅在消费成功后才 ``pop`` 空桶。如果某个用户
+    颁发了 state 之后再没回来消费（关浏览器、改主意），他的 user_id 会
+    永久占据 dict 一个 entry —— 长期跑的进程下，user_id 不断累积，buckets
+    里残留过期项也清不掉，慢速内存泄漏。
+
+    类似地 ``_pending_oauth``（refresh_token 暂存）也只在新写入时局部 GC，
+    没人新调用就永远卡着旧条目。
+
+    本函数被 ``_periodic_cleanup`` 一日一次调用，全局扫一遍。
+    返回 ``(states_dropped, creds_dropped)`` 用于日志统计。
+    """
+    now = time.monotonic()
+    states_dropped = 0
+    creds_dropped = 0
+
+    with _pending_oauth_states_lock:
+        empty_users: list[int] = []
+        for uid, bucket in _pending_oauth_states.items():
+            before = len(bucket)
+            bucket[:] = [(s, t) for (s, t) in bucket if t > now]
+            states_dropped += before - len(bucket)
+            if not bucket:
+                empty_users.append(uid)
+        for uid in empty_users:
+            _pending_oauth_states.pop(uid, None)
+
+    with _pending_oauth_lock:
+        expired_users = [
+            uid for uid, v in _pending_oauth.items() if v[3] <= now
+        ]
+        for uid in expired_users:
+            _pending_oauth.pop(uid, None)
+            creds_dropped += 1
+
+    return states_dropped, creds_dropped
 
 
 def _extract_state_from_redirect(redirect_url: str) -> Optional[str]:
@@ -1987,6 +2292,12 @@ def main() -> None:
         # 仅当显式信任反代时才让 uvicorn 解析 forwarded headers，避免公网直连被伪造
         proxy_headers=TRUST_PROXY,
         forwarded_allow_ips="*" if TRUST_PROXY else "127.0.0.1",
+        # 安全：默认 ``Server: uvicorn`` 头会暴露技术栈给攻击者，让他们直接
+        # 匹配 uvicorn / FastAPI 已知 CVE 的利用工具。关掉后响应就没有 Server
+        # 头（也就避免了"攻击者按 Server 字段做产品探测"这一步）。
+        server_header=False,
+        # 同样 ``Date`` 头也不必给（部分扫描器把它当指纹）；保留默认即可，
+        # 这一行无需改 —— 仅 ``server_header`` 是真正的指纹泄露面。
     )
 
 
