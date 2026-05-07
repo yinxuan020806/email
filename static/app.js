@@ -1778,8 +1778,16 @@ async function init() {
     if (v) {
       const tag = document.getElementById('app-version');
       if (tag) {
-        tag.textContent = 'v' + v;
-        tag.title = '后端版本号 / 最近一次部署的 git commit short SHA';
+        // 'dev' 是 fallback 占位符（环境变量没设 + 拿不到 git SHA），直接
+        // 显示为 'dev' 而不是 'vdev' 这种看起来像 bug 的拼接。git short SHA
+        // 才加 'v' 前缀，让"v0e8c1f3a" 这种语义清晰
+        if (v === 'dev') {
+          tag.textContent = 'dev';
+          tag.title = '本地 / 未部署版本（APP_VERSION 未设置且不在 git 仓库内）';
+        } else {
+          tag.textContent = 'v' + v;
+          tag.title = '后端版本号 / 最近一次部署的 git commit short SHA';
+        }
       }
     }
   } catch { /* ignore */ }

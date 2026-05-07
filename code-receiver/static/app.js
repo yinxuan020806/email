@@ -72,8 +72,15 @@
         var v = String(cfg.version || '').trim();
         var tag = document.getElementById('app-version');
         if (tag && v) {
-          tag.textContent = 'v' + v;
-          tag.title = '后端版本号 / 最近一次部署的 git commit short SHA';
+          // 'dev' 是 fallback 占位符，直接显示为 'dev' 不加 'v' 前缀，
+          // 避免 'vdev' 这种拼接看起来像 bug
+          if (v === 'dev') {
+            tag.textContent = 'dev';
+            tag.title = '本地 / 未部署版本（APP_VERSION 未设置且不在 git 仓库内）';
+          } else {
+            tag.textContent = 'v' + v;
+            tag.title = '后端版本号 / 最近一次部署的 git commit short SHA';
+          }
         }
       })
       .catch(function () { /* 静默：未启用 / 网络错都按未启用处理 */ });

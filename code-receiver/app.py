@@ -517,7 +517,12 @@ def _verify_turnstile(token: Optional[str], remote_ip: str) -> tuple[bool, str]:
     return False, "turnstile_failed"
 
 
-_APP_VERSION = (os.getenv("APP_VERSION", "") or "dev").strip()[:32]
+# 版本号解析顺序：环境变量 APP_VERSION > git rev-parse --short=8 HEAD > "dev"
+# 与管理端 web_app.py 共享同一段 helper，保持双端版本号显示一致。
+from core.version import resolve_app_version  # noqa: E402
+_APP_VERSION = resolve_app_version(
+    repo_root=os.path.normpath(EMAIL_PROJECT_DIR),
+)
 
 
 @app.get("/api/config")
