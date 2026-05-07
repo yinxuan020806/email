@@ -1538,6 +1538,12 @@ def get_emails(
     默认 ``with_body=False`` — 列表里 ``body`` 字段被清空，仅保留
     ``preview``（前 200 字符）。点击单封时由 ``/emails/body`` 按需拉取完整正文。
     这样列表加载快得多（节省 90% 左右带宽），刷新体验丝滑。
+
+    错误透传：上游（Graph / Outlook REST / IMAP）失败时旧版只返回
+    ``{emails: [], message: "API 错误: 429 ..."}``，前端拿到空数组渲染成
+    "暂无数据"，让用户误以为是我们自家限流过严。现在改成上游软失败时把
+    HTTP 状态码改成 502，让前端 catch 分支显示明确"加载失败"+ 上游错误，
+    避免误导。
     """
     acc = get_account_or_404(user["id"], account_id)
     client = create_client(user["id"], acc)
@@ -1547,6 +1553,25 @@ def get_emails(
         emails, msg = client.fetch_emails(folder=folder, limit=limit, with_body=with_body)
     finally:
         client.disconnect()
+
+    # 上游软失败判定：emails 为空 + msg 描述了真实错误（"API 错误"/"网络错误"
+    # /"OAuth2 错误" 之类）。仅"获取成功"或"取得 0 条"两种成功语义放行；
+    # 其余视为上游异常，返回 502 让前端走 email_load_fail 分支。
+    # IMAP 路径下空收件箱时 msg 可能是 "获取成功"，命中放行白名单；用户首次打开
+    # 真的没邮件也不会被误判成错误。
+    if not emails and msg and not _is_email_list_ok(msg):
+        retry_after = _maybe_extract_retry_after(msg)
+        headers = {"Retry-After": str(retry_after)} if retry_after else None
+        # 429 直接透传给前端（保留语义），其它（503 / OAuth / 网络）走 502
+        # —— 502 是 Bad Gateway，准确表达"我们这边在帮你 proxy 上游、但上游
+        # 没能给我们正确响应"的语义。
+        upstream_status = (
+            status.HTTP_429_TOO_MANY_REQUESTS
+            if "429" in msg
+            else status.HTTP_502_BAD_GATEWAY
+        )
+        raise HTTPException(upstream_status, msg[:300], headers=headers)
+
     for e in emails:
         if e.get("date"):
             e["date"] = e["date"].isoformat()
@@ -1557,6 +1582,29 @@ def get_emails(
                 e["preview"] = full_body[:200]
             e["body"] = ""
     return {"emails": emails, "message": msg}
+
+
+# fetch_emails 在"无邮件但请求成功"时也会返回 ([], "获取成功")，这两个串
+# 是合法成功语义；其它非空 msg 都视为软失败。
+_EMAIL_LIST_OK_MSGS = frozenset({"获取成功", "Token 有效"})
+
+
+def _is_email_list_ok(msg: str) -> bool:
+    return (msg or "").strip() in _EMAIL_LIST_OK_MSGS
+
+
+def _maybe_extract_retry_after(msg: str) -> Optional[int]:
+    """从上游错误 msg 里粗略提取 Retry-After 秒数。
+
+    目前只识别 "429" 关键字 → 给一个保守默认 5s（让前端节流再叠加一次后端
+    建议，避免用户连续撞墙）。Graph 层已经先尝试过 Retry-After 自动重试，
+    所以这里能接到的 429 是连续重试后仍然失败的硬限流。
+    """
+    if not msg:
+        return None
+    if "429" in msg:
+        return 5
+    return None
 
 
 @app.post("/api/accounts/{account_id}/emails/send")
@@ -1574,18 +1622,22 @@ def send_email_api(
 
 @app.post("/api/accounts/{account_id}/check")
 def check_single(account_id: int, user: dict = CurrentUser) -> dict:
+    """单账号检测：连通性 + 是否含 AWS 验证邮件。
+
+    与 ``_check_one_sync`` 同源——单次 ``fetch_emails(inbox, 30)`` 即可同时
+    判定 token/IMAP 是否可用、并扫一遍 subject 关键字，避免历史"先 ``$top=1``
+    再 ``$top=30``"两次往返。
+    """
     acc = get_account_or_404(user["id"], account_id)
     client = create_client(user["id"], acc)
-    has_aws = False
     try:
-        status_str, msg = client.check_status()
+        status_str, has_aws, msg = client.quick_check_with_aws(limit=30)
         db.update_account_status(user["id"], account_id, status_str)
         if status_str == "正常":
             try:
-                has_aws, _ = client.check_aws_verification_emails(limit=30)
                 db.update_aws_code_status(user["id"], account_id, has_aws)
             except Exception:
-                logger.exception("AWS 验证码检测异常 acc=%s", account_id)
+                logger.exception("update_aws_code_status 异常 acc=%s", account_id)
     finally:
         client.disconnect()
     return {"status": status_str, "message": msg, "has_aws": has_aws}
@@ -1656,7 +1708,15 @@ def _sse(payload: dict) -> str:
 
 
 def _check_one_sync(owner_id: int, aid: int) -> dict:
-    """检测单个账号（IO 同步）— 在线程池中运行。"""
+    """检测单个账号（IO 同步）— 在线程池中运行。
+
+    历史实现每个账号发 **2 次**上游请求（``check_status`` ``$top=1`` +
+    ``check_aws_verification_emails`` ``$top=30``）。1000 个账号的批量检测
+    瞬间就是 2000 次 Graph/IMAP 调用，对 OAuth 账号尤其容易把 ``token`` 端点
+    或单邮箱配额撞穿。``EmailClient.quick_check_with_aws`` 把两次合并成一次
+    ``fetch_emails(inbox, 30)``：连通性判定取自能否拿到列表、AWS 检测共用
+    同一份 emails 数据，单账号请求量减半。
+    """
     acc = db.get_account(owner_id, aid)
     if not acc:
         return {"email": "?", "status": "异常", "has_aws": False, "found": False}
@@ -1665,19 +1725,18 @@ def _check_one_sync(owner_id: int, aid: int) -> dict:
     status_str = "异常"
     try:
         try:
-            status_str, _ = client.check_status()
+            status_str, has_aws, _ = client.quick_check_with_aws(limit=30)
         except Exception:
-            logger.exception("check_status 异常 acc=%s", aid)
+            logger.exception("quick_check_with_aws 异常 acc=%s", aid)
         try:
             db.update_account_status(owner_id, aid, status_str)
         except Exception:
             logger.exception("update_account_status 异常 acc=%s", aid)
         if status_str == "正常":
             try:
-                has_aws, _ = client.check_aws_verification_emails(limit=30)
                 db.update_aws_code_status(owner_id, aid, has_aws)
             except Exception:
-                logger.exception("AWS 检测异常 acc=%s", aid)
+                logger.exception("update_aws_code_status 异常 acc=%s", aid)
     finally:
         try:
             client.disconnect()

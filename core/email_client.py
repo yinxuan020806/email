@@ -310,8 +310,44 @@ class EmailClient:
         except Exception:
             logger.exception("AWS 验证码检测异常")
             return False, 0
+        return self._scan_aws(emails)
+
+    @staticmethod
+    def _scan_aws(emails: list[dict]) -> Tuple[bool, int]:
+        keywords = ("aws", "amazon")
         count = sum(
             1 for e in emails
             if any(kw in (e.get("subject") or "").lower() for kw in keywords)
         )
         return count > 0, count
+
+    def quick_check_with_aws(
+        self, limit: int = 30,
+    ) -> Tuple[str, bool, str]:
+        """批量检测专用：用一次 ``fetch_emails`` 同时拿到「连通性 + AWS 关键字」结果。
+
+        旧批量检测分两步：先 ``check_status()`` (Graph 拉 ``$top=1`` / IMAP
+        connect→disconnect)，再 ``check_aws_verification_emails()`` 内部又
+        ``fetch_emails(inbox, 30)``。每个账号 2 次上游请求，1000 个账号就是
+        2000 次 API 调用——多出的 1000 次纯属冗余，因为 fetch_emails 成功本
+        身就等价于「token 有效 + 文件夹可读」。
+
+        合并语义：
+        - ``fetch_emails`` 返回非空 list 或 msg ∈ {"获取成功", "Token 有效"}
+          → 状态正常，emails 用于 AWS 检测
+        - 其它（429/503/OAuth/网络错误等）→ 状态异常，has_aws=False
+
+        返回 ``(status_str, has_aws, msg)``，调用方可继续把 status_str 写库。
+        """
+        try:
+            emails, msg = self.fetch_emails("inbox", limit=limit)
+        except Exception as exc:
+            logger.exception("quick_check_with_aws 异常")
+            return "异常", False, f"异常: {type(exc).__name__}"
+
+        # 「拿到列表」或「白名单 msg」均视为连通正常；其他 msg 都是上游软失败
+        ok_marker = (msg or "").strip() in {"获取成功", "Token 有效"}
+        if emails or ok_marker:
+            has_aws, _ = self._scan_aws(emails)
+            return "正常", has_aws, msg or "获取成功"
+        return "异常", False, msg or "未知错误"

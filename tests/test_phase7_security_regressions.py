@@ -406,6 +406,20 @@ def test_app_js_buildAccountFullString_sanitizes_fields(client):
     assert "_emailListReqId" in body, "loadEmails 缺少请求代数竞态防护"
     # F2: blob revoke
     assert "revokeObjectURL" in body, "doExport 未 revoke blob URL"
+    # F6: loadEmails 不能再"刷新一次就预拉前 3 封 body"
+    # （否则连点几次刷新就被 Microsoft Graph per-mailbox 风控撞 429，
+    # 让用户误以为是我们自家代码限流过严）
+    assert "EMAIL_LIST_MIN_INTERVAL_MS" in body, "loadEmails 缺少前端节流常量"
+    assert "_isEmailListUpstreamError" in body, (
+        "loadEmails 缺少上游错误透传，empty + message 会被静默成"
+        "'暂无数据'误导用户"
+    )
+    # 反例守护：旧版的 'for (let i = 0; i < Math.min(3, S.emails.length)' 一旦
+    # 重新出现，再 5 次刷新 = 20 次 Graph 调用，限流会立刻回归。
+    assert "for (let i = 0; i < Math.min(3, S.emails.length)" not in body, (
+        "loadEmails 不应在每次刷新后立刻预拉前 3 封 body —— 这是误触发"
+        "Microsoft Graph per-mailbox 限流的元凶"
+    )
 
 
 # ── T5 GraphClient HTTP 错误码 ────────────────────────────────

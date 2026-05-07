@@ -982,11 +982,35 @@ function viewEmails(accountId) {
 // 返回后会覆盖掉新请求的结果（"先发后到"竞态）。每次开新请求自增此计数，
 // 在 await 后 if 自增过就丢弃响应。
 S._emailListReqId = 0;
+// 上一次成功发出请求的时间戳，用于"前端节流"——避免用户连点刷新按钮把
+// Microsoft Graph per-mailbox 限流（每分钟几十次就开始 429）撞穿，从而出现
+// "刷几次后变暂无数据"的伪限流体验。500ms 是对单用户操作不可感、对脚本误
+// 触发又有效的折中。
+S._emailListLastFetchTs = 0;
+const EMAIL_LIST_MIN_INTERVAL_MS = 500;
 
 async function loadEmails() {
   if (!S.emailAccount) return;
   const folder = $('emailFolder').value;
   const list = $('emailList');
+
+  // 前端节流：连点 / 抖动场景下只让最后一次落到后端，避免把上游 Graph
+  // 推到 429。仍然把请求计数 +1，让旧的 in-flight 请求落地后被丢弃。
+  const now = Date.now();
+  const sinceLast = now - S._emailListLastFetchTs;
+  if (sinceLast < EMAIL_LIST_MIN_INTERVAL_MS) {
+    const myReqId = ++S._emailListReqId;
+    const myAccId = S.emailAccount.id;
+    clearTimeout(S._emailListThrottleTimer);
+    S._emailListThrottleTimer = setTimeout(() => {
+      if (myReqId !== S._emailListReqId) return;
+      if (!S.emailAccount || S.emailAccount.id !== myAccId) return;
+      loadEmails();
+    }, EMAIL_LIST_MIN_INTERVAL_MS - sinceLast);
+    return;
+  }
+  S._emailListLastFetchTs = now;
+
   clear(list);
   list.appendChild(el('div', { class: 'empty-state' }, t('email_loading')));
   const myReqId = ++S._emailListReqId;
@@ -999,17 +1023,40 @@ async function loadEmails() {
     S.allEmails = r.emails || [];
     S.emails = [...S.allEmails];
     S.currentEmail = null;
-    renderEmailList();
-    // 列表加载完后立刻在后台预加载前 3 封 body
-    // 用户首次点击大概率落在第 1-3 封，命中即瞬间显示
-    for (let i = 0; i < Math.min(3, S.emails.length); i++) {
-      prefetchEmailBody(i);
+    // 后端 200 但上游软失败：emails 空且 message 含错误描述时，渲染明确的错
+    // 误条而不是误导性的"暂无数据"。Graph/Outlook 返回的 message 形如
+    // "API 错误: 429 - ..." / "OAuth2 错误: ..." / "网络错误"。
+    if (!S.allEmails.length && r && r.message && _isEmailListUpstreamError(r.message)) {
+      clear(list);
+      list.appendChild(el('div', {
+        class: 'empty-state', style: 'color:var(--warning);white-space:pre-wrap;line-height:1.5'
+      }, t('email_load_fail') + '\n' + r.message));
+      return;
     }
-  } catch {
+    renderEmailList();
+    // 旧版会在这里立刻预拉前 3 封 body —— 一次刷新等于 1(列表) + 3(预拉) =
+    // 4 次 Graph 请求。用户连点几次刷新就轻松撞 per-mailbox 风控（Microsoft
+    // 对单邮箱并发 + 高频 GET 会临时返回 429 / 限速），表象是"刷几次后变
+    // 暂无数据"，被误以为是我们自家代码的限流。改成只在用户实际点开第 1
+    // 封后再预拉下一封（见 selectEmail），单次刷新只发 1 个 API 请求。
+  } catch (err) {
     if (myReqId !== S._emailListReqId) return;
     clear(list);
-    list.appendChild(el('div', { class: 'empty-state', style: 'color:var(--danger)' }, t('email_load_fail')));
+    const detail = (err && err.message) ? String(err.message).slice(0, 200) : '';
+    list.appendChild(el('div', {
+      class: 'empty-state',
+      style: 'color:var(--danger);white-space:pre-wrap;line-height:1.5',
+    }, detail ? t('email_load_fail') + '\n' + detail : t('email_load_fail')));
   }
+}
+
+// 邮件列表上游软失败的判定：response 200 但 message 描述了真实错误（来自
+// Graph / Outlook REST / OAuth refresh 等环节）。命中关键字时不再静默把
+// 空 list 渲染成"暂无数据"。
+function _isEmailListUpstreamError(msg) {
+  if (!msg) return false;
+  const m = String(msg).toLowerCase();
+  return /(429|503|502|throttl|too many|限流|错误|失败|err|oauth|invalid|unauth)/i.test(m);
 }
 
 function filterEmailList() {

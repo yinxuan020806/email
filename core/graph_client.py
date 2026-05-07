@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import time
 from datetime import datetime
 from typing import Optional, Tuple
 
@@ -25,6 +26,22 @@ logger = logging.getLogger(__name__)
 
 GRAPH_BASE = "https://graph.microsoft.com/v1.0/me"
 OUTLOOK_BASE = "https://outlook.office.com/api/v2.0/me"
+
+# Microsoft Graph / Outlook REST 在 per-mailbox 高频读时偶发返回 429（Too Many
+# Requests）/ 503 / 504：对单用户日常刷新邮件的场景，这通常是几秒内就能自愈的
+# 软抖动而非真正的封禁。旧实现一次失败就把 [] + "API 错误: 429" 直接返回，让
+# 前端误把它渲染成"暂无数据"，看上去就跟"自家代码限流过严"一模一样。
+#
+# 这里在 fetch_emails 里加一次轻量重试：仅 429/503/504 触发，按服务端
+# Retry-After（若有）退避，否则用 1.5s 固定 sleep，最多重试 1 次。
+# 不做更激进的重试链路是因为：
+# - 真正的 429 通常意味着调用方需要"立刻退一步"，循环重试 5 次只会让风控
+#   计时器不停被踩；
+# - Web 路径上单次请求阻塞 1.5-2s 已经接近用户耐受极限，再多就不如直接
+#   返回错误让前端展示"稍后重试"提示。
+_RETRYABLE_STATUS = frozenset({429, 503, 504})
+_RETRY_BACKOFF_DEFAULT_SEC = 1.5
+_RETRY_BACKOFF_MAX_SEC = 4.0
 
 
 class GraphClient:
@@ -55,6 +72,21 @@ class GraphClient:
         except requests.RequestException as exc:
             logger.warning("Graph 请求失败 %s %s: %s", method, url, exc)
             return None
+
+    @staticmethod
+    def _retry_after_sec(resp: requests.Response) -> float:
+        """从 429/503 响应解析合理的退避秒数。
+
+        Microsoft Graph 在限流时通常会返回 ``Retry-After`` 头（数字秒，偶尔是
+        HTTP-date）。这里只解析数字格式，并夹到 ``_RETRY_BACKOFF_MAX_SEC``，
+        避免服务端给出 60s+ 的 Retry-After 把整个 web 请求阻塞过久（前端请求
+        已经超时，用户看到的还是 502/504）。无 Retry-After 头时退化到固定
+        1.5s，足以让大部分软抖动自愈。
+        """
+        ra = (resp.headers.get("Retry-After") or "").strip()
+        if ra.isdigit():
+            return min(_RETRY_BACKOFF_MAX_SEC, max(0.0, float(ra)))
+        return _RETRY_BACKOFF_DEFAULT_SEC
 
     # ── Public API ──────────────────────────────────────────
 
@@ -126,6 +158,20 @@ class GraphClient:
         resp = self._req(
             "GET", url, headers=request_headers, params=params, timeout=30
         )
+        # 429/503/504 等"软抖动"做一次受控重试：用户日常刷新邮件几秒内就会
+        # 自愈，原实现一次失败就让前端拿到 "API 错误: 429"+空列表，被误读为
+        # "我们自家代码限流"。仅一次 retry 控制在 ≤ 4s，避免雪崩。
+        if resp is not None and resp.status_code in _RETRYABLE_STATUS:
+            backoff = self._retry_after_sec(resp)
+            logger.info(
+                "Graph fetch_emails %d，%ss 后重试一次（Retry-After=%s）",
+                resp.status_code, backoff, resp.headers.get("Retry-After", ""),
+            )
+            time.sleep(backoff)
+            resp = self._req(
+                "GET", url, headers=request_headers, params=params, timeout=30
+            )
+
         if resp is None:
             return [], "网络错误"
         if resp.status_code != 200:
@@ -211,6 +257,19 @@ class GraphClient:
             "GET", url, headers=request_headers,
             params={"$select": select_fields}, timeout=30,
         )
+        # 与 fetch_emails 对齐：429/503/504 单次受控重试，避免用户点开邮件时
+        # 偶发软抖动直接报"API 错误"。
+        if resp is not None and resp.status_code in _RETRYABLE_STATUS:
+            backoff = self._retry_after_sec(resp)
+            logger.info(
+                "Graph get_email_body %d，%ss 后重试一次（Retry-After=%s）",
+                resp.status_code, backoff, resp.headers.get("Retry-After", ""),
+            )
+            time.sleep(backoff)
+            resp = self._req(
+                "GET", url, headers=request_headers,
+                params={"$select": select_fields}, timeout=30,
+            )
         if resp is None:
             logger.warning("Graph get_email_body 网络错误 url=%s", url)
             return None, "", "", "网络错误"
