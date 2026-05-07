@@ -30,6 +30,7 @@ import sys
 import threading
 import time
 import urllib.parse
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
@@ -1525,6 +1526,62 @@ def delete_group(name: str, user: dict = CurrentUser) -> dict:
 # ── Emails ──────────────────────────────────────────────────────
 
 
+# 邮件列表"短期记忆"缓存：(user_id, account_id, folder, with_body, limit) →
+# (expires_at, emails, msg)。
+#
+# 解决的问题：用户在邮件弹窗里连点"刷新"，或者写了 setInterval 类脚本反复
+# 刷，每次都打到 Microsoft Graph，会被 *per-mailbox*（每邮箱）滚动窗口限速，
+# 表象就是"刷几次后所有账号都接收不到"。
+#
+# 设计取舍：
+# - TTL 5 秒：吸收"用户连点的几次连发"，但不影响"间隔 5 秒以上的真刷"
+#   命中新邮件——拿到最新邮件的延迟最多 5s
+# - 仅缓存成功结果：上游错误不进缓存，避免一次失败把整个 5s 窗口都钉死成
+#   "加载失败"
+# - 缓存对**用户**隔离：cache key 含 user_id，避免跨用户访问别人邮箱的数据
+# - 进程级、不持久化：重启即清；多 worker 部署不共享，只在 worker 内有效
+# - 自带容量上限 1024：防止账号 / 文件夹组合无限增长撑爆内存；超过就 LRU 淘汰
+_EMAIL_LIST_CACHE_TTL = float(os.getenv("EMAIL_LIST_CACHE_TTL_SEC", "5"))
+_EMAIL_LIST_CACHE_MAXSIZE = 1024
+_email_list_cache: "OrderedDict[tuple, tuple[float, list, str]]" = OrderedDict()
+_email_list_cache_lock = threading.Lock()
+
+
+def _email_list_cache_get(key: tuple) -> Optional[tuple[list, str]]:
+    now = time.time()
+    with _email_list_cache_lock:
+        entry = _email_list_cache.get(key)
+        if entry is None:
+            return None
+        expires_at, emails, msg = entry
+        if expires_at <= now:
+            _email_list_cache.pop(key, None)
+            return None
+        # LRU 触发：刚命中的项移到末尾
+        _email_list_cache.move_to_end(key)
+        return emails, msg
+
+
+def _email_list_cache_put(key: tuple, emails: list, msg: str) -> None:
+    if _EMAIL_LIST_CACHE_TTL <= 0:
+        return
+    expires_at = time.time() + _EMAIL_LIST_CACHE_TTL
+    with _email_list_cache_lock:
+        _email_list_cache[key] = (expires_at, emails, msg)
+        _email_list_cache.move_to_end(key)
+        # 超容时丢掉最老一条；OrderedDict.popitem(last=False) 是 O(1)
+        while len(_email_list_cache) > _EMAIL_LIST_CACHE_MAXSIZE:
+            _email_list_cache.popitem(last=False)
+
+
+def _email_list_cache_invalidate(account_id: int) -> None:
+    """删除 / 标记已读 / 发件等"会让列表过时"的操作后调用，让下次刷新看到最新状态。"""
+    with _email_list_cache_lock:
+        dead = [k for k in _email_list_cache if k[1] == account_id]
+        for k in dead:
+            _email_list_cache.pop(k, None)
+
+
 @app.get("/api/accounts/{account_id}/emails")
 def get_emails(
     account_id: int,
@@ -1544,8 +1601,23 @@ def get_emails(
     "暂无数据"，让用户误以为是我们自家限流过严。现在改成上游软失败时把
     HTTP 状态码改成 502，让前端 catch 分支显示明确"加载失败"+ 上游错误，
     避免误导。
+
+    短期缓存（``EMAIL_LIST_CACHE_TTL_SEC`` 秒，默认 5）：用户连点刷新或浏览器
+    层节流被绕过时，把"高频刷新"压成"上游单次调用"，避免命中 Microsoft Graph
+    *per-mailbox* 滚动窗口限速。改邮件 / 删邮件 / 发邮件后会主动失效缓存。
     """
     acc = get_account_or_404(user["id"], account_id)
+
+    cache_key = (user["id"], account_id, folder, bool(with_body), int(limit))
+    cached = _email_list_cache_get(cache_key)
+    if cached is not None:
+        emails_cached, msg_cached = cached
+        return {
+            "emails": [dict(e) for e in emails_cached],
+            "message": msg_cached,
+            "cached": True,
+        }
+
     client = create_client(user["id"], acc)
     try:
         # with_body 直接透传到 GraphClient.fetch_emails，让 Graph 服务端就不返回 body
@@ -1570,7 +1642,12 @@ def get_emails(
             if "429" in msg
             else status.HTTP_502_BAD_GATEWAY
         )
-        raise HTTPException(upstream_status, msg[:300], headers=headers)
+        # 防御纵深：底层 GraphClient 已经做了一层 _summarize_upstream_error，把
+        # HTML / 长 body 净化成简短文案；这里再做一次 100 字符截断 + HTML
+        # 标签字符兜底剥离，确保即便底层将来再回退到原始 ``resp.text``，前端
+        # 也不会展示 ``<!DOCTYPE html>`` 这类原文。
+        safe_msg = _safe_upstream_msg(msg)
+        raise HTTPException(upstream_status, safe_msg, headers=headers)
 
     for e in emails:
         if e.get("date"):
@@ -1581,6 +1658,10 @@ def get_emails(
             if not e.get("preview"):
                 e["preview"] = full_body[:200]
             e["body"] = ""
+
+    # 仅缓存成功结果（emails 非空 或 msg 是合法的"获取成功 / Token 有效"）。
+    # 失败路径在上面已经 raise，根本走不到这里；保险起见仍 if 一下。
+    _email_list_cache_put(cache_key, [dict(e) for e in emails], msg or "")
     return {"emails": emails, "message": msg}
 
 
@@ -1605,6 +1686,23 @@ def _maybe_extract_retry_after(msg: str) -> Optional[int]:
     if "429" in msg:
         return 5
     return None
+
+
+# 简单的"上游错误净化"——把可能漏过来的 HTML 标签字符删除、长度截到 200。
+# 与 GraphClient._summarize_upstream_error 是两层防御：底层负责把 HTML 转
+# 短文案；这里负责"如果底层因为新逻辑/旧 IMAP/边界情况漏出来一段 ``<...>``，
+# 也不让它出现在前端 detail 字段里"。
+_HTML_TAG_RE = re.compile(r"<[^>]{0,200}>")
+
+
+def _safe_upstream_msg(msg: str, max_len: int = 200) -> str:
+    if not msg:
+        return ""
+    cleaned = _HTML_TAG_RE.sub(" ", msg)
+    cleaned = cleaned.replace("<", " ").replace(">", " ")
+    # 折叠空白
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned[:max_len]
 
 
 @app.post("/api/accounts/{account_id}/emails/send")
@@ -1653,6 +1751,9 @@ def mark_read(
         ok, msg = client.mark_as_read(req.email_id, req.folder, req.is_read)
     finally:
         client.disconnect()
+    if ok:
+        # 标记已读会改 emails 列表里的 is_read 字段——失效缓存让下次刷新拿到正确状态
+        _email_list_cache_invalidate(account_id)
     db.log_audit(
         "mark_email_read", user_id=user["id"], username=user["username"],
         ip=_client_ip(request), user_agent=request.headers.get("user-agent", ""),
@@ -1672,6 +1773,8 @@ def delete_email_api(
         ok, msg = client.delete_email(req.email_id, req.folder)
     finally:
         client.disconnect()
+    if ok:
+        _email_list_cache_invalidate(account_id)
     db.log_audit(
         "delete_email", user_id=user["id"], username=user["username"],
         ip=_client_ip(request), user_agent=request.headers.get("user-agent", ""),

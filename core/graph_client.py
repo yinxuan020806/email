@@ -88,6 +88,60 @@ class GraphClient:
             return min(_RETRY_BACKOFF_MAX_SEC, max(0.0, float(ra)))
         return _RETRY_BACKOFF_DEFAULT_SEC
 
+    @staticmethod
+    def _summarize_upstream_error(resp: requests.Response) -> str:
+        """把 Graph / Outlook REST 的非 200 响应概括成一段**用户友好且不泄露
+        上游 HTML / 长 body** 的简短 message。
+
+        旧实现把 ``resp.text[:200]`` 直接拼进 message 透传到前端 —— 当 Microsoft
+        在 OAuth 凭据失效时返回登录页 HTML，前端就把整段 ``<!DOCTYPE html>...``
+        当错误内容渲染出来，看起来既丑又泄露上游版本指纹。
+
+        策略（从可靠到兜底）：
+        1. JSON body：只取 ``error.code`` + ``error.message`` 的前 120 字符
+        2. 含 ``<html`` / ``<!DOCTYPE`` / ``<title``：识别为 HTML，按状态码给
+           标准化文案（401/403 = 凭据失效；其它 = HTTP {code} 错误页）
+        3. 401 / 403：补一句"请重新走 OAuth 授权"
+        4. 其它：仅返回 ``API 错误: {code}`` 不带任何上游 body
+        """
+        code = resp.status_code
+        # 1) 优先解 JSON
+        try:
+            data = resp.json() if resp.text else None
+        except ValueError:
+            data = None
+        if isinstance(data, dict):
+            err = data.get("error") if isinstance(data.get("error"), dict) else {}
+            err_code = (err.get("code") or "").strip()
+            err_msg = (err.get("message") or "").strip().replace("\r", " ").replace("\n", " ")
+            if err_msg or err_code:
+                summary = f"{err_code}: {err_msg}".strip(": ").strip()
+                # 截短 + 强制 ASCII-safe（避免 HTML 字符出现）
+                summary = summary[:120]
+                if code in (401, 403):
+                    return f"账号 OAuth 凭据失效或权限不足（HTTP {code}）：{summary}。请到 OAuth 页面重新授权该账号。"
+                return f"API 错误 {code}: {summary}"
+
+        # 2) 上游不是 JSON（极大概率是 HTML 登录页 / WAF 拦截页）
+        body_lower = (resp.text or "")[:200].lower()
+        if "<html" in body_lower or "<!doctype" in body_lower or "<title" in body_lower:
+            if code in (401, 403):
+                return (
+                    f"账号 OAuth 凭据失效（HTTP {code}，上游返回登录页）。"
+                    "该账号的 refresh_token 已过期或被吊销，请到 OAuth 页面重新授权。"
+                )
+            return f"API 错误 {code}: 上游返回了 HTML 错误页（可能在维护或被风控），请稍后重试。"
+
+        # 3) 401/403 + 非 HTML：给统一友好文案
+        if code in (401, 403):
+            return (
+                f"账号 OAuth 凭据失效或权限不足（HTTP {code}）。"
+                "请到 OAuth 页面重新授权该账号。"
+            )
+
+        # 4) 兜底：只透传状态码，不再带上游 body
+        return f"API 错误 {code}"
+
     # ── Public API ──────────────────────────────────────────
 
     def check_status(self) -> Tuple[str, str]:
@@ -101,7 +155,7 @@ class GraphClient:
             return "异常", "网络错误"
         if resp.status_code == 200:
             return "正常", "Token 有效"
-        return "异常", f"API 错误: {resp.status_code}"
+        return "异常", self._summarize_upstream_error(resp)
 
     def fetch_emails(
         self, folder: str = "inbox", limit: int = 50, with_body: bool = False,
@@ -175,7 +229,14 @@ class GraphClient:
         if resp is None:
             return [], "网络错误"
         if resp.status_code != 200:
-            return [], f"API 错误: {resp.status_code} - {resp.text[:200]}"
+            # 注意：日志里仍记完整状态码 + 前 300 字 body 便于运维取证；返回给
+            # 上层 / 前端的 message 经过 _summarize_upstream_error 净化，避免把
+            # 上游 HTML 登录页原样透传到浏览器（既丑又泄露指纹）。
+            logger.warning(
+                "Graph fetch_emails 失败 status=%d body=%s",
+                resp.status_code, (resp.text or "")[:300],
+            )
+            return [], self._summarize_upstream_error(resp)
 
         emails: list[dict] = []
         for m in resp.json().get("value", []):
@@ -276,9 +337,9 @@ class GraphClient:
         if resp.status_code != 200:
             logger.warning(
                 "Graph get_email_body 失败 status=%d body=%s",
-                resp.status_code, resp.text[:300],
+                resp.status_code, (resp.text or "")[:300],
             )
-            return None, "", "", f"API 错误: {resp.status_code} - {resp.text[:200]}"
+            return None, "", "", self._summarize_upstream_error(resp)
 
         m = resp.json()
         body_obj = m.get(body_key) or {}

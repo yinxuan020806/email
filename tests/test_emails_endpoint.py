@@ -261,6 +261,230 @@ def test_quick_check_with_aws_treats_empty_inbox_as_normal():
     assert has_aws is False
 
 
+# ── 上游 401/HTML 登录页：错误信息必须被净化 ───────────────────────
+
+
+def test_graph_fetch_emails_does_not_leak_html_login_page_on_401():
+    """OAuth 凭据失效时 Microsoft 会返回 HTML 登录页。msg 必须不含 ``<html>``
+    / ``<!DOCTYPE`` 等原始 HTML，且应给出"重新授权"提示。
+    """
+    from unittest.mock import MagicMock, patch
+
+    c = _stub_graph_client()
+    html_login = (
+        "<!DOCTYPE html>\n<!--[if lt IE 7]> <html class=\"no-js ie6 oldie\""
+        " lang=\"en-US\"> <![endif]-->\n<title>Sign in to your account</title>"
+        "<body>...</body></html>"
+    )
+    resp_401 = MagicMock()
+    resp_401.status_code = 401
+    resp_401.headers = {}
+    resp_401.text = html_login
+    resp_401.json.side_effect = ValueError("not json")
+
+    with patch.object(c, "_req", return_value=resp_401):
+        emails, msg = c.fetch_emails("inbox", limit=30)
+
+    assert emails == []
+    # 关键：msg 里不能有 HTML 片段；应该出现"凭据失效 / 重新授权"提示
+    assert "<!DOCTYPE" not in msg
+    assert "<html" not in msg
+    assert "<title" not in msg
+    assert ("OAuth" in msg or "凭据" in msg or "重新授权" in msg)
+
+
+def test_graph_get_email_body_does_not_leak_html_login_page_on_401():
+    """点开单封邮件遇到 401 + HTML 时同样不能泄露 HTML 给前端。"""
+    from unittest.mock import MagicMock, patch
+
+    c = _stub_graph_client()
+    html_login = "<!DOCTYPE html><html><body>login</body></html>"
+    resp_401 = MagicMock()
+    resp_401.status_code = 401
+    resp_401.headers = {}
+    resp_401.text = html_login
+    resp_401.json.side_effect = ValueError("not json")
+
+    with patch.object(c, "_req", return_value=resp_401):
+        body, body_type, mid, msg = c.get_email_body("graph-id-x")
+
+    assert body is None
+    assert "<!DOCTYPE" not in msg
+    assert "<html" not in msg
+
+
+def test_graph_check_status_does_not_leak_html_login_page():
+    """check_status 在 401/HTML 时也走净化路径（避免账号"状态"列泄露 HTML）。"""
+    from unittest.mock import MagicMock, patch
+
+    c = _stub_graph_client()
+    resp_401 = MagicMock()
+    resp_401.status_code = 401
+    resp_401.headers = {}
+    resp_401.text = "<!DOCTYPE html><html><body>login</body></html>"
+    resp_401.json.side_effect = ValueError("not json")
+
+    with patch.object(c, "_req", return_value=resp_401):
+        status_str, msg = c.check_status()
+    assert status_str == "异常"
+    assert "<!DOCTYPE" not in msg
+    assert "<html" not in msg
+
+
+def test_emails_endpoint_does_not_leak_html_to_client(client):
+    """端到端：fetch_emails 返回的 msg 即使含 ``<html>`` 残片，HTTPException
+    detail 也要被净化（防御纵深第二层），保证浏览器看不到 HTML 标签字符。
+    """
+    aid = _import_acc(client)
+    leaked = "API 错误 401: <!DOCTYPE html><html><body>login</body></html>"
+    with patch(
+        "core.email_client.EmailClient.fetch_emails", return_value=([], leaked),
+    ):
+        r = client.get(f"/api/accounts/{aid}/emails?folder=inbox")
+    assert r.status_code == 502
+    detail = r.json().get("detail", "")
+    # 关键：浏览器能看到的字符里不该有 HTML 标签
+    assert "<" not in detail
+    assert ">" not in detail
+    assert "DOCTYPE" not in detail or "html" not in detail.lower()
+
+
+# ── 邮件列表 5s 进程级缓存：把"刷次数"和"上游调用次数"解耦 ────────
+
+
+def test_emails_list_uses_short_term_cache(client, monkeypatch):
+    """连续两次刷新同账号同文件夹，第二次应命中后端 5s 缓存，
+    fetch_emails 只被调一次（防止用户连点把上游撞穿）。
+    """
+    import web_app
+    monkeypatch.setattr(web_app, "_EMAIL_LIST_CACHE_TTL", 5.0)
+    web_app._email_list_cache.clear()
+
+    aid = _import_acc(client)
+    fake = ([
+        {"uid": "1", "subject": "T", "sender": "x", "sender_email": "x@y",
+         "date": None, "body": "<p>hi</p>", "body_type": "html",
+         "preview": "hi", "is_read": False, "has_attachments": False},
+    ], "获取成功")
+    with patch(
+        "core.email_client.EmailClient.fetch_emails", return_value=fake,
+    ) as spy:
+        r1 = client.get(f"/api/accounts/{aid}/emails?folder=inbox")
+        r2 = client.get(f"/api/accounts/{aid}/emails?folder=inbox")
+        r3 = client.get(f"/api/accounts/{aid}/emails?folder=inbox")
+    assert r1.status_code == r2.status_code == r3.status_code == 200
+    assert spy.call_count == 1, (
+        f"3 次刷新只应命中 1 次上游 fetch_emails，实际 {spy.call_count} 次"
+    )
+    # 命中缓存的响应有 cached: True 标记
+    assert r2.json().get("cached") is True
+    assert r3.json().get("cached") is True
+
+
+def test_emails_list_cache_keyed_by_account(client, monkeypatch):
+    """换账号 / 换文件夹必须各自独立缓存，不能让 A 的列表污染 B。"""
+    import web_app
+    monkeypatch.setattr(web_app, "_EMAIL_LIST_CACHE_TTL", 5.0)
+    web_app._email_list_cache.clear()
+
+    a1 = _import_acc(client, email="a1@gmail.com")
+    a2 = _import_acc(client, email="a2@gmail.com")
+    fake = ([
+        {"uid": "1", "subject": "T", "sender": "x", "sender_email": "x@y",
+         "date": None, "body": "", "body_type": "text",
+         "preview": "", "is_read": False, "has_attachments": False},
+    ], "获取成功")
+    with patch(
+        "core.email_client.EmailClient.fetch_emails", return_value=fake,
+    ) as spy:
+        client.get(f"/api/accounts/{a1}/emails?folder=inbox")
+        client.get(f"/api/accounts/{a2}/emails?folder=inbox")
+        client.get(f"/api/accounts/{a1}/emails?folder=junk")
+    # 三个不同 (account_id, folder) 组合 → 三次都打上游
+    assert spy.call_count == 3
+
+
+def test_emails_list_cache_failure_not_stored(client, monkeypatch):
+    """上游错误不能进缓存——否则一次失败把 5 秒窗口都钉死成"加载失败"，
+    用户体验比没缓存更差。
+    """
+    import web_app
+    monkeypatch.setattr(web_app, "_EMAIL_LIST_CACHE_TTL", 5.0)
+    web_app._email_list_cache.clear()
+
+    aid = _import_acc(client)
+    # 第一次 → 上游失败（429）
+    # 第二次 → 上游恢复
+    side = [
+        ([], "API 错误: 429"),
+        ([
+            {"uid": "1", "subject": "T", "sender": "x", "sender_email": "x@y",
+             "date": None, "body": "", "body_type": "text",
+             "preview": "", "is_read": False, "has_attachments": False},
+        ], "获取成功"),
+    ]
+    with patch(
+        "core.email_client.EmailClient.fetch_emails", side_effect=side,
+    ):
+        r1 = client.get(f"/api/accounts/{aid}/emails?folder=inbox")
+        r2 = client.get(f"/api/accounts/{aid}/emails?folder=inbox")
+    assert r1.status_code == 429   # 失败透传
+    assert r2.status_code == 200   # 失败没进缓存，第二次重新打上游
+    assert r2.json().get("cached") is None or r2.json().get("cached") is False
+
+
+def test_emails_list_cache_invalidated_on_delete(client, monkeypatch):
+    """删邮件后缓存必须失效——否则用户删了之后下次刷新还能看到那封。"""
+    import web_app
+    monkeypatch.setattr(web_app, "_EMAIL_LIST_CACHE_TTL", 5.0)
+    web_app._email_list_cache.clear()
+
+    aid = _import_acc(client)
+    fake = ([
+        {"uid": "abc", "subject": "T", "sender": "x", "sender_email": "x@y",
+         "date": None, "body": "", "body_type": "text",
+         "preview": "", "is_read": False, "has_attachments": False},
+    ], "获取成功")
+    with patch(
+        "core.email_client.EmailClient.fetch_emails", return_value=fake,
+    ) as fetch_spy, patch(
+        "core.email_client.EmailClient.delete_email", return_value=(True, "删除成功"),
+    ):
+        client.get(f"/api/accounts/{aid}/emails?folder=inbox")
+        client.post(
+            f"/api/accounts/{aid}/emails/delete",
+            json={"email_id": "abc", "folder": "inbox"},
+        )
+        client.get(f"/api/accounts/{aid}/emails?folder=inbox")
+    assert fetch_spy.call_count == 2, (
+        "删除后下次 GET emails 必须重新打上游，否则用户看到已删邮件"
+    )
+
+
+def test_app_js_refresh_button_throttle_present(client):
+    """前端"刷新"按钮要有 disable 防连点机制。"""
+    body = client.get("/static/app.js").text
+    # disable 1.5s 防连点
+    assert "btn.disabled = true" in body
+    # 与 EMAIL_LIST_MIN_INTERVAL_MS 对齐
+    assert "EMAIL_LIST_MIN_INTERVAL_MS = 1500" in body, (
+        "loadEmails 节流间隔应升到 1500ms（与后端缓存层级匹配）"
+    )
+
+
+def test_app_js_sanitizes_upstream_msg_in_loadEmails(client):
+    """前端 loadEmails 必须有 _sanitizeUpstreamMsg 第三层兜底，确保 HTML
+    不会出现在错误条文本里。"""
+    body = client.get("/static/app.js").text
+    assert "_sanitizeUpstreamMsg" in body, (
+        "loadEmails 缺少 _sanitizeUpstreamMsg 兜底，HTML 上游泄漏时还会被原样渲染"
+    )
+    # 反例守护：旧的"未净化直接渲染"不能再回归
+    assert "String(err.message).slice(0, 200)" not in body, (
+        "loadEmails 不能再直接 slice err.message —— 要经 _sanitizeUpstreamMsg"
+    )
+
+
 def test_check_single_endpoint_uses_merged_path(client):
     """``POST /api/accounts/{id}/check`` 不再调用旧的 ``check_status`` +
     ``check_aws_verification_emails`` 两次接口；只走 ``quick_check_with_aws``。

@@ -984,10 +984,16 @@ function viewEmails(accountId) {
 S._emailListReqId = 0;
 // 上一次成功发出请求的时间戳，用于"前端节流"——避免用户连点刷新按钮把
 // Microsoft Graph per-mailbox 限流（每分钟几十次就开始 429）撞穿，从而出现
-// "刷几次后变暂无数据"的伪限流体验。500ms 是对单用户操作不可感、对脚本误
-// 触发又有效的折中。
+// "刷几次后变暂无数据"的伪限流体验。
+//
+// 1500ms 取舍：
+// - 与后端进程级 5s 邮件列表缓存形成两层节流：前端先压成至多 ~每 1.5s 一次
+//   请求，命中后端缓存就完全不打 Graph
+// - 用户日常操作不可感（连点 5 次≈合并成 1-2 次落地）
+// - 即使后端缓存被旁路 / 失效，1.5s 间隔也远低于 Microsoft per-mailbox 的
+//   滚动限速门槛
 S._emailListLastFetchTs = 0;
-const EMAIL_LIST_MIN_INTERVAL_MS = 500;
+const EMAIL_LIST_MIN_INTERVAL_MS = 1500;
 
 async function loadEmails() {
   if (!S.emailAccount) return;
@@ -1042,7 +1048,7 @@ async function loadEmails() {
   } catch (err) {
     if (myReqId !== S._emailListReqId) return;
     clear(list);
-    const detail = (err && err.message) ? String(err.message).slice(0, 200) : '';
+    const detail = _sanitizeUpstreamMsg((err && err.message) || '');
     list.appendChild(el('div', {
       class: 'empty-state',
       style: 'color:var(--danger);white-space:pre-wrap;line-height:1.5',
@@ -1057,6 +1063,21 @@ function _isEmailListUpstreamError(msg) {
   if (!msg) return false;
   const m = String(msg).toLowerCase();
   return /(429|503|502|throttl|too many|限流|错误|失败|err|oauth|invalid|unauth)/i.test(m);
+}
+
+// 把上游可能漏出来的 HTML 片段 / 长 body 净化成短文案：
+// - 后端 GraphClient / web_app.get_emails 已分别做了一层净化；这是第三层兜底
+// - 一旦未来后端回退或新走 IMAP 等路径直接把 HTML 塞进 message，前端也不会
+//   把 <!DOCTYPE html> ... 之类的字符渲染到列表（截图里出现过的现象）
+function _sanitizeUpstreamMsg(msg) {
+  if (!msg) return '';
+  let s = String(msg);
+  // 剥 HTML 标签 + < / > 字符；条件注释 <!--[if ...]--> 也被吞掉
+  s = s.replace(/<!--[\s\S]*?-->/g, ' ').replace(/<[^>]{0,200}>/g, ' ');
+  s = s.replace(/[<>]/g, ' ');
+  s = s.replace(/\s+/g, ' ').trim();
+  if (s.length > 160) s = s.slice(0, 160) + '...';
+  return s;
 }
 
 function filterEmailList() {
@@ -1730,7 +1751,15 @@ $('btnUnsetPublic').addEventListener('click', () => batchSetPublic(false));
 $('btnDelete').addEventListener('click', deleteSelected);
 $('btnImportClipboard').addEventListener('click', importFromClipboard);
 $('btnDoImport').addEventListener('click', doImport);
-$('btnRefreshEmails').addEventListener('click', loadEmails);
+$('btnRefreshEmails').addEventListener('click', () => {
+  // UI 兜底：点击瞬间禁用 1.5s，与 EMAIL_LIST_MIN_INTERVAL_MS 对齐。
+  // 即使浏览器扩展 / 用户疯狂点击，DOM 层也只能每 1.5s 触发一次 loadEmails。
+  const btn = $('btnRefreshEmails');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  setTimeout(() => { btn.disabled = false; }, EMAIL_LIST_MIN_INTERVAL_MS);
+  loadEmails();
+});
 $('emailFolder').addEventListener('change', loadEmails);
 $('emailSearch').addEventListener('input', filterEmailList);
 $('btnCompose').addEventListener('click', () => showCompose());
