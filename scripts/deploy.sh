@@ -127,22 +127,16 @@ else
         warn "$APP_DIR 不是 git 仓库，跳过 git pull（请按 docs/deploy-tencent-baota.md 配置 git remote）"
     fi
 
-    # ── 2c. 写 .env：把 APP_VERSION=git short SHA 注入给 docker compose ──
-    # docker-compose.yml 里 environment 段用 ${APP_VERSION:-dev}，docker compose
-    # 启动时会自动从同目录的 .env 文件读取变量。前端通过 /api/config /
-    # /api/health 读到这个值显示在右下角"版本号"，方便快速确认部署是否生效。
-    if [[ -d .git ]]; then
-        APP_VERSION=$(git rev-parse --short=8 HEAD 2>/dev/null || echo "dev")
-    else
-        APP_VERSION="dev"
-    fi
-    info "写入 .env: APP_VERSION=$APP_VERSION"
-    # 移除旧的 APP_VERSION 行后追加新的，避免重复
-    if [[ -f .env ]]; then
+    # ── 2c. 清理旧的 APP_VERSION 行 ──
+    # 历史版本曾把 git short SHA 注入到 .env，让前端右下角显示成 git hash。
+    # 现已改为「``core/version.py::__version__`` 语义化常量」由代码自管，
+    # docker-compose.yml 也改成 ``${APP_VERSION:-}`` 空 fallback，让代码常量
+    # 胜出。这里把旧 .env 里残留的 APP_VERSION 行清掉，避免覆盖代码版本号。
+    if [[ -f .env ]] && grep -q '^APP_VERSION=' .env; then
+        info "清理 .env 中残留的 APP_VERSION 行（让代码版本常量生效）"
         grep -v '^APP_VERSION=' .env > .env.tmp.$$ || true
         mv .env.tmp.$$ .env
     fi
-    echo "APP_VERSION=$APP_VERSION" >> .env
 
     # ── 3. 修复 data/ 目录权限（容器以 uid=10001 运行） ─
     if [[ -d data ]]; then

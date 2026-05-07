@@ -31,7 +31,6 @@ import threading
 import time
 import urllib.parse
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import List, Optional
 
 import anyio
@@ -950,13 +949,10 @@ async def spa_routes() -> Response:
     return _serve_index()
 
 
-# 版本号解析顺序：环境变量 APP_VERSION > git rev-parse --short=8 HEAD > "dev"
-# 本地源码运行时自动读 git，避免显示成 ``vdev`` 这种"开发占位符"看起来像 bug。
-# Docker 容器内没有 .git 目录，会回退到环境变量（由 deploy.sh 写 .env 注入）。
+# 版本号解析顺序：环境变量 APP_VERSION > core.version.__version__ 常量 > "dev"
+# 默认走代码常量 ``__version__``，发版时只需改 ``core/version.py`` 顶部那一行。
 from core.version import resolve_app_version  # noqa: E402,WPS433
-_APP_VERSION = resolve_app_version(
-    repo_root=Path(__file__).resolve().parent,
-)
+_APP_VERSION = resolve_app_version()
 
 
 @app.get("/api/health")
