@@ -306,6 +306,24 @@ class DatabaseManager:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action)")
 
+            # 账号列表 ETag 用的"按 owner 自增 revision"。
+            #
+            # 任何写 accounts 表的操作（add / delete / update_*）都会让对应
+            # owner 的 rev += 1，让 /api/accounts 端点能算出与本次响应数据
+            # 强一致的 ETag —— 数据未变 → ETag 未变 → 浏览器重复请求时 304
+            # 直接返回，不走 SQL + 解密 + 序列化整条链路。
+            #
+            # 持久化在 DB 而非内存：进程重启后 rev 不重置，老客户端的 etag
+            # 仍可能命中（避免重启后所有客户端被迫全量重拉）。
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS account_revisions (
+                    owner_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    rev INTEGER NOT NULL DEFAULT 1
+                )
+                """
+            )
+
             # v4 → v5 增量：在线给已有 accounts 表补列（幂等）
             existing_cols = {
                 row[1] for row in cur.execute("PRAGMA table_info(accounts)").fetchall()
@@ -431,6 +449,12 @@ class DatabaseManager:
                         "v7 让『加入接码』按钮的语义彻底兑现：开放 = 允许所有分类。",
                         fixed_v7,
                     )
+
+            # 任意一次升级跑了数据迁移（accounts 实际被 UPDATE 过），都把所有
+            # owner 的 ETag 版本号 +1，强制下一次 /api/accounts 全量重拉。
+            # 否则旧客户端可能凭重启前缓存的 etag 命中 304，看不到迁移后的内容。
+            if current_version != 0 and current_version < SCHEMA_VERSION:
+                cur.execute("UPDATE account_revisions SET rev = rev + 1")
 
             cur.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -716,6 +740,7 @@ class DatabaseManager:
                         account_type,
                     ),
                 )
+                self._bump_account_rev_in_conn(conn, owner_id)
             return True, "添加成功"
         except sqlite3.IntegrityError:
             return False, "邮箱已存在"
@@ -864,7 +889,10 @@ class DatabaseManager:
                 """,
                 (client_id, box.encrypt(refresh_token), account_id, owner_id),
             )
-            return cur.rowcount > 0
+            ok = cur.rowcount > 0
+            if ok:
+                self._bump_account_rev_in_conn(conn, owner_id)
+            return ok
 
     def update_account_status(
         self, owner_id: int, account_id: int, status: str
@@ -875,7 +903,10 @@ class DatabaseManager:
                 "UPDATE accounts SET status = ?, last_check = ? WHERE id = ? AND owner_id = ?",
                 (status, now_iso, account_id, owner_id),
             )
-            return cur.rowcount > 0
+            ok = cur.rowcount > 0
+            if ok:
+                self._bump_account_rev_in_conn(conn, owner_id)
+            return ok
 
     def delete_account(self, owner_id: int, account_id: int) -> bool:
         with self._connect() as conn:
@@ -883,7 +914,10 @@ class DatabaseManager:
                 "DELETE FROM accounts WHERE id = ? AND owner_id = ?",
                 (account_id, owner_id),
             )
-            return cur.rowcount > 0
+            ok = cur.rowcount > 0
+            if ok:
+                self._bump_account_rev_in_conn(conn, owner_id)
+            return ok
 
     def delete_accounts(self, owner_id: int, account_ids: list[int]) -> int:
         """批量删除（仅限当前用户名下的账号），返回真实删除行数。"""
@@ -895,7 +929,10 @@ class DatabaseManager:
                 f"DELETE FROM accounts WHERE owner_id = ? AND id IN ({placeholders})",
                 (owner_id, *account_ids),
             )
-            return cur.rowcount
+            n = cur.rowcount
+            if n > 0:
+                self._bump_account_rev_in_conn(conn, owner_id)
+            return n
 
     def update_account_group(
         self, owner_id: int, account_id: int, group_name: str
@@ -910,7 +947,10 @@ class DatabaseManager:
                 "UPDATE accounts SET group_name = ? WHERE id = ? AND owner_id = ?",
                 (group_name, account_id, owner_id),
             )
-            return cur.rowcount > 0
+            ok = cur.rowcount > 0
+            if ok:
+                self._bump_account_rev_in_conn(conn, owner_id)
+            return ok
 
     def update_account_remark(
         self, owner_id: int, account_id: int, remark: str
@@ -920,7 +960,10 @@ class DatabaseManager:
                 "UPDATE accounts SET remark = ? WHERE id = ? AND owner_id = ?",
                 (remark, account_id, owner_id),
             )
-            return cur.rowcount > 0
+            ok = cur.rowcount > 0
+            if ok:
+                self._bump_account_rev_in_conn(conn, owner_id)
+            return ok
 
     def update_aws_code_status(
         self, owner_id: int, account_id: int, has_code: bool
@@ -930,7 +973,10 @@ class DatabaseManager:
                 "UPDATE accounts SET has_aws_code = ? WHERE id = ? AND owner_id = ?",
                 (1 if has_code else 0, account_id, owner_id),
             )
-            return cur.rowcount > 0
+            ok = cur.rowcount > 0
+            if ok:
+                self._bump_account_rev_in_conn(conn, owner_id)
+            return ok
 
     def get_account_count(self, owner_id: int) -> int:
         with self._connect() as conn:
@@ -993,6 +1039,50 @@ class DatabaseManager:
                 statuses[status or "未检测"] = int(cnt)
         return {"total": total, "groups": groups, "statuses": statuses}
 
+    # ── 账号列表 revision（ETag 用）───────────────────────────────
+
+    def get_account_rev(self, owner_id: int) -> int:
+        """读取当前 owner 的账号列表 revision。
+
+        - 不存在记录时返回 0（ETag 算出的字符串仍是确定值，客户端首次
+          带空 If-None-Match 不会命中，正常返回完整数据）
+        - 该值仅在 add / update / delete 任一账号写操作后变化
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT rev FROM account_revisions WHERE owner_id = ?",
+                (owner_id,),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    @staticmethod
+    def _bump_account_rev_in_conn(
+        conn: sqlite3.Connection, owner_id: int
+    ) -> None:
+        """在已有连接 / 事务内把 owner 的 rev += 1（不存在则插入 rev=1）。
+
+        所有写 accounts 表的方法**必须**在自己 ``_connect`` 上下文里调用
+        此方法，与业务写共用同一事务。这样的原子性保证：
+        - 业务写成功 ⟺ rev 跳变成功（要么都生效，要么都回滚）
+        - 排除"账号已变但 rev 未跳"导致 ETag 误命中、客户端拿陈旧数据的
+          边界 race
+        """
+        conn.execute(
+            "INSERT INTO account_revisions (owner_id, rev) VALUES (?, 1) "
+            "ON CONFLICT(owner_id) DO UPDATE SET rev = rev + 1",
+            (owner_id,),
+        )
+
+    def bump_account_rev(self, owner_id: int) -> int:
+        """对外 / 单元测试用：独立连接版本的 bump。
+
+        正常业务路径都应走 ``_bump_account_rev_in_conn`` 与写操作合并；
+        这个公共方法只在测试 / 极端运维（手动让客户端缓存失效）时使用。
+        """
+        with self._connect() as conn:
+            self._bump_account_rev_in_conn(conn, owner_id)
+        return self.get_account_rev(owner_id)
+
     # ── Group CRUD ────────────────────────────────────────────────
 
     def get_all_groups(self, owner_id: int) -> List[tuple]:
@@ -1035,10 +1125,12 @@ class DatabaseManager:
             )
             if cur.rowcount == 0:
                 return False
-            conn.execute(
+            cur2 = conn.execute(
                 "UPDATE accounts SET group_name = '默认分组' WHERE owner_id = ? AND group_name = ?",
                 (owner_id, name),
             )
+            if cur2.rowcount > 0:
+                self._bump_account_rev_in_conn(conn, owner_id)
             return True
 
     def rename_group(self, owner_id: int, old_name: str, new_name: str) -> bool:
@@ -1055,10 +1147,12 @@ class DatabaseManager:
                 )
                 if cur.rowcount == 0:
                     return False
-                conn.execute(
+                cur2 = conn.execute(
                     "UPDATE accounts SET group_name = ? WHERE owner_id = ? AND group_name = ?",
                     (new_name, owner_id, old_name),
                 )
+                if cur2.rowcount > 0:
+                    self._bump_account_rev_in_conn(conn, owner_id)
             return True
         except sqlite3.IntegrityError:
             return False
@@ -1127,7 +1221,10 @@ class DatabaseManager:
                 "WHERE id = ? AND owner_id = ?",
                 (1 if is_public else 0, cats_str, account_id, owner_id),
             )
-            return cur.rowcount > 0
+            ok = cur.rowcount > 0
+            if ok:
+                self._bump_account_rev_in_conn(conn, owner_id)
+            return ok
 
     def get_public_account_for_lookup(
         self, owner_username: str, email: str, category: str

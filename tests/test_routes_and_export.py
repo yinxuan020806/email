@@ -182,7 +182,10 @@ def test_export_then_reimport_round_trip(client):
     accs = {a["email"]: a for a in client.get("/api/accounts").json()}
     assert accs["u1@outlook.com"]["group"] == "GroupA"
     assert accs["u1@outlook.com"]["client_id"] == "abc-uuid"
-    assert accs["u1@outlook.com"]["refresh_token"] == "M.C123-rt"
+    # 列表接口已不再返回 refresh_token（按需走单条 GET 减少 JSON 体积/明文驻留）
+    assert "refresh_token" not in accs["u1@outlook.com"]
+    full_u1 = client.get(f"/api/accounts/{accs['u1@outlook.com']['id']}").json()
+    assert full_u1["refresh_token"] == "M.C123-rt"
     assert accs["u1@outlook.com"]["password"] == "pw1"
     assert accs["u1@outlook.com"]["type"] == "OAuth2"
     assert accs["u2@outlook.com"]["group"] == "GroupB"

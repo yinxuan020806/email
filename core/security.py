@@ -14,6 +14,8 @@ import base64
 import logging
 import os
 import stat
+import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 
@@ -50,10 +52,29 @@ class SecretBox:
 
     _instance: Optional["SecretBox"] = None
 
+    # 解密热路径缓存：列表接口每次会对全表 ~N×2 个密文做 Fernet 解密
+    # （N=256 ≈ 11ms，N=1000 ≈ 45ms）。同一密文 → 同一明文是确定性的，
+    # 加 LRU 后第二次起命中缓存直接 dict 查表（~0.5μs / 次），把
+    # /api/accounts 后端耗时从 ~14ms 压到 ~3ms 量级。
+    #
+    # 使用 OrderedDict 实现 bounded LRU，而不是 functools.lru_cache：
+    # - functools.lru_cache 装在实例方法上会把 self 一并 hash，单例下没问题
+    #   但容易让人误以为是"每实例一份"，多 SecretBox 实例（测试）相互污染
+    # - OrderedDict 在实例上保持作用域清晰，单元测试 _instance=None 后不会
+    #   留泄漏
+    # - 容量 4096 足以容纳几千账号 × 2 字段 × 多用户共享密文的场景，
+    #   命中率高的同时绝不让明文无界堆积在内存里
+    _DECRYPT_CACHE_MAX = 4096
+
     def __init__(self, key_path: Path) -> None:
         self.key_path = key_path
         self._key = self._load_or_create_key()
         self._fernet = Fernet(self._key)
+        self._decrypt_cache: "OrderedDict[str, str]" = OrderedDict()
+        # 多线程并发请求会同时读写 _decrypt_cache；OrderedDict.move_to_end /
+        # popitem 不是原子的，必须加锁避免 RuntimeError: dict changed during
+        # iteration / 计数错乱
+        self._cache_lock = threading.Lock()
 
     # ── 公共 API ────────────────────────────────────────────────────
 
@@ -86,14 +107,25 @@ class SecretBox:
         旧版把第三种情况吞成 ``""`` 静默继续，是数据完整性陷阱（见
         ``SecretBoxDecryptError`` 的 docstring）。新版强制让调用方显式决策：
         要么放行（标记字段失效 + 记 error 日志），要么向上抛错让请求 500。
+
+        性能：对带前缀的密文走 LRU 缓存（cache key = 完整密文串）。
+        master.key 在进程生命周期内不变，因此密文→明文是确定性的；
+        缓存命中时跳过 Fernet 校验 + AES 解码，~0.5μs vs ~50μs。
         """
         if value is None or value == "":
             return value
         if not self._is_ciphertext(value):
             return value
+
+        with self._cache_lock:
+            cached = self._decrypt_cache.get(value)
+            if cached is not None:
+                self._decrypt_cache.move_to_end(value)
+                return cached
+
         try:
             raw = value[len(_TOKEN_PREFIX):]
-            return self._fernet.decrypt(raw.encode("ascii")).decode("utf-8")
+            plaintext = self._fernet.decrypt(raw.encode("ascii")).decode("utf-8")
         except InvalidToken as exc:
             logger.error(
                 "Fernet 解密失败：密文带前缀但校验不通过，可能是 master.key 被"
@@ -103,6 +135,25 @@ class SecretBox:
             raise SecretBoxDecryptError(
                 "密文解密失败：密钥不匹配或密文已损坏"
             ) from exc
+
+        with self._cache_lock:
+            # 双检：另一个线程可能已经填进来了，此处覆盖等价
+            self._decrypt_cache[value] = plaintext
+            self._decrypt_cache.move_to_end(value)
+            while len(self._decrypt_cache) > self._DECRYPT_CACHE_MAX:
+                self._decrypt_cache.popitem(last=False)
+        return plaintext
+
+    def invalidate_decrypt_cache(self) -> None:
+        """显式清空解密缓存。
+
+        正常业务路径不需要调用 —— master.key 在进程生命周期内不变，
+        密文→明文映射就是确定的。提供这个方法主要给：
+        - 单元测试切换 SecretBox 实例时清场
+        - 极端运维场景下手动 reset
+        """
+        with self._cache_lock:
+            self._decrypt_cache.clear()
 
     @staticmethod
     def _is_ciphertext(value: str) -> bool:

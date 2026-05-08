@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -664,9 +665,17 @@ class OAuth2ExchangeRequest(BaseModel):
 # ── Helpers ─────────────────────────────────────────────────────
 
 
-def account_to_dict(acc: Account) -> dict:
-    """Account → 给前端的 dict（含密码，仅在本地受信任环境下使用）。"""
-    return {
+def account_to_dict(acc: Account, *, include_refresh_token: bool = True) -> dict:
+    """Account → 给前端的 dict（含密码，仅在本地受信任环境下使用）。
+
+    ``include_refresh_token`` 默认 True 保持单条 GET / 详情页的旧行为不变。
+    列表接口（``list_accounts``）会显式传 False：
+    - refresh_token 平均 200~300 字节，是响应体最大头；移除后 256 账号
+      下 JSON 从 ~107KB 降到 ~50KB
+    - 列表不需要它（前端只在「复制完整 / 详情」时才用，那两个动作走单条
+      GET 现拉），少一次驻留浏览器内存的副本，安全性也好一点
+    """
+    base = {
         "id": acc.id,
         "email": acc.email,
         "password": acc.password,
@@ -678,12 +687,14 @@ def account_to_dict(acc: Account) -> dict:
         "smtp_server": acc.smtp_server,
         "smtp_port": acc.smtp_port,
         "client_id": acc.client_id,
-        "refresh_token": acc.refresh_token,
         "created_at": acc.created_at,
         "last_check": acc.last_check,
         "has_aws_code": bool(acc.has_aws_code),
         "remark": acc.remark,
     }
+    if include_refresh_token:
+        base["refresh_token"] = acc.refresh_token
+    return base
 
 
 def get_account_or_404(owner_id: int, account_id: int) -> Account:
@@ -1177,18 +1188,58 @@ def change_password(
 # ── Accounts ────────────────────────────────────────────────────
 
 
+def _accounts_etag(rev: int, group: Optional[str], sort_by: str, sort_order: str) -> str:
+    """根据 (rev, group, sort_by, sort_order) 生成弱 ETag。
+
+    - rev 在任意写 accounts 后 +1，从而账号数据变化必然让 ETag 变化
+    - group/sort_* 让"切换分组 / 切换排序"也得到不同 ETag（响应内容不同）
+    - W/ 弱 ETag：允许 gzip 等中间件做字节级别的等价变换而不影响命中
+    - blake2s 8 字节足以避免可预见的碰撞，比 sha256 更轻
+    """
+    raw = f"{rev}|{group or ''}|{sort_by}|{sort_order}"
+    h = hashlib.blake2s(raw.encode("utf-8"), digest_size=8).hexdigest()
+    return f'W/"{h}"'
+
+
 @app.get("/api/accounts")
 def list_accounts(
+    request: Request,
+    response: Response,
     group: Optional[str] = None,
     sort_by: str = "id",
     sort_order: str = "DESC",
     user: dict = CurrentUser,
 ) -> list[dict]:
+    """账号列表。
+
+    带 ETag 协商：当 ``If-None-Match`` 与当前 (rev, group, sort) 派生的
+    ETag 一致时直接返回 304，不走 SQL + 解密 + JSON 序列化的整条链路。
+    rev 由 ``DatabaseManager`` 在每次 add/update/delete 时原子 +1，
+    保证 ETag 与数据强一致。
+    """
+    rev = db.get_account_rev(user["id"])
+    etag = _accounts_etag(rev, group, sort_by, sort_order)
+    # private + must-revalidate：
+    # - private 让上游/CDN 不会跨用户共享缓存（账号数据是用户私有的）
+    # - must-revalidate 让浏览器即便保留了 200 响应体，下一次请求仍必须带
+    #   If-None-Match 来验证；命中 304 时浏览器透明地把缓存的响应给 fetch
+    cache_control = "private, must-revalidate"
+    if_none_match = request.headers.get("if-none-match", "")
+    if if_none_match and etag in {tag.strip() for tag in if_none_match.split(",")}:
+        # 304 必须保留 ETag + Cache-Control，让客户端把同一 etag 复用到下一次
+        return Response(
+            status_code=status.HTTP_304_NOT_MODIFIED,
+            headers={"ETag": etag, "Cache-Control": cache_control},
+        )
+
     if group and group != "全部":
         accs = db.get_accounts_by_group_sorted(user["id"], group, sort_by, sort_order)
     else:
         accs = db.get_all_accounts_sorted(user["id"], sort_by, sort_order)
-    return [account_to_dict(a) for a in accs]
+    response.headers["ETag"] = etag
+    response.headers["Cache-Control"] = cache_control
+    # 列表里 refresh_token 不返回，前端按需走 /api/accounts/{id} 拉
+    return [account_to_dict(a, include_refresh_token=False) for a in accs]
 
 
 # ⚠️ 注意：以下静态路径必须在 /{account_id} 之前声明，否则会被吞掉。
@@ -2077,7 +2128,9 @@ def list_audit_log(
 
 
 @app.get("/api/dashboard")
-def get_dashboard(user: dict = CurrentUser) -> dict:
+def get_dashboard(
+    request: Request, response: Response, user: dict = CurrentUser
+) -> dict:
     """仪表盘概览：总数 / 分组分布 / 状态分布。
 
     旧实现走 ``get_all_accounts`` 全表加载 + Fernet 解密 + Python 侧
@@ -2085,7 +2138,23 @@ def get_dashboard(user: dict = CurrentUser) -> dict:
     改走 ``get_dashboard_stats`` 的纯 SQL ``GROUP BY`` 后：
     - N=1000 账号：~50ms（含 Fernet）→ ~2ms（仅 SQL 聚合）
     - 减少 N 次 Fernet 解密的内存暴露面
+
+    带 ETag 协商：dashboard 数据完全由 accounts 表派生，与 ``account_rev``
+    强一致——加上 ETag 让 ``loadAccounts`` 之后的 fire-and-forget
+    ``loadCounts`` 在数据未变时直接 304，省一次完整聚合查询。
     """
+    rev = db.get_account_rev(user["id"])
+    raw = f"dash|{rev}"
+    etag = f'W/"{hashlib.blake2s(raw.encode("utf-8"), digest_size=8).hexdigest()}"'
+    cache_control = "private, must-revalidate"
+    if_none_match = request.headers.get("if-none-match", "")
+    if if_none_match and etag in {tag.strip() for tag in if_none_match.split(",")}:
+        return Response(
+            status_code=status.HTTP_304_NOT_MODIFIED,
+            headers={"ETag": etag, "Cache-Control": cache_control},
+        )
+    response.headers["ETag"] = etag
+    response.headers["Cache-Control"] = cache_control
     return db.get_dashboard_stats(user["id"])
 
 

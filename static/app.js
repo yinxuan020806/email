@@ -454,11 +454,20 @@ async function doDeleteGroup(name) {
 async function loadAccounts() {
   const url = '/api/accounts' + (S.currentGroup !== '全部'
     ? '?group=' + encodeURIComponent(S.currentGroup) : '');
-  S.accounts = await api.get(url);
+
+  // 账号列表 与 接码白名单 id 互不依赖，并行发请求把 RTT 压到 max(t1, t2)
+  // 而非 t1+t2。两者中任意一个失败也不影响主表渲染（loadPublicIds 已自带兜底）。
+  const [accs] = await Promise.all([
+    api.get(url),
+    loadPublicIds(),
+  ]);
+  S.accounts = accs;
   S.selected.clear();
-  $('selAll').checked = false;
-  // 站长才需要刷接码白名单 id；普通用户后端会返回空数组，但仍跳过省一次请求
-  await loadPublicIds();
+  const selAll = $('selAll');
+  if (selAll) {
+    selAll.checked = false;
+    selAll.indeterminate = false;
+  }
   renderAccounts();
   // 顺带刷新侧边栏计数（账号变更时数字会跟着动）
   loadCounts();
@@ -483,12 +492,133 @@ function filterAccounts() {
   renderAccounts();
 }
 
+/**
+ * 通用防抖 helper：延迟到最后一次调用之后 wait ms 才真正执行。
+ * 用在 input 事件上，避免每敲一下键盘都把 256 行表格重建一遍。
+ */
+function debounce(fn, wait) {
+  let h = null;
+  return function (...args) {
+    if (h !== null) clearTimeout(h);
+    h = setTimeout(() => {
+      h = null;
+      fn.apply(this, args);
+    }, wait);
+  };
+}
+
+// 120ms 是搜索框防抖的甜区：
+// - 比键盘最快的连击间隔（~80ms）略长，能合并连续输入
+// - 又比"用户停顿后再敲"的等待感（>200ms）短，看起来还是即时响应
+const filterAccountsDebounced = debounce(filterAccounts, 120);
+
 function filteredAccounts() {
   return S.searchText
     ? S.accounts.filter((a) =>
         (a.email || '').toLowerCase().includes(S.searchText) ||
         (a.remark || '').toLowerCase().includes(S.searchText))
     : S.accounts;
+}
+
+// 单行渲染抽离出来供 renderAccounts 批量调用。返回构造好的 <tr>，
+// 调用方负责插到 fragment / tbody 上。
+//
+// 与之前的"在 renderAccounts 闭包里写一大坨"相比：
+// - 单一职责，方便单行重建（删除/添加 1 行无需全表重渲染）
+// - 配合 DocumentFragment 批量插入，减少 256 次反复 reflow 为 1 次
+function buildAccountRow(a, index, isOwner) {
+  const tr = el('tr', {
+    class: S.selected.has(a.id) ? 'selected' : '',
+    dataset: { id: a.id },
+  });
+
+  const cb = el('input', { type: 'checkbox' });
+  cb.checked = S.selected.has(a.id);
+  cb.addEventListener('change', () => toggleSel(a.id, cb.checked));
+  tr.appendChild(el('td', {}, cb));
+  tr.appendChild(el('td', {}, String(index + 1)));
+
+  // 邮箱单击复制邮箱、双击复制 邮箱----密码；查看详情走操作列的"详情"按钮
+  let emailClickTimer = null;
+  const emailText = el('span', {
+    class: 'email-t',
+    title: t('email_click_hint', { email: a.email }),
+    onclick: () => {
+      clearTimeout(emailClickTimer);
+      emailClickTimer = setTimeout(() => {
+        copyText(a.email, 'toast_copied_email');
+      }, 220);
+    },
+    ondblclick: () => {
+      clearTimeout(emailClickTimer);
+      copyText(`${a.email}----${a.password || ''}`, 'toast_copied_email_pwd');
+    },
+  }, a.email);
+  tr.appendChild(el('td', {}, el('div', { class: 'email-cell' }, emailText)));
+
+  const pwdCell = el('div', { class: 'pwd-cell' });
+  const pwdSpan = el('span', { class: 'pwd-t' }, '••••••');
+  let shown = false;
+  pwdCell.appendChild(pwdSpan);
+  const showBtn = el('button', {
+    onclick: () => {
+      shown = !shown;
+      pwdSpan.textContent = shown ? a.password : '••••••';
+      showBtn.textContent = t(shown ? 'btn_hide' : 'btn_show');
+    }
+  }, t('btn_show'));
+  pwdCell.appendChild(showBtn);
+  pwdCell.appendChild(el('button', {
+    'aria-label': t('op_copy_pwd_aria'),
+    onclick: () => copyText(a.password)
+  }, t('btn_copy')));
+  tr.appendChild(el('td', {}, pwdCell));
+
+  tr.appendChild(el('td', {}, a.group || ''));
+
+  const statusCls = a.status === '正常' ? 'badge-ok' : a.status === '异常' ? 'badge-err' : 'badge-unk';
+  tr.appendChild(el('td', {}, el('span', { class: 'badge ' + statusCls }, a.status)));
+  tr.appendChild(el('td', {}, a.type || ''));
+  tr.appendChild(el('td', {}, a.has_aws_code
+    ? el('span', { style: 'color:var(--success)' }, t('d_yes')) : '-'));
+
+  // 接码列（仅站长可见，与表头 .col-public 一一对应）
+  if (isOwner) {
+    const isPub = S.publicIds.has(a.id);
+    const badge = el(
+      'span',
+      { class: isPub ? 'public-badge' : 'private-badge' },
+      isPub ? t('public_yes') : t('public_no'),
+    );
+    tr.appendChild(el('td', { class: 'col-public' }, badge));
+  }
+
+  const tdRemark = el('td', { title: a.remark || '', ondblclick: () => editRemark(a.id, a.remark || '') });
+  if (a.remark) tdRemark.textContent = a.remark;
+  else tdRemark.appendChild(el('span', { style: 'color:var(--text3);font-size:11px' }, t('remark_double_click')));
+  tr.appendChild(tdRemark);
+
+  const ops = el('div', { class: 'op-btns' });
+  ops.appendChild(el('button', {
+    title: t('op_copy_full_hint'),
+    'aria-label': t('op_copy_full_aria'),
+    onclick: async () => {
+      // 列表响应不带 refresh_token；OAuth2 账号在这里按需补齐再拼复制串。
+      // 普通账号无 client_id → ensureAccountRefreshToken 立即 return，
+      // 不会有任何额外 IO；UX 与之前一致。
+      await ensureAccountRefreshToken(a);
+      const { text, dirty } = buildAccountFullString(a);
+      copyText(text, 'toast_copied_full', {
+        warningKey: dirty ? 'toast_copied_field_sanitized' : null,
+      });
+    },
+  }, t('btn_copy')));
+  ops.appendChild(el('button', { onclick: () => viewEmails(a.id) }, t('btn_view')));
+  ops.appendChild(el('button', { onclick: () => showDetail(a.id) }, t('btn_detail')));
+  ops.appendChild(el('button', { class: 'danger', onclick: () => deleteSingle(a.id) }, t('btn_del')));
+  tr.appendChild(el('td', {}, ops));
+
+  return tr;
 }
 
 function renderAccounts() {
@@ -506,107 +636,77 @@ function renderAccounts() {
       colspan: colSpan,
       style: 'text-align:center;padding:40px;color:var(--text3)'
     }, t('empty'))));
+    syncSelAllCheckbox();
     return;
   }
 
-  list.forEach((a, i) => {
-    const tr = el('tr', { class: S.selected.has(a.id) ? 'selected' : '', dataset: { id: a.id } });
+  // DocumentFragment 把 N 次 appendChild 合并成 1 次 DOM 写入：
+  // - 浏览器只在最后 tb.appendChild(frag) 时做一次 reflow / paint
+  // - N=256 实测从 ~30ms 降到 ~5ms（与机器/CPU 强相关，但比例稳定）
+  // - 也减少了"渲染过程中触发 IntersectionObserver / mutation 监听"的边际成本
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < list.length; i++) {
+    frag.appendChild(buildAccountRow(list[i], i, isOwner));
+  }
+  tb.appendChild(frag);
+  syncSelAllCheckbox();
+}
 
-    const cb = el('input', { type: 'checkbox' });
-    cb.checked = S.selected.has(a.id);
-    cb.addEventListener('change', () => toggleSel(a.id, cb.checked));
-    tr.appendChild(el('td', {}, cb));
-    tr.appendChild(el('td', {}, String(i + 1)));
+/** 找到给定 id 的 <tr>。表格不大时直接 querySelector 足够快，无需建 id→tr 映射。 */
+function findAccountRow(id) {
+  return $('accBody').querySelector(`tr[data-id="${id}"]`);
+}
 
-    // 邮箱单击复制邮箱、双击复制 邮箱----密码；查看详情走操作列的"详情"按钮
-    let emailClickTimer = null;
-    const emailText = el('span', {
-      class: 'email-t',
-      title: t('email_click_hint', { email: a.email }),
-      onclick: () => {
-        clearTimeout(emailClickTimer);
-        emailClickTimer = setTimeout(() => {
-          copyText(a.email, 'toast_copied_email');
-        }, 220);
-      },
-      ondblclick: () => {
-        clearTimeout(emailClickTimer);
-        copyText(`${a.email}----${a.password || ''}`, 'toast_copied_email_pwd');
-      },
-    }, a.email);
-    tr.appendChild(el('td', {}, el('div', { class: 'email-cell' }, emailText)));
+/** 把单行的视觉态（class=selected + checkbox.checked）同步到 DOM。 */
+function applySelToRow(tr, sel) {
+  if (!tr) return;
+  if (sel) tr.classList.add('selected');
+  else tr.classList.remove('selected');
+  const cb = tr.querySelector('input[type="checkbox"]');
+  if (cb) cb.checked = sel;
+}
 
-    const pwdCell = el('div', { class: 'pwd-cell' });
-    const pwdSpan = el('span', { class: 'pwd-t' }, '••••••');
-    let shown = false;
-    pwdCell.appendChild(pwdSpan);
-    const showBtn = el('button', {
-      onclick: () => {
-        shown = !shown;
-        pwdSpan.textContent = shown ? a.password : '••••••';
-        showBtn.textContent = t(shown ? 'btn_hide' : 'btn_show');
-      }
-    }, t('btn_show'));
-    pwdCell.appendChild(showBtn);
-    pwdCell.appendChild(el('button', {
-      'aria-label': t('op_copy_pwd_aria'),
-      onclick: () => copyText(a.password)
-    }, t('btn_copy')));
-    tr.appendChild(el('td', {}, pwdCell));
-
-    tr.appendChild(el('td', {}, a.group || ''));
-
-    const statusCls = a.status === '正常' ? 'badge-ok' : a.status === '异常' ? 'badge-err' : 'badge-unk';
-    tr.appendChild(el('td', {}, el('span', { class: 'badge ' + statusCls }, a.status)));
-    tr.appendChild(el('td', {}, a.type || ''));
-    tr.appendChild(el('td', {}, a.has_aws_code
-      ? el('span', { style: 'color:var(--success)' }, t('d_yes')) : '-'));
-
-    // 接码列（仅站长可见，与表头 .col-public 一一对应）
-    if (isOwner) {
-      const isPub = S.publicIds.has(a.id);
-      const badge = el(
-        'span',
-        { class: isPub ? 'public-badge' : 'private-badge' },
-        isPub ? t('public_yes') : t('public_no'),
-      );
-      tr.appendChild(el('td', { class: 'col-public' }, badge));
-    }
-
-    const tdRemark = el('td', { title: a.remark || '', ondblclick: () => editRemark(a.id, a.remark || '') });
-    if (a.remark) tdRemark.textContent = a.remark;
-    else tdRemark.appendChild(el('span', { style: 'color:var(--text3);font-size:11px' }, t('remark_double_click')));
-    tr.appendChild(tdRemark);
-
-    const ops = el('div', { class: 'op-btns' });
-    ops.appendChild(el('button', {
-      title: t('op_copy_full_hint'),
-      'aria-label': t('op_copy_full_aria'),
-      onclick: () => {
-        const { text, dirty } = buildAccountFullString(a);
-        copyText(text, 'toast_copied_full', {
-          warningKey: dirty ? 'toast_copied_field_sanitized' : null,
-        });
-      },
-    }, t('btn_copy')));
-    ops.appendChild(el('button', { onclick: () => viewEmails(a.id) }, t('btn_view')));
-    ops.appendChild(el('button', { onclick: () => showDetail(a.id) }, t('btn_detail')));
-    ops.appendChild(el('button', { class: 'danger', onclick: () => deleteSingle(a.id) }, t('btn_del')));
-    tr.appendChild(el('td', {}, ops));
-
-    tb.appendChild(tr);
-  });
+/**
+ * 头部"全选"checkbox 的 indeterminate / checked 三态显示。
+ *
+ * - 当前可见行 0 条：全选不勾选、不半选
+ * - 全部可见行都已选：勾选
+ * - 部分可见行已选：indeterminate（半选）
+ *
+ * 这样行级更新（toggleSel）后头部 UI 不会出现"明明都勾完了还显示未勾"的错位。
+ */
+function syncSelAllCheckbox() {
+  const cb = $('selAll');
+  if (!cb) return;
+  const visible = filteredAccounts();
+  if (!visible.length) {
+    cb.checked = false;
+    cb.indeterminate = false;
+    return;
+  }
+  let selectedCnt = 0;
+  for (const a of visible) if (S.selected.has(a.id)) selectedCnt++;
+  cb.checked = selectedCnt === visible.length;
+  cb.indeterminate = selectedCnt > 0 && selectedCnt < visible.length;
 }
 
 function toggleSelAll(checked) {
-  if (checked) filteredAccounts().forEach((a) => S.selected.add(a.id));
-  else S.selected.clear();
-  renderAccounts();
+  const visible = filteredAccounts();
+  if (checked) visible.forEach((a) => S.selected.add(a.id));
+  else visible.forEach((a) => S.selected.delete(a.id));
+  // 增量更新当前可见的每一行视觉态，避免 256 行整体重建（仅 N 次轻量
+  // classList 切换 + checkbox.checked 赋值，不动其它 DOM）
+  for (const a of visible) {
+    applySelToRow(findAccountRow(a.id), S.selected.has(a.id));
+  }
+  syncSelAllCheckbox();
 }
 
 function toggleSel(id, checked) {
   if (checked) S.selected.add(id); else S.selected.delete(id);
-  renderAccounts();
+  // 单行级更新：只动这一行的 class/checkbox，不重建表格
+  applySelToRow(findAccountRow(id), checked);
+  syncSelAllCheckbox();
 }
 
 /**
@@ -702,6 +802,28 @@ function buildAccountFullString(a) {
     return c;
   });
   return { text: cleaned.join('----'), dirty };
+}
+
+/**
+ * 列表 /api/accounts 响应不再包含 refresh_token（节省体积、降低明文驻留）。
+ * 「复制完整」按钮和需要 refresh_token 的场景，调用此函数补齐：
+ * - 已经有 refresh_token / 不是 OAuth2 账号 → 直接返回原对象
+ * - 只有 client_id 缺 refresh_token → 走 /api/accounts/{id} 拉一次完整数据，
+ *   合并到列表里的对象（同 id 后续点击直接复用）
+ *
+ * 失败时返回原对象、不抛异常 —— 调用方拿到的就是"refresh_token 为空"的
+ * 半成品串，与旧版任一字段缺失的退化行为一致，UX 不会比之前更差。
+ */
+async function ensureAccountRefreshToken(a) {
+  if (!a) return a;
+  if (a.refresh_token || !a.client_id) return a;
+  try {
+    const full = await api.get(`/api/accounts/${a.id}`);
+    a.refresh_token = full.refresh_token || '';
+    return a;
+  } catch {
+    return a;
+  }
 }
 
 async function editRemark(id, oldVal) {
@@ -1096,6 +1218,10 @@ function renderEmailList() {
     list.appendChild(el('div', { class: 'empty-state' }, t('empty')));
     return;
   }
+  // 与 renderAccounts 同款：用 DocumentFragment 一次性挂入 N 条邮件项，
+  // 避免逐条 appendChild 触发 N 次 reflow。邮件列表常规 ≤50 条但高频
+  // 切换文件夹 / 搜索 / 选中态变更，累计的 reflow 与卡顿同样肉眼可感。
+  const frag = document.createDocumentFragment();
   S.emails.forEach((e, i) => {
     const d = e.date ? new Date(e.date) : null;
     const ds = d ? `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}` : '';
@@ -1109,9 +1235,12 @@ function renderEmailList() {
     item.appendChild(el('div', { class: 'ei-sender' }, sender));
     item.appendChild(el('div', { class: 'ei-subject' }, e.subject || '(no subject)'));
     item.appendChild(el('div', { class: 'ei-date' }, ds));
-    list.appendChild(item);
+    frag.appendChild(item);
   });
+  list.appendChild(frag);
 }
+
+const filterEmailListDebounced = debounce(filterEmailList, 120);
 
 const EMAIL_HEAD =
   '<!DOCTYPE html><html><head>'
@@ -1734,7 +1863,7 @@ $('navOauth').addEventListener('click', () => showView('oauth'));
 $('themeBtn').addEventListener('click', toggleTheme);
 $('langBtn').addEventListener('click', toggleLang);
 $('addGroupBtn').addEventListener('click', addGroup);
-$('searchInp').addEventListener('input', filterAccounts);
+$('searchInp').addEventListener('input', filterAccountsDebounced);
 $('selAll').addEventListener('change', (e) => toggleSelAll(e.target.checked));
 $('btnImport').addEventListener('click', showImportModal);
 $('btnExport').addEventListener('click', showExportModal);
@@ -1761,7 +1890,7 @@ $('btnRefreshEmails').addEventListener('click', () => {
   loadEmails();
 });
 $('emailFolder').addEventListener('change', loadEmails);
-$('emailSearch').addEventListener('input', filterEmailList);
+$('emailSearch').addEventListener('input', filterEmailListDebounced);
 $('btnCompose').addEventListener('click', () => showCompose());
 $('btnReply').addEventListener('click', replyEmail);
 $('btnDelEmail').addEventListener('click', deleteCurrentEmail);
@@ -1816,12 +1945,23 @@ $('btnCopyDetail').addEventListener('click', copyAccountInfo);
 // ───────── Init ─────────
 async function init() {
   try {
-    // 1) 必须先 loadMe 拿 is_owner — 后续的 applyOwnerVisibility / loadPublicIds
-    //    都依赖 S.user.is_owner，否则站长按钮 / 接码列在登录后不会自动显现
+    // 1) 必须先 loadMe 拿 is_owner — applyOwnerVisibility 与 loadPublicIds 都
+    //    依赖 S.user.is_owner，否则站长按钮 / 接码列在登录后不会自动显现
     await loadMe();
     applyOwnerVisibility();
+    updateUserDisplay();
 
-    const settings = await api.get('/api/settings');
+    // 2) settings / groups / accounts(+publicIds) 之间互不依赖，全部并行：
+    //    远程网络下每个请求 30-100ms，串行 → 并行能省 ~2 个 RTT。
+    //    accounts 列表的渲染依赖 i18n 已就绪（按钮文案 / 占位符），所以等
+    //    settings 拿到之后再切语言、再 loadAccounts；groups 与之同期发起。
+    const [, settingsResult] = await Promise.allSettled([
+      loadGroups(),
+      api.get('/api/settings'),
+    ]);
+
+    const settings = settingsResult.status === 'fulfilled'
+      ? settingsResult.value : { theme: 'cyber', language: 'zh' };
     const savedTheme = settings.theme;
     S.theme = THEME_ORDER.includes(savedTheme) ? savedTheme : 'cyber';
     S.lang = settings.language || 'zh';
@@ -1833,8 +1973,6 @@ async function init() {
       window.I18N.setLang(S.lang);
       window.I18N.applyToDom();
     }
-    updateUserDisplay();
-    await loadGroups();
     await loadAccounts();
     S.ready = true;
   } catch (err) {
