@@ -360,6 +360,10 @@ def _get_state_via_auth_url(client) -> str:
     return qs["state"][0]
 
 
+from .conftest import OAUTH_REMOVED_SKIP
+
+
+@OAUTH_REMOVED_SKIP
 def test_oauth_exchange_returns_needs_email_when_email_unfetchable(client):
     """M1: _fetch_oauth2_email 失败时不能丢失已换到的 refresh_token，应返回 needs_email。
     服务端把 refresh_token 暂存到内存，让用户手动补 email 后二次提交。"""
@@ -388,6 +392,7 @@ def test_oauth_exchange_returns_needs_email_when_email_unfetchable(client):
     assert "M.C123-fake-refresh-token" not in str(body)
 
 
+@OAUTH_REMOVED_SKIP
 def test_oauth_exchange_two_phase_completes(client):
     """M1 续：第一次失败暂存，第二次仅传 email 时能从暂存读出 token 完成入库。"""
     import web_app
@@ -425,6 +430,7 @@ def test_oauth_exchange_two_phase_completes(client):
     assert found[0]["group"] == "g1"
 
 
+@OAUTH_REMOVED_SKIP
 def test_oauth_exchange_second_phase_without_pending_returns_error(client):
     """没有暂存 + 仅传 email 应直接报错（不要假装成功）。"""
     r = client.post(
@@ -437,6 +443,7 @@ def test_oauth_exchange_second_phase_without_pending_returns_error(client):
     assert "重新点击授权" in body.get("error", "") or "过期" in body.get("error", "")
 
 
+@OAUTH_REMOVED_SKIP
 def test_oauth_exchange_add_account_failure_surfaces_error(client):
     """L7: db.add_account 失败时旧代码静默吞掉，新代码必须把失败原因暴露给前端。"""
     import web_app

@@ -26,7 +26,7 @@
       <div class="grp-list" id="groupList"></div>
     </div>
     <div class="sb-space"></div>
-    <button class="nav-btn" id="navOauth" data-view="oauth" data-i18n="nav_oauth">🗝 手动授权</button>
+    <button class="nav-btn owner-only" id="navHelp" data-view="help" data-i18n="nav_help" hidden>📬 邮箱助手</button>
     <button class="nav-btn" id="navDash" data-view="dashboard" data-i18n="nav_dash">📈 仪表盘</button>
     <button class="nav-btn" id="navSettings" data-view="settings" data-i18n="nav_settings">⚙ 设置</button>
     <div class="sb-user" id="sbUser">
@@ -61,6 +61,9 @@
       <button class="btn btn-w" id="btnBatchSend" data-i18n="btn_batch_send">批量发信</button>
       <button class="btn btn-cyber owner-only" id="btnSetPublic" data-i18n="btn_set_public" data-i18n-title="btn_set_public_title" title="把选中邮箱加入接码白名单（仅站长）" hidden>📡 加入接码</button>
       <button class="btn btn-o owner-only" id="btnUnsetPublic" data-i18n="btn_unset_public" data-i18n-title="btn_unset_public_title" title="把选中邮箱移出接码白名单（仅站长）" hidden>📴 移出接码</button>
+      <button class="btn btn-s owner-only" id="btnBatchHelperOpen" data-i18n="btn_batch_helper_open" title="批量自动登录所选邮箱（Helper）" hidden>🔓 批量登录</button>
+      <button class="btn btn-s owner-only" id="btnBatchHelperToken" data-i18n="btn_batch_helper_token" title="批量获取所选邮箱的 refresh_token（Helper）" hidden>🔑 批量取 Token</button>
+      <button class="btn btn-s owner-only" id="btnBatchHelperBind" data-i18n="btn_batch_helper_bind" title="批量为所选邮箱绑辅助邮箱（Helper）" hidden>🔗 批量绑辅助</button>
       <button class="btn btn-d" id="btnDelete" data-i18n="btn_delete">批量删除</button>
       <span class="rec-cnt" id="recCnt"></span>
     </div>
@@ -82,7 +85,7 @@
       </div>
       <div id="dashView" style="display:none"></div>
       <div id="settingsView" style="display:none"></div>
-      <div id="oauthView" style="display:none"></div>
+      <div id="helpView" style="display:none"></div>
     </div>
   </main>
 </div>
@@ -293,6 +296,92 @@ email----password----client_id----refresh_token$$--------组名
   <div class="modal-foot">
     <button class="btn btn-o" data-close="moveModal" data-i18n="btn_cancel">取消</button>
     <button class="btn btn-p" id="btnDoMove" data-i18n="btn_confirm">确定</button>
+  </div>
+</div></div>
+
+<!-- Helper Task Modal：展示长任务的实时日志 -->
+<div class="modal-bg" id="helperTaskModal"><div class="modal" style="width:640px">
+  <div class="modal-h">
+    <h3 id="helperTaskTitle" data-i18n="help_task_title">Helper 任务执行中…</h3>
+    <span id="helperTaskElapsed" class="help-task-elapsed">⏱ 0s</span>
+    <button class="modal-close" data-close="helperTaskModal" id="helperTaskClose">×</button>
+  </div>
+  <div class="modal-body">
+    <div id="helperTaskStatus" class="help-task-status" data-i18n="help_task_running">⏳ 正在执行…</div>
+    <div class="progress-log" id="helperTaskLog"></div>
+  </div>
+  <div class="modal-foot">
+    <button class="btn btn-d" id="helperTaskCancelTask" style="display:none" data-i18n="help_task_cancel">🛑 取消任务</button>
+    <button class="btn btn-o" id="helperTaskCancelBtn" data-close="helperTaskModal" data-i18n="btn_close">关闭</button>
+  </div>
+</div></div>
+
+<!-- Helper 添加 OAuth 账号 Modal -->
+<div class="modal-bg" id="helperAddModal"><div class="modal" style="width:480px">
+  <div class="modal-h"><h3 data-i18n="help_add_title">自动添加邮箱（OAuth2）</h3><button class="modal-close" data-close="helperAddModal">×</button></div>
+  <div class="modal-body">
+    <p style="font-size:13px;color:var(--text2);margin-bottom:12px" data-i18n="help_add_intro">填入 Outlook 邮箱与密码，Helper 会自动打开浏览器登录、完成 OAuth2 授权、把 refresh_token 写回服务器。</p>
+    <div class="form-group"><label data-i18n="help_field_email">邮箱地址</label><input id="helperAddEmail" type="email" placeholder="example@outlook.com"></div>
+    <div class="form-group"><label data-i18n="help_field_password">邮箱密码</label><input id="helperAddPassword" type="password" placeholder=""></div>
+    <div class="form-group">
+      <label data-i18n="help_field_group">导入到分组</label>
+      <select id="helperAddGroup"></select>
+    </div>
+    <div id="helperAddErr" style="font-size:12px;color:var(--danger);min-height:16px"></div>
+  </div>
+  <div class="modal-foot">
+    <button class="btn btn-o" data-close="helperAddModal" data-i18n="btn_cancel">取消</button>
+    <button class="btn btn-p" id="btnHelperDoAdd" data-i18n="help_btn_run">执行</button>
+  </div>
+</div></div>
+
+<!-- Helper 改密 Modal -->
+<div class="modal-bg" id="helperChangePwdModal"><div class="modal" style="width:480px">
+  <div class="modal-h"><h3 data-i18n="help_chpwd_title">自动修改邮箱密码</h3><button class="modal-close" data-close="helperChangePwdModal">×</button></div>
+  <div class="modal-body">
+    <p style="font-size:13px;color:var(--text2);margin-bottom:12px" data-i18n="help_chpwd_intro">Helper 会自动登录已选邮箱、在 Outlook 安全设置里改密。新密码至少 8 位。</p>
+    <div class="form-group"><label data-i18n="help_field_email">邮箱地址</label><input id="helperChpwdEmail" type="email" readonly></div>
+    <div class="form-group"><label data-i18n="help_field_password">当前密码</label><input id="helperChpwdOld" type="password"></div>
+    <div class="form-group"><label data-i18n="help_field_new_password">新密码</label><input id="helperChpwdNew" type="password" minlength="8"></div>
+    <div id="helperChpwdErr" style="font-size:12px;color:var(--danger);min-height:16px"></div>
+  </div>
+  <div class="modal-foot">
+    <button class="btn btn-o" data-close="helperChangePwdModal" data-i18n="btn_cancel">取消</button>
+    <button class="btn btn-p" id="btnHelperDoChpwd" data-i18n="help_btn_run">执行</button>
+  </div>
+</div></div>
+
+<!-- Helper 批量操作进度 Modal -->
+<div class="modal-bg" id="helperBatchModal"><div class="modal" style="width:640px">
+  <div class="modal-h">
+    <h3 id="helperBatchTitle" data-i18n="help_batch_title">批量 Helper 操作</h3>
+    <button class="modal-close" data-close="helperBatchModal" id="helperBatchClose">×</button>
+  </div>
+  <div class="modal-body">
+    <p style="font-size:13px;color:var(--text2);margin-bottom:8px" id="helperBatchInfo"></p>
+    <div class="progress-bar"><div class="progress-fill" id="helperBatchFill"></div></div>
+    <div id="helperBatchStatus" style="font-size:13px;margin:8px 0"></div>
+    <div class="progress-log" id="helperBatchLog"></div>
+  </div>
+  <div class="modal-foot">
+    <button class="btn btn-d" id="helperBatchAbort" style="display:none" data-i18n="help_batch_abort">🛑 中止</button>
+    <button class="btn btn-p" id="helperBatchDone" data-close="helperBatchModal" style="display:none" data-i18n="btn_confirm">完成</button>
+  </div>
+</div></div>
+
+<!-- Helper 绑定辅助邮箱 Modal -->
+<div class="modal-bg" id="helperBindRecoveryModal"><div class="modal" style="width:480px">
+  <div class="modal-h"><h3 data-i18n="help_bind_title">绑定辅助邮箱</h3><button class="modal-close" data-close="helperBindRecoveryModal">×</button></div>
+  <div class="modal-body">
+    <p style="font-size:13px;color:var(--text2);margin-bottom:12px" data-i18n="help_bind_intro">为已选 Outlook 邮箱绑定辅助邮箱，提高安全等级与 OAuth 通过率。后缀留空将走默认设置。</p>
+    <div class="form-group"><label data-i18n="help_field_email">邮箱地址</label><input id="helperBindEmail" type="email" readonly></div>
+    <div class="form-group"><label data-i18n="help_field_alias_suffix">辅助邮箱后缀（可选）</label><input id="helperBindSuffix" type="text" placeholder="example.com"></div>
+    <div class="form-group"><label data-i18n="help_field_alias_email">指定辅助邮箱（可选）</label><input id="helperBindAlias" type="email" placeholder=""></div>
+    <div id="helperBindErr" style="font-size:12px;color:var(--danger);min-height:16px"></div>
+  </div>
+  <div class="modal-foot">
+    <button class="btn btn-o" data-close="helperBindRecoveryModal" data-i18n="btn_cancel">取消</button>
+    <button class="btn btn-p" id="btnHelperDoBind" data-i18n="help_btn_run">执行</button>
   </div>
 </div></div>
 

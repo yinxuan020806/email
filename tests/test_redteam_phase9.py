@@ -112,6 +112,10 @@ def test_validation_error_does_not_echo_password(client):
     assert any("password" in e.get("loc", []) for e in body["errors"])
 
 
+from .conftest import OAUTH_REMOVED_SKIP
+
+
+@OAUTH_REMOVED_SKIP
 def test_validation_error_does_not_echo_oauth_redirect(client):
     """OAuth exchange 422 不能回显 redirect_url 中可能含的 code/state 等敏感参数。"""
     # 构造一个超长 redirect_url
@@ -338,6 +342,7 @@ def test_ip_login_limiter_independent_from_username_bucket():
 # ── R8 OAuth 暂存桶 GC ────────────────────────────────────────────
 
 
+@OAUTH_REMOVED_SKIP
 def test_gc_pending_oauth_drops_expired_state_buckets(client):
     """``_gc_pending_oauth`` 应清空已过期的 state buckets + 整体清掉空桶。"""
     import time
@@ -371,6 +376,7 @@ def test_gc_pending_oauth_drops_expired_state_buckets(client):
         web_app._pending_oauth_states.clear()  # noqa: SLF001
 
 
+@OAUTH_REMOVED_SKIP
 def test_gc_pending_oauth_drops_expired_credentials(client):
     """``_gc_pending_oauth`` 同步清掉过期的 _pending_oauth（refresh_token 暂存）。"""
     import time
@@ -394,6 +400,7 @@ def test_gc_pending_oauth_drops_expired_credentials(client):
         web_app._pending_oauth.clear()  # noqa: SLF001
 
 
+@OAUTH_REMOVED_SKIP
 def test_gc_pending_oauth_safe_on_empty_state(client):
     """空 dict 上调用不应抛异常，返回 (0, 0)。"""
     import web_app

@@ -38,8 +38,11 @@ def test_settings_path_returns_index(client):
     assert "<html" in r.text.lower()
 
 
-def test_oauth_path_returns_index(client):
-    r = client.get("/oauth")
+def test_help_path_returns_index(client):
+    """``/help`` SPA 路由（取代旧版 ``/oauth``）应返回 index.html，
+    让浏览器在已登录态刷新 ``/help`` 时直接进入「邮箱助手」视图。
+    """
+    r = client.get("/help")
     assert r.status_code == 200
     assert "<html" in r.text.lower()
 

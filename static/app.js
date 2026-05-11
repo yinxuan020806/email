@@ -44,7 +44,7 @@ function applyPath(path) {
   }
   if (path === '/dashboard') showView('dashboard');
   else if (path === '/settings') showView('settings');
-  else if (path === '/oauth') showView('oauth');
+  else if (path === '/help') showView('help');
   else {
     // /login /register 在已登录时回首页
     if (path === '/login' || path === '/register') {
@@ -616,9 +616,97 @@ function buildAccountRow(a, index, isOwner) {
   ops.appendChild(el('button', { onclick: () => viewEmails(a.id) }, t('btn_view')));
   ops.appendChild(el('button', { onclick: () => showDetail(a.id) }, t('btn_detail')));
   ops.appendChild(el('button', { class: 'danger', onclick: () => deleteSingle(a.id) }, t('btn_del')));
+  // xiaoxuan 站长专属：每行 4 个 helper 图标按钮（仅当 helper 在线时可点）
+  // 设计上让按钮永远显示（owner-only），但 helper 离线时给 disabled
+  // 状态 + toast 提示，避免每次状态翻转都重建整张表
+  if (S.user && S.user.is_owner) {
+    const sep = el('span', { class: 'op-sep owner-only' }, '·');
+    ops.appendChild(sep);
+    const mkHelp = (icon, key, fn) => el('button', {
+      class: 'help-row-btn owner-only',
+      title: t(key),
+      'aria-label': t(key),
+      onclick: () => triggerHelperRowAction(fn, a, key),
+    }, icon);
+    ops.appendChild(mkHelp('🔓', 'help_row_open', helperRowOpen));
+    ops.appendChild(mkHelp('🔑', 'help_row_get_token', helperRowGetToken));
+    ops.appendChild(mkHelp('🔒', 'help_row_chpwd', helperRowChpwd));
+    ops.appendChild(mkHelp('🔗', 'help_row_bind', helperRowBind));
+  }
   tr.appendChild(el('td', {}, ops));
 
   return tr;
+}
+
+// ── 表格行的 helper 操作（xiaoxuan 专属） ────────────────────
+
+function triggerHelperRowAction(fn, account, titleKey) {
+  // helper 状态用最新值判断；如果还没拉过状态，主动拉一次
+  if (!window.HELPER_STATUS || !window.HELPER_STATUS.loaded) {
+    refreshHelperStatus().then(() => triggerHelperRowAction(fn, account, titleKey));
+    return;
+  }
+  if (!window.HELPER_STATUS.online) {
+    toast(t('help_task_offline'), 'warning');
+    return;
+  }
+  fn(account, titleKey);
+}
+
+async function helperRowOpen(account, titleKey) {
+  openHelperTaskModal(titleKey);
+  appendHelperLog(`▶ 请求服务器派发 "登录邮箱" → ${account.email}`, 'info');
+  try {
+    const r = helperResponseGuard(await api.post('/api/helper/mailbox/open',
+      { account_id: account.id, timeout: 180 }));
+    setHelperTaskDone(!!r.success, r.error || '');
+    if (r.success) toast(`${account.email} 已自动登录`, 'success');
+  } catch (e) {
+    setHelperTaskDone(false, e.message || '');
+  } finally {
+    setTimeout(closeHelperLogStream, 2000);
+  }
+}
+
+async function helperRowGetToken(account, titleKey) {
+  openHelperTaskModal(titleKey);
+  appendHelperLog(`▶ 请求服务器派发 "获取 refresh_token" → ${account.email}`, 'info');
+  try {
+    const r = helperResponseGuard(await api.post('/api/helper/mailbox/get-token',
+      { account_id: account.id, timeout: 180 }));
+    if (r.success) {
+      setHelperTaskDone(true, t('toast_help_updated', { email: r.email || account.email }));
+      toast(t('toast_help_updated', { email: r.email || account.email }), 'success');
+      loadAccounts();
+    } else {
+      setHelperTaskDone(false, r.error || '');
+    }
+  } catch (e) {
+    setHelperTaskDone(false, e.message || '');
+  } finally {
+    setTimeout(closeHelperLogStream, 2000);
+  }
+}
+
+function helperRowChpwd(account, titleKey) {
+  // 行内改密 = 直接弹小框只问新密码（旧密码后端从 DB 自动取）
+  $('helperChpwdEmail').value = account.email;
+  $('helperChpwdOld').value = '__from_db__';  // 仅占位，后端会忽略并从 DB 取
+  $('helperChpwdNew').value = '';
+  $('helperChpwdErr').textContent = '';
+  $('helperChpwdEmail').dataset.accountId = String(account.id);
+  $('helperChpwdEmail').dataset.titleKey = titleKey || 'help_btn_chpwd';
+  openModal('helperChangePwdModal');
+}
+
+function helperRowBind(account, titleKey) {
+  $('helperBindEmail').value = account.email;
+  $('helperBindSuffix').value = '';
+  $('helperBindAlias').value = '';
+  $('helperBindErr').textContent = '';
+  $('helperBindEmail').dataset.accountId = String(account.id);
+  $('helperBindEmail').dataset.titleKey = titleKey || 'help_btn_bind';
+  openModal('helperBindRecoveryModal');
 }
 
 function renderAccounts() {
@@ -1597,23 +1685,25 @@ function showTableView() {
   $('tableView').style.display = '';
   $('dashView').style.display = 'none';
   $('settingsView').style.display = 'none';
-  $('oauthView').style.display = 'none';
+  $('helpView').style.display = 'none';
   $('actionBar').style.display = '';
   $('toolbarRight').style.display = '';
   $('pageTitle').textContent = S.currentGroup === '全部' ? t('page_title_default') : S.currentGroup;
   $('pageSub').textContent = t('page_sub_default');
+  // 离开 Help 视图时关掉常驻 SSE
+  if (typeof stopHelpPersistentLog === 'function') stopHelpPersistentLog();
 }
 
 function showView(view) {
   S.view = view;
   document.querySelectorAll('.nav-btn').forEach((b) => b.classList.remove('active'));
   document.querySelectorAll('.grp-item').forEach((b) => b.classList.remove('active'));
-  const map = { dashboard: 'navDash', settings: 'navSettings', oauth: 'navOauth' };
+  const map = { dashboard: 'navDash', settings: 'navSettings', help: 'navHelp' };
   if (map[view]) $(map[view]).classList.add('active');
   $('tableView').style.display = 'none';
   $('dashView').style.display = view === 'dashboard' ? '' : 'none';
   $('settingsView').style.display = view === 'settings' ? '' : 'none';
-  $('oauthView').style.display = view === 'oauth' ? '' : 'none';
+  $('helpView').style.display = view === 'help' ? '' : 'none';
   $('actionBar').style.display = 'none';
   $('toolbarRight').style.display = 'none';
 
@@ -1627,13 +1717,16 @@ function showView(view) {
     $('pageSub').textContent = t('page_sub_settings');
     pushPath('/settings');
     renderSettings();
-  } else if (view === 'oauth') {
-    $('pageTitle').textContent = t('page_title_oauth');
-    $('pageSub').textContent = t('page_sub_oauth');
-    pushPath('/oauth');
-    renderOAuth();
+  } else if (view === 'help') {
+    $('pageTitle').textContent = t('page_title_help');
+    $('pageSub').textContent = t('page_sub_help');
+    pushPath('/help');
+    renderHelp();
+    startHelperPolling();
   } else {
     pushPath('/');
+    // 离开 Help 页关掉常驻 SSE，省流量与服务端 SSE 桶
+    if (typeof stopHelpPersistentLog === 'function') stopHelpPersistentLog();
   }
 }
 
@@ -1752,70 +1845,849 @@ function renderSettings() {
   view.appendChild(card(t('settings_account'), t('settings_account_desc'), pwdWrap));
 }
 
-// ───────── OAuth ─────────
-function renderOAuth() {
-  const view = $('oauthView'); clear(view);
-  const card = el('div', { class: 'oauth-card' });
-  card.appendChild(el('h4', {}, t('oauth_title')));
-  card.appendChild(el('p', {}, t('oauth_intro')));
-  const ol = el('ol', { class: 'oauth-steps' });
-  ['oauth_step1', 'oauth_step2', 'oauth_step3', 'oauth_step4']
-    .forEach((k) => ol.appendChild(el('li', {}, t(k))));
-  card.appendChild(ol);
+// ───────── Helper（邮箱助手 · xiaoxuan 专属） ─────────
+//
+// 设计要点：
+// - renderHelp() 一次性渲染 4 个 Card：状态 / 操作 / token 列表 / 下载
+// - startHelperPolling() 在进入 help 视图时启动；其它视图不轮询，省 RTT
+// - SSE 实时日志只在「Helper 任务 Modal」展开期间订阅，关闭即断开
+// - 所有 helper API 在 401/403 时静默隐藏 UI（用户不是 xiaoxuan），避免暴露
+const HELPER_POLL_INTERVAL = 5000;
+const HELPER_POLL_FAST = 1500;
+let _helperPollTimer = null;
+let _helperPollFastUntil = 0;
+window.HELPER_STATUS = { loaded: false, online: false };
 
-  const grpRow = el('div', { class: 'form-group', style: 'margin-top:16px' });
-  grpRow.appendChild(el('label', {}, t('oauth_import_to')));
-  const grpSel = el('select', { id: 'oauthGroup' });
-  for (const g of S.groups) grpSel.appendChild(el('option', {}, g.name));
-  grpRow.appendChild(grpSel);
-  card.appendChild(grpRow);
-
-  const startBtn = el('button', { class: 'btn btn-p', onclick: startOAuth }, t('oauth_start'));
-  card.appendChild(el('div', { style: 'display:flex;gap:10px;margin-bottom:16px' }, startBtn));
-
-  const urlGroup = el('div', { class: 'form-group' });
-  urlGroup.appendChild(el('label', {}, t('oauth_paste')));
-  urlGroup.appendChild(el('input', { id: 'oauthUrl', placeholder: 'https://localhost/?code=...' }));
-  card.appendChild(urlGroup);
-
-  const submitBtn = el('button', {
-    class: 'btn btn-s', id: 'oauthSubmitBtn', onclick: submitOAuth
-  }, t('oauth_submit'));
-  card.appendChild(submitBtn);
-  card.appendChild(el('div', { id: 'oauthResult', style: 'margin-top:12px;font-size:13px' }));
-  view.appendChild(card);
+function helperEnabled() {
+  return !!(S.user && S.user.is_owner);
 }
 
-async function startOAuth() {
-  const r = await api.get('/api/oauth2/auth-url');
-  window.open(r.url, '_blank');
-  toast(t('toast_oauth_opened'), 'info');
+/**
+ * 统一拦截 helper API 响应，处理 stale_account_id 与 needs_helper_upgrade。
+ *
+ * - stale_account_id：账号已被删/不存在 → toast 提示 + 自动 loadAccounts
+ *   刷新表格（与参考项目 cursor-manager 0.1.10 的修复行为一致）。
+ * - needs_helper_upgrade：Helper 版本过低 → confirm 引导用户去下载页。
+ */
+function helperResponseGuard(r) {
+  if (!r || typeof r !== 'object') return r;
+  if (r.code === 'stale_account_id') {
+    toast('账号不存在或已被删除，已自动刷新列表', 'warning');
+    if (typeof loadAccounts === 'function') loadAccounts();
+  }
+  if (r.needs_helper_upgrade) {
+    setTimeout(() => {
+      if (confirm(
+        `本地 Helper 版本过低 (v${r.current_version || '?'}) ，` +
+        `该功能要求 v${r.min_version || '?'}+。\n现在去下载新版本吗？`,
+      )) {
+        if (S.user && S.user.is_owner) showView('help');
+        loadHelperDownloadInfo();
+      }
+    }, 50);
+  }
+  return r;
 }
 
-async function submitOAuth() {
-  const url = $('oauthUrl').value.trim();
-  if (!url) { toast(t('oauth_paste'), 'warning'); return; }
-  const group = $('oauthGroup').value;
-  const btn = $('oauthSubmitBtn');
-  const result = $('oauthResult');
-  btn.disabled = true;
-  result.textContent = '...';
+function renderHelp() {
+  const view = $('helpView'); clear(view);
+
+  const grid = el('div', { class: 'help-grid' });
+  // 状态卡（占满第一行）
+  grid.appendChild(el('div', {
+    class: 'help-card help-card-status', id: 'helpStatusCard',
+  }, [
+    el('h4', {}, t('help_card_status_title')),
+    el('div', { id: 'helpStatusBody', class: 'help-status-body' },
+       el('div', { class: 'help-spinner' }, '⏳')),
+  ]));
+
+  // 邮箱操作
+  grid.appendChild(el('div', { class: 'help-card' }, [
+    el('h4', {}, t('help_card_actions_title')),
+    el('div', { id: 'helpActionsBody' }),
+  ]));
+
+  // Token 列表
+  grid.appendChild(el('div', { class: 'help-card' }, [
+    el('h4', {}, t('help_card_tokens_title')),
+    el('div', { id: 'helpTokensBody' }, t('help_tokens_empty')),
+  ]));
+
+  // 下载 / 安装
+  grid.appendChild(el('div', { class: 'help-card' }, [
+    el('h4', {}, t('help_card_install_title')),
+    el('div', { id: 'helpInstallBody' }, t('help_install_intro')),
+  ]));
+
+  // 实时日志（占满最后一行，常驻订阅）
+  grid.appendChild(el('div', { class: 'help-card help-card-log' }, [
+    el('h4', {}, [
+      t('help_card_log_title'),
+      el('button', {
+        class: 'btn btn-o btn-tiny',
+        style: 'margin-left:10px',
+        onclick: () => clear($('helpPersistentLog')),
+      }, t('help_log_clear')),
+    ]),
+    el('div', { id: 'helpPersistentLog', class: 'progress-log help-persistent-log' }),
+  ]));
+
+  view.appendChild(grid);
+
+  // 触发首次渲染
+  renderHelpStatus(window.HELPER_STATUS);
+  renderHelpActions();
+  loadHelperTokens();
+  loadHelperDownloadInfo();
+  // 启动 / 复用常驻 SSE 订阅（用户在 Help 页期间一直在收日志）
+  startHelpPersistentLog();
+}
+
+// ── Help 页常驻 SSE 日志（进入 Help 页就订阅，离开页面停止） ──
+
+let _helpPersistentSrc = null;
+
+function startHelpPersistentLog() {
+  if (_helpPersistentSrc) {
+    // 已经订阅 → 仅把已渲染的 logEl 刷新（dom 已被 renderHelp 重建）
+    return;
+  }
   try {
-    const r = await api.post('/api/oauth2/exchange', { redirect_url: url, group });
-    if (r.success) {
-      clear(result);
-      result.appendChild(el('span', { style: 'color:var(--success)' }, `✅ ${t('toast_oauth_ok')}: ${r.email}`));
-      await loadAccounts();
-      toast(t('toast_oauth_ok'), 'success');
+    _helpPersistentSrc = new EventSource('/api/helper/logs', { withCredentials: true });
+    _helpPersistentSrc.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data);
+        if (data && data.message) {
+          appendPersistentHelpLog(data.message, data.level || 'info');
+        }
+      } catch { /* ignore */ }
+    };
+    _helpPersistentSrc.onerror = () => {
+      // EventSource 会自动重连（按 retry: 5000）。出错时只在日志窗记一条
+      // 警告，不主动关闭
+      appendPersistentHelpLog('⚠ 日志流暂时断开，浏览器会自动重连…', 'warning');
+    };
+  } catch (e) {
+    appendPersistentHelpLog('启动日志流失败：' + (e.message || ''), 'error');
+  }
+}
+
+function stopHelpPersistentLog() {
+  if (_helpPersistentSrc) {
+    try { _helpPersistentSrc.close(); } catch { /* ignore */ }
+    _helpPersistentSrc = null;
+  }
+}
+
+function appendPersistentHelpLog(msg, level) {
+  const logEl = $('helpPersistentLog');
+  if (!logEl) return;
+  // 控制最大行数：超过 500 行从顶部删，避免内存涨爆
+  while (logEl.childNodes.length >= 500) {
+    logEl.removeChild(logEl.firstChild);
+  }
+  const ts = new Date().toLocaleTimeString();
+  const line = el('div', { class: 'log-line log-' + (level || 'info') },
+    `[${ts}] ${String(msg)}`);
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function renderHelpStatus(s) {
+  const body = $('helpStatusBody');
+  if (!body) return;
+  clear(body);
+
+  const dot = el('span', { class: 'help-dot ' + (s.online ? 'on' : 'off') }, '●');
+  const label = el('strong', { class: 'help-status-label' },
+    t(s.online ? 'help_status_online' : 'help_status_offline'));
+
+  const headRow = el('div', { class: 'help-status-head' }, [dot, label]);
+  if (s.online) {
+    const sinceSec = s.last_seen ? Math.max(0, Math.floor(Date.now() / 1000) - s.last_seen) : 0;
+    const meta = el('div', { class: 'help-status-meta' }, [
+      el('span', {}, `${t('help_status_version')}: v${s.version || '?'}`),
+      el('span', {}, `${t('help_status_platform')}: ${s.platform || '?'}`),
+      el('span', {}, `${t('help_status_last_seen')}: ${t('help_status_seconds_ago', { n: sinceSec })}`),
+      el('span', {}, `${t('help_status_helper_id')}: ${s.helper_id || ''}`),
+    ]);
+    body.appendChild(el('div', { class: 'help-status-row' }, [headRow, meta]));
+    body.appendChild(el('p', { class: 'help-status-hint' }, t('help_status_online_hint')));
+    // 版本不匹配警告
+    if (s.version_ok === false) {
+      body.appendChild(el('div', { class: 'help-version-warn' },
+        t('help_status_version_mismatch', { current: s.version || '?', min: s.min_version || '?' })));
+    }
+    body.appendChild(el('div', { class: 'help-btn-row' }, [
+      el('button', { class: 'btn btn-p', onclick: testHelperPing }, t('help_btn_test_ping')),
+      el('button', { class: 'btn btn-o', onclick: refreshHelperStatus }, t('help_btn_refresh')),
+      el('button', { class: 'btn btn-d', onclick: revokeHelper }, t('help_btn_revoke')),
+    ]));
+  } else {
+    body.appendChild(headRow);
+    body.appendChild(el('p', { class: 'help-status-hint' }, t('help_status_offline_hint')));
+    body.appendChild(el('div', { class: 'help-btn-row' }, [
+      el('button', { class: 'btn btn-p', onclick: launchHelper }, t('help_btn_launch')),
+      el('button', { class: 'btn btn-o', onclick: refreshHelperStatus }, t('help_btn_refresh')),
+    ]));
+  }
+  renderHelpActions();
+}
+
+function renderHelpActions() {
+  const body = $('helpActionsBody');
+  if (!body) return;
+  clear(body);
+  const online = !!(window.HELPER_STATUS && window.HELPER_STATUS.online);
+
+  body.appendChild(el('p', { class: 'help-actions-hint' }, t('help_actions_intro')));
+
+  // 4 个功能格子（点击 → 弹自己专属 Modal 或直接派任务）
+  const grid = el('div', { class: 'help-action-grid' });
+  const card = (icon, titleKey, descKey, onclick) => {
+    const node = el('div', {
+      class: 'help-action-card' + (online ? '' : ' disabled'),
+      onclick: online ? onclick : () => toast(t('help_task_offline'), 'warning'),
+    }, [
+      el('div', { class: 'hac-icon' }, icon),
+      el('div', { class: 'hac-text' }, [
+        el('div', { class: 'hac-title' }, t(titleKey)),
+        el('div', { class: 'hac-desc' }, t(descKey)),
+      ]),
+    ]);
+    return node;
+  };
+  grid.appendChild(card('🔓', 'help_btn_open', 'help_btn_open_desc', showHelperAddModal));
+  grid.appendChild(card('🔑', 'help_btn_get_token', 'help_btn_get_token_desc', showHelperGetTokenModal));
+  grid.appendChild(card('🔒', 'help_btn_chpwd', 'help_btn_chpwd_desc', () => showHelperChpwdModal()));
+  grid.appendChild(card('🔗', 'help_btn_bind', 'help_btn_bind_desc', () => showHelperBindModal()));
+  body.appendChild(grid);
+
+  body.appendChild(el('p', { class: 'help-actions-tip' }, t('help_actions_tip_row')));
+}
+
+async function loadHelperTokens() {
+  const body = $('helpTokensBody');
+  if (!body) return;
+  try {
+    const r = await api.get('/api/helper/tokens');
+    if (!r.success || !r.tokens || r.tokens.length === 0) {
+      clear(body);
+      body.appendChild(el('p', { class: 'help-status-hint' }, t('help_tokens_empty')));
+      return;
+    }
+    clear(body);
+    const tbl = el('table', { class: 'tbl help-tokens-tbl' });
+    const thead = el('thead', {}, el('tr', {}, [
+      el('th', {}, t('help_tokens_label')),
+      el('th', {}, t('help_tokens_token')),
+      el('th', {}, t('help_tokens_created')),
+      el('th', {}, t('help_tokens_last_used')),
+      el('th', {}, t('help_tokens_platform')),
+      el('th', {}, t('help_tokens_version')),
+      el('th', { style: 'width:80px' }, t('help_tokens_op')),
+    ]));
+    tbl.appendChild(thead);
+    const tbody = el('tbody');
+    for (const item of r.tokens) {
+      const created = item.created_at ? new Date(item.created_at * 1000).toLocaleString() : '-';
+      const lastUsed = item.last_used_at ? new Date(item.last_used_at * 1000).toLocaleString() : '-';
+      tbody.appendChild(el('tr', {}, [
+        el('td', {}, item.label || '-'),
+        el('td', { class: 'mono' }, item.token || '-'),
+        el('td', {}, created),
+        el('td', {}, lastUsed),
+        el('td', {}, item.platform || '-'),
+        el('td', {}, item.version || '-'),
+        el('td', {},
+          el('button', {
+            class: 'btn btn-d btn-tiny',
+            onclick: () => revokeHelperToken(item.token),
+          }, t('help_tokens_revoke')),
+        ),
+      ]));
+    }
+    tbl.appendChild(tbody);
+    body.appendChild(tbl);
+  } catch (e) {
+    clear(body);
+    body.appendChild(el('p', { class: 'help-status-hint' },
+      t('toast_load_fail') + (e.message || '')));
+  }
+}
+
+async function loadHelperDownloadInfo() {
+  const body = $('helpInstallBody');
+  if (!body) return;
+  try {
+    const info = await api.get('/api/helper/download-info');
+    clear(body);
+    body.appendChild(el('p', { class: 'help-install-intro' }, t('help_install_intro')));
+    if (info && info.exe) {
+      const fmt = (bytes) => bytes ? (bytes / 1024 / 1024).toFixed(1) + ' MB' : '';
+      const list = el('ul', { class: 'help-install-dl' }, [
+        el('li', {}, el('a', { href: info.exe.url, download: '' },
+          `${t('help_install_dl_exe')} (${fmt(info.exe.size)})`)),
+        info.install_script && el('li', {}, el('a', {
+          href: info.install_script.url, download: '',
+        }, t('help_install_dl_install'))),
+        info.uninstall_script && el('li', {}, el('a', {
+          href: info.uninstall_script.url, download: '',
+        }, t('help_install_dl_uninstall'))),
+      ].filter(Boolean));
+      body.appendChild(list);
     } else {
-      clear(result);
-      result.appendChild(el('span', { style: 'color:var(--danger)' }, `❌ ${r.error}`));
+      body.appendChild(el('p', { class: 'help-install-missing' }, t('help_install_missing')));
+    }
+    const steps = el('ol', { class: 'help-install-steps' });
+    ['help_install_step1', 'help_install_step2', 'help_install_step3', 'help_install_step4']
+      .forEach((k) => steps.appendChild(el('li', {}, t(k))));
+    body.appendChild(steps);
+  } catch (e) {
+    clear(body);
+    body.appendChild(el('p', { class: 'help-status-hint' },
+      t('toast_load_fail') + (e.message || '')));
+  }
+}
+
+// helper toast 30s 防抖：网络抖动场景下 helper 会在 60s 心跳超时窗口内
+// 反复 offline ↔ online 翻转。如果每次翻转都弹 toast，用户 2 分钟内可能
+// 看到 4-6 次 toast 闪烁。这里用最近一次 toast 时间戳做截流，30s 内同方向
+// 的状态变更不重复弹。
+let _helperToastLastTs = 0;
+let _helperToastLastDir = null;  // 'online' | 'offline'
+const HELPER_TOAST_DEBOUNCE_MS = 30 * 1000;
+
+function _toastHelperStatusTransition(online) {
+  const now = Date.now();
+  const dir = online ? 'online' : 'offline';
+  // 同方向且 30s 内 → 静音
+  if (_helperToastLastDir === dir && now - _helperToastLastTs < HELPER_TOAST_DEBOUNCE_MS) {
+    return;
+  }
+  _helperToastLastTs = now;
+  _helperToastLastDir = dir;
+  if (online) toast(t('toast_help_online'), 'success');
+  else toast(t('toast_help_offline'), 'warning');
+}
+
+async function refreshHelperStatus() {
+  if (!helperEnabled()) return;
+  try {
+    const r = await api.get('/api/helper/status');
+    const wasLoaded = window.HELPER_STATUS.loaded;
+    const wasOnline = window.HELPER_STATUS.online;
+    window.HELPER_STATUS = {
+      loaded: true,
+      online: !!r.online,
+      helper_id: r.helper_id || null,
+      version: r.version || null,
+      platform: r.platform || null,
+      last_seen: r.last_seen || null,
+      min_version: r.min_helper_version || null,
+      version_ok: r.online ? !!r.version_ok : true,
+    };
+    renderHelpStatus(window.HELPER_STATUS);
+    if (wasOnline !== window.HELPER_STATUS.online) {
+      loadHelperTokens();
+      // 第一次加载（wasLoaded=false）不弹 toast，避免每次进 Help 页都弹一次
+      if (wasLoaded) {
+        _toastHelperStatusTransition(window.HELPER_STATUS.online);
+      }
     }
   } catch (e) {
-    clear(result);
-    result.appendChild(el('span', { style: 'color:var(--danger)' }, '❌ ' + (e.message || '')));
+    if (e.status !== 401 && e.status !== 403 && e.status !== 404) {
+      console.warn('[helper] status poll failed:', e);
+    }
   }
-  btn.disabled = false;
+}
+
+function startHelperPolling() {
+  if (!helperEnabled()) return;
+  if (_helperPollTimer) return;
+  const loop = async () => {
+    if (!helperEnabled()) {
+      _helperPollTimer = null;
+      return;
+    }
+    await refreshHelperStatus();
+    // 主表格视图也持续轮询：用户在表格里点行内 🔓 🔑 等按钮时需要 HELPER_STATUS
+    // 区分快慢周期：用户在 Help 页 → 1.5-5s；其他页 → 15s（省 RTT）
+    let interval = (Date.now() < _helperPollFastUntil)
+      ? HELPER_POLL_FAST : HELPER_POLL_INTERVAL;
+    if (S.view !== 'help') interval = Math.max(interval, 15000);
+    _helperPollTimer = setTimeout(loop, interval);
+  };
+  loop();
+}
+
+async function launchHelper() {
+  try {
+    const r = await api.post('/api/helper/provision-token',
+      { label: 'web-launch ' + new Date().toLocaleString() });
+    if (!r.success || !r.token) {
+      toast(t('toast_help_provision_fail') + (r.error || ''), 'error');
+      return;
+    }
+    const url = `emailhelper://connect?token=${encodeURIComponent(r.token)}&server=${encodeURIComponent(location.origin)}`;
+    _helperPollFastUntil = Date.now() + 30 * 1000;
+    window.location.href = url;
+    setTimeout(() => toast(t('toast_help_launching'), 'info'), 200);
+    setTimeout(() => loadHelperTokens(), 500);
+  } catch (e) {
+    toast(t('toast_help_provision_fail') + (e.message || ''), 'error');
+  }
+}
+
+async function revokeHelper() {
+  if (!confirm('确认撤销当前 helper token 吗？\n（撤销后 Helper 会断开，下次需要重新绑定）')) return;
+  try {
+    const r = await api.post('/api/helper/revoke', {});
+    if (r.success) {
+      toast(t('toast_help_token_revoked'), 'success');
+      _helperPollFastUntil = Date.now() + 5000;
+      refreshHelperStatus();
+      loadHelperTokens();
+    } else {
+      toast(t('toast_help_revoke_fail') + (r.error || ''), 'error');
+    }
+  } catch (e) {
+    toast(t('toast_help_revoke_fail') + (e.message || ''), 'error');
+  }
+}
+
+async function revokeHelperToken(token) {
+  if (!confirm('撤销该 token？')) return;
+  try {
+    const r = await api.post('/api/helper/revoke', { token });
+    if (r.success) {
+      toast(t('toast_help_token_revoked'), 'success');
+      loadHelperTokens();
+      refreshHelperStatus();
+    } else {
+      toast(t('toast_help_revoke_fail') + (r.error || ''), 'error');
+    }
+  } catch (e) {
+    toast(t('toast_help_revoke_fail') + (e.message || ''), 'error');
+  }
+}
+
+// ── Helper 任务执行 Modal（带 SSE 实时日志） ─────────────────
+
+let _helperLogSrc = null;
+let _helperCurrentTaskId = null;
+let _helperTaskStartTs = 0;
+let _helperElapsedTimer = null;
+
+function openHelperTaskModal(titleKey) {
+  const titleEl = $('helperTaskTitle');
+  const statusEl = $('helperTaskStatus');
+  const logEl = $('helperTaskLog');
+  const cancelBtn = $('helperTaskCancelTask');
+  if (titleEl) titleEl.textContent = t(titleKey || 'help_task_title');
+  if (statusEl) { statusEl.textContent = t('help_task_running'); statusEl.className = 'help-task-status running'; }
+  if (logEl) clear(logEl);
+  _helperCurrentTaskId = null;
+  _helperTaskStartTs = Date.now();
+  if (cancelBtn) { cancelBtn.style.display = 'none'; cancelBtn.disabled = false; }
+  openModal('helperTaskModal');
+  // 实时显示已运行时长
+  if (_helperElapsedTimer) clearInterval(_helperElapsedTimer);
+  _helperElapsedTimer = setInterval(() => {
+    const elapsed = Math.floor((Date.now() - _helperTaskStartTs) / 1000);
+    const elapsedEl = $('helperTaskElapsed');
+    if (elapsedEl) elapsedEl.textContent = `⏱ ${elapsed}s`;
+  }, 500);
+  // 订阅 SSE
+  try {
+    if (_helperLogSrc) _helperLogSrc.close();
+    _helperLogSrc = new EventSource('/api/helper/logs', { withCredentials: true });
+    _helperLogSrc.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data);
+        if (data && data.message) {
+          appendHelperLog(data.message, data.level || 'info');
+          // 服务端派单时会推 "task_id=..." 字符串；从中解析出 task_id 用于取消
+          const m = /task_id=([a-zA-Z0-9_-]+)/.exec(data.message);
+          if (m && !_helperCurrentTaskId) {
+            _helperCurrentTaskId = m[1];
+            const cb = $('helperTaskCancelTask');
+            if (cb) cb.style.display = '';
+          }
+        }
+      } catch { /* ignore */ }
+    };
+    _helperLogSrc.onerror = () => {
+      appendHelperLog('日志流断开', 'warning');
+      if (_helperLogSrc) { _helperLogSrc.close(); _helperLogSrc = null; }
+    };
+  } catch (e) {
+    appendHelperLog('SSE 启动失败: ' + (e.message || ''), 'error');
+  }
+}
+
+function closeHelperLogStream() {
+  if (_helperLogSrc) {
+    try { _helperLogSrc.close(); } catch { /* ignore */ }
+    _helperLogSrc = null;
+  }
+  if (_helperElapsedTimer) { clearInterval(_helperElapsedTimer); _helperElapsedTimer = null; }
+  _helperCurrentTaskId = null;
+}
+
+function appendHelperLog(msg, level) {
+  const logEl = $('helperTaskLog');
+  if (!logEl) return;
+  const line = el('div', { class: 'log-line log-' + (level || 'info') }, String(msg));
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setHelperTaskDone(ok, msg) {
+  const statusEl = $('helperTaskStatus');
+  if (!statusEl) return;
+  if (ok) {
+    statusEl.textContent = t('help_task_success') + (msg ? `：${msg}` : '');
+    statusEl.className = 'help-task-status success';
+  } else {
+    statusEl.textContent = t('help_task_failed') + (msg ? `：${msg}` : '');
+    statusEl.className = 'help-task-status error';
+  }
+  // 任务结束后停 elapsed timer + 隐藏取消按钮
+  if (_helperElapsedTimer) { clearInterval(_helperElapsedTimer); _helperElapsedTimer = null; }
+  const cb = $('helperTaskCancelTask');
+  if (cb) cb.style.display = 'none';
+}
+
+async function cancelHelperTask() {
+  if (!_helperCurrentTaskId) return;
+  const cb = $('helperTaskCancelTask');
+  if (cb) cb.disabled = true;
+  appendHelperLog(`▶ 请求取消任务 task_id=${_helperCurrentTaskId}...`, 'warning');
+  try {
+    await api.post('/api/helper/cancel-task', { task_id: _helperCurrentTaskId });
+  } catch (e) {
+    appendHelperLog('取消请求失败: ' + (e.message || ''), 'error');
+  }
+}
+
+// ── 批量 Helper 操作 ───────────────────────────────────────────
+
+let _helperBatchAbortController = null;
+
+async function batchHelperOpen() {
+  return _doBatchHelper('open_mailbox', 'help_btn_batch_open');
+}
+
+async function batchHelperGetToken() {
+  return _doBatchHelper('get_ms_token', 'help_btn_batch_token');
+}
+
+async function batchHelperBindRecovery() {
+  return _doBatchHelper('bind_recovery_email', 'help_btn_batch_bind');
+}
+
+async function _doBatchHelper(action, titleKey) {
+  if (!window.HELPER_STATUS || !window.HELPER_STATUS.online) {
+    toast(t('help_task_offline'), 'warning'); return;
+  }
+  const ids = Array.from(S.selected);
+  if (ids.length === 0) { toast(t('toast_select_acc'), 'warning'); return; }
+  if (!confirm(t('confirm_batch_helper', { n: ids.length, action: t(titleKey) }))) return;
+
+  // 重置 Modal
+  $('helperBatchTitle').textContent = t(titleKey);
+  $('helperBatchInfo').textContent = t('help_batch_info', { n: ids.length });
+  $('helperBatchFill').style.width = '0%';
+  $('helperBatchStatus').textContent = '';
+  clear($('helperBatchLog'));
+  $('helperBatchAbort').style.display = '';
+  $('helperBatchAbort').disabled = false;
+  $('helperBatchDone').style.display = 'none';
+  openModal('helperBatchModal');
+
+  _helperBatchAbortController = new AbortController();
+  let success = 0, fail = 0, completed = 0;
+  try {
+    await api.stream(
+      '/api/helper/batch/mailbox',
+      { action, account_ids: ids, timeout: 180 },
+      (msg) => {
+        if (msg.type === 'progress') {
+          completed++;
+          if (msg.success) success++; else fail++;
+          $('helperBatchFill').style.width =
+            `${((msg.current / msg.total) * 100).toFixed(1)}%`;
+          $('helperBatchStatus').textContent =
+            t('help_batch_progress', { current: msg.current, total: msg.total, ok: success, fail });
+          const line = el('div', {
+            class: 'log-line log-' + (msg.success ? 'info' : 'error'),
+          }, `[${msg.current}/${msg.total}] ${msg.email}: ${msg.success ? '✅' : '❌ ' + (msg.error || '失败')}`);
+          $('helperBatchLog').appendChild(line);
+          $('helperBatchLog').scrollTop = $('helperBatchLog').scrollHeight;
+        } else if (msg.type === 'done') {
+          $('helperBatchStatus').textContent = t('help_batch_done', { ok: msg.success, fail: msg.fail });
+          $('helperBatchAbort').style.display = 'none';
+          $('helperBatchDone').style.display = '';
+          if (msg.fail === 0) toast(t('help_batch_done', { ok: msg.success, fail: 0 }), 'success');
+          else toast(t('help_batch_done', { ok: msg.success, fail: msg.fail }), 'warning');
+          if (action === 'get_ms_token') loadAccounts();
+        }
+      },
+    );
+  } catch (e) {
+    appendBatchHelperLog('批量执行异常: ' + (e.message || ''), 'error');
+    $('helperBatchAbort').style.display = 'none';
+    $('helperBatchDone').style.display = '';
+  } finally {
+    _helperBatchAbortController = null;
+  }
+}
+
+function appendBatchHelperLog(msg, level) {
+  const logEl = $('helperBatchLog');
+  if (!logEl) return;
+  const line = el('div', { class: 'log-line log-' + (level || 'info') }, String(msg));
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function abortBatchHelper() {
+  if (_helperBatchAbortController) {
+    try { _helperBatchAbortController.abort(); } catch { /* ignore */ }
+    appendBatchHelperLog('▶ 用户请求中止...', 'warning');
+    $('helperBatchAbort').disabled = true;
+  }
+}
+
+async function testHelperPing() {
+  openHelperTaskModal('help_btn_test_ping');
+  appendHelperLog('▶ 派发 ping 测试连通性...', 'info');
+  try {
+    const r = helperResponseGuard(await api.post('/api/helper/dispatch',
+      { action: 'ping', params: {}, timeout: 10 }));
+    appendHelperLog(JSON.stringify(r), r.success ? 'info' : 'error');
+    setHelperTaskDone(r.success, r.error || '');
+  } catch (e) {
+    setHelperTaskDone(false, e.message || '');
+  } finally {
+    setTimeout(closeHelperLogStream, 1500);
+  }
+}
+
+// ── 自动添加邮箱（手工模式，需要填 email + password 用于"新账号"） ──
+
+function showHelperAddModal() {
+  if (!window.HELPER_STATUS || !window.HELPER_STATUS.online) {
+    toast(t('help_task_offline'), 'warning'); return;
+  }
+  $('helperAddEmail').value = '';
+  $('helperAddPassword').value = '';
+  $('helperAddErr').textContent = '';
+  const sel = $('helperAddGroup'); clear(sel);
+  for (const g of S.groups) sel.appendChild(el('option', {}, g.name));
+  openModal('helperAddModal');
+}
+
+async function doHelperAdd() {
+  const errEl = $('helperAddErr'); errEl.textContent = '';
+  const email = $('helperAddEmail').value.trim();
+  const pwd = $('helperAddPassword').value;
+  const group = $('helperAddGroup').value;
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    errEl.textContent = t('help_task_email_invalid'); return;
+  }
+  if (!pwd) { errEl.textContent = '请填入邮箱密码'; return; }
+  const btn = $('btnHelperDoAdd'); btn.disabled = true;
+  closeModal('helperAddModal');
+  openHelperTaskModal('help_btn_open');
+  try {
+    appendHelperLog(`▶ 1/2 请求服务器派发 "登录邮箱" → ${email}`, 'info');
+    const r1 = helperResponseGuard(await api.post('/api/helper/mailbox/open',
+      { email, email_password: pwd, timeout: 180 }));
+    if (!r1.success) {
+      appendHelperLog('open_mailbox 失败: ' + (r1.error || ''), 'error');
+      setHelperTaskDone(false, r1.error || ''); return;
+    }
+    appendHelperLog('✓ 邮箱浏览器已打开', 'info');
+    appendHelperLog('▶ 2/2 请求服务器派发 "OAuth2 + 落库"', 'info');
+    const r2 = helperResponseGuard(await api.post('/api/helper/mailbox/get-token',
+      { email, group, timeout: 180 }));
+    if (r2.success) {
+      const msg = (r2.updated ? t('toast_help_updated', { email: r2.email })
+                              : t('toast_help_added', { email: r2.email }));
+      setHelperTaskDone(true, msg);
+      toast(msg, 'success');
+      loadAccounts();
+    } else {
+      setHelperTaskDone(false, r2.error || '');
+    }
+  } catch (e) {
+    setHelperTaskDone(false, e.message || '');
+  } finally {
+    btn.disabled = false;
+    setTimeout(closeHelperLogStream, 2000);
+  }
+}
+
+// ── 获取 Token：弹窗只问 email（针对未入库的邮箱；已入库走表格行按钮） ──
+
+function showHelperGetTokenModal() {
+  if (!window.HELPER_STATUS || !window.HELPER_STATUS.online) {
+    toast(t('help_task_offline'), 'warning'); return;
+  }
+  const email = prompt('要获取 refresh_token 的邮箱地址（如果是表格里已有的账号，请直接点该行的 🔑 按钮）：', '');
+  if (!email) return;
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    toast(t('help_task_email_invalid'), 'error'); return;
+  }
+  openHelperTaskModal('help_btn_get_token');
+  appendHelperLog(`▶ 请求服务器派发 "获取 refresh_token" → ${email}`, 'info');
+  api.post('/api/helper/mailbox/get-token', { email, timeout: 180 })
+    .then(helperResponseGuard)
+    .then((r) => {
+      if (r.success) {
+        const msg = (r.updated ? t('toast_help_updated', { email: r.email })
+                                : t('toast_help_added', { email: r.email }));
+        setHelperTaskDone(true, msg);
+        toast(msg, 'success');
+        loadAccounts();
+      } else {
+        setHelperTaskDone(false, r.error || '');
+      }
+    })
+    .catch((e) => setHelperTaskDone(false, e.message || ''))
+    .finally(() => setTimeout(closeHelperLogStream, 2000));
+}
+
+// ── 改密 ──────────────────────────────────────────────────────
+
+function showHelperChpwdModal(email) {
+  if (!window.HELPER_STATUS || !window.HELPER_STATUS.online) {
+    toast(t('help_task_offline'), 'warning'); return;
+  }
+  // Help 页面手工进入：让用户填 email + 旧密码；
+  // 表格行进入（helperRowChpwd）已经预填 email 并设置 dataset.accountId
+  if (!email && !$('helperChpwdEmail').value) {
+    email = prompt('要改密的邮箱地址：', '');
+    if (!email) return;
+    $('helperChpwdEmail').value = email;
+    $('helperChpwdEmail').readOnly = false;  // 手工模式：可改
+    delete $('helperChpwdEmail').dataset.accountId;
+  } else if (email) {
+    $('helperChpwdEmail').value = email;
+    $('helperChpwdEmail').readOnly = false;
+    delete $('helperChpwdEmail').dataset.accountId;
+  } else {
+    // 表格行入口 helperRowChpwd 已设置好 dataset.accountId & 占位 oldPwd
+    $('helperChpwdEmail').readOnly = true;
+  }
+  $('helperChpwdNew').value = '';
+  $('helperChpwdErr').textContent = '';
+  openModal('helperChangePwdModal');
+}
+
+async function doHelperChpwd() {
+  const errEl = $('helperChpwdErr'); errEl.textContent = '';
+  const accountId = $('helperChpwdEmail').dataset.accountId;
+  const titleKey = $('helperChpwdEmail').dataset.titleKey || 'help_btn_chpwd';
+  const email = $('helperChpwdEmail').value.trim();
+  const oldPwd = $('helperChpwdOld').value;
+  const newPwd = $('helperChpwdNew').value;
+  if (!newPwd || newPwd.length < 8) {
+    errEl.textContent = t('help_task_password_short'); return;
+  }
+  if (!accountId && !oldPwd) {
+    errEl.textContent = '请填入当前密码'; return;
+  }
+  const btn = $('btnHelperDoChpwd'); btn.disabled = true;
+  closeModal('helperChangePwdModal');
+  openHelperTaskModal(titleKey);
+  try {
+    appendHelperLog(`▶ 请求服务器派发 "修改密码" → ${email}`, 'info');
+    const body = accountId
+      ? { account_id: Number(accountId), new_password: newPwd, timeout: 300 }
+      : { email, email_password: oldPwd, new_password: newPwd, timeout: 300 };
+    const r = helperResponseGuard(await api.post('/api/helper/mailbox/change-password', body));
+    if (r.success) {
+      setHelperTaskDone(true, '');
+      toast(t('toast_help_change_pwd_ok'), 'success');
+      if (accountId) loadAccounts();
+    } else {
+      setHelperTaskDone(false, r.error || '');
+    }
+  } catch (e) {
+    setHelperTaskDone(false, e.message || '');
+  } finally {
+    btn.disabled = false;
+    setTimeout(closeHelperLogStream, 2000);
+  }
+}
+
+// ── 绑定辅助邮箱 ──────────────────────────────────────────────
+
+function showHelperBindModal(email) {
+  if (!window.HELPER_STATUS || !window.HELPER_STATUS.online) {
+    toast(t('help_task_offline'), 'warning'); return;
+  }
+  if (!email && !$('helperBindEmail').value) {
+    email = prompt('要绑定辅助邮箱的邮箱地址：', '');
+    if (!email) return;
+    $('helperBindEmail').value = email;
+    $('helperBindEmail').readOnly = false;
+    delete $('helperBindEmail').dataset.accountId;
+  } else if (email) {
+    $('helperBindEmail').value = email;
+    $('helperBindEmail').readOnly = false;
+    delete $('helperBindEmail').dataset.accountId;
+  } else {
+    $('helperBindEmail').readOnly = true;
+  }
+  $('helperBindSuffix').value = '';
+  $('helperBindAlias').value = '';
+  $('helperBindErr').textContent = '';
+  openModal('helperBindRecoveryModal');
+}
+
+async function doHelperBind() {
+  const errEl = $('helperBindErr'); errEl.textContent = '';
+  const accountId = $('helperBindEmail').dataset.accountId;
+  const titleKey = $('helperBindEmail').dataset.titleKey || 'help_btn_bind';
+  const email = $('helperBindEmail').value.trim();
+  const aliasSuffix = $('helperBindSuffix').value.trim();
+  const aliasEmail = $('helperBindAlias').value.trim();
+  const btn = $('btnHelperDoBind'); btn.disabled = true;
+  closeModal('helperBindRecoveryModal');
+  openHelperTaskModal(titleKey);
+  try {
+    appendHelperLog(`▶ 请求服务器派发 "绑定辅助邮箱" → ${email}`, 'info');
+    const body = accountId
+      ? {
+          account_id: Number(accountId),
+          alias_suffix: aliasSuffix || null,
+          alias_email: aliasEmail || null,
+          timeout: 300,
+        }
+      : {
+          email,
+          alias_suffix: aliasSuffix || null,
+          alias_email: aliasEmail || null,
+          timeout: 300,
+        };
+    const r = helperResponseGuard(await api.post('/api/helper/mailbox/bind-recovery', body));
+    if (r.success) {
+      setHelperTaskDone(true, '');
+      toast(t('toast_help_bind_ok'), 'success');
+    } else {
+      setHelperTaskDone(false, r.error || '');
+    }
+  } catch (e) {
+    setHelperTaskDone(false, e.message || '');
+  } finally {
+    btn.disabled = false;
+    setTimeout(closeHelperLogStream, 2000);
+  }
 }
 
 // ───────── Theme & Lang ─────────
@@ -1851,7 +2723,7 @@ function setLang(lang) {
   if (S.ready) api.put('/api/settings', { key: 'language', value: lang }).catch(() => {});
   if (S.view === 'settings') renderSettings();
   else if (S.view === 'dashboard') renderDashboard();
-  else if (S.view === 'oauth') renderOAuth();
+  else if (S.view === 'help') renderHelp();
   else { showTableView(); renderAccounts(); }
 }
 
@@ -1859,7 +2731,17 @@ function setLang(lang) {
 $('navAll').addEventListener('click', () => selectGroup('全部'));
 $('navDash').addEventListener('click', () => showView('dashboard'));
 $('navSettings').addEventListener('click', () => showView('settings'));
-$('navOauth').addEventListener('click', () => showView('oauth'));
+$('navHelp').addEventListener('click', () => showView('help'));
+$('btnHelperDoAdd').addEventListener('click', doHelperAdd);
+$('btnHelperDoChpwd').addEventListener('click', doHelperChpwd);
+$('btnHelperDoBind').addEventListener('click', doHelperBind);
+$('helperTaskClose').addEventListener('click', closeHelperLogStream);
+$('helperTaskCancelBtn').addEventListener('click', closeHelperLogStream);
+$('helperTaskCancelTask').addEventListener('click', cancelHelperTask);
+$('btnBatchHelperOpen').addEventListener('click', batchHelperOpen);
+$('btnBatchHelperToken').addEventListener('click', batchHelperGetToken);
+$('btnBatchHelperBind').addEventListener('click', batchHelperBindRecovery);
+$('helperBatchAbort').addEventListener('click', abortBatchHelper);
 $('themeBtn').addEventListener('click', toggleTheme);
 $('langBtn').addEventListener('click', toggleLang);
 $('addGroupBtn').addEventListener('click', addGroup);
@@ -1975,6 +2857,9 @@ async function init() {
     }
     await loadAccounts();
     S.ready = true;
+    // xiaoxuan 登录后立即启动 helper 状态轮询（不需要进 Help 页才启动），
+    // 这样主表格视图也能拿到 window.HELPER_STATUS.online 来 gate 行内按钮
+    if (helperEnabled()) startHelperPolling();
   } catch (err) {
     if (err && err.status === 401) return;
     toast(t('toast_load_fail') + (err?.message || ''), 'error');

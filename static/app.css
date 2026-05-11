@@ -186,11 +186,64 @@ body{font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif;background
 .settings-row label{font-size:13px}
 .settings-row select,.settings-row input{padding:6px 12px;border:1px solid var(--inp-bd);border-radius:6px;background:var(--inp-bg);color:var(--text);font-size:13px;outline:none}
 
-/* OAuth */
-.oauth-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:24px;max-width:600px;box-shadow:var(--shadow)}
-.oauth-card h4{font-size:16px;font-weight:600;margin-bottom:8px}
-.oauth-card p{font-size:13px;color:var(--text2);margin-bottom:16px;line-height:1.6}
-.oauth-steps{list-style:decimal;padding-left:20px;font-size:13px;color:var(--text2);line-height:2}
+/* Helper (邮箱助手) */
+.help-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px;max-width:1180px}
+.help-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;box-shadow:var(--shadow)}
+.help-card h4{font-size:15px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:6px}
+.help-card-status{grid-column:1/-1}
+.help-card-log{grid-column:1/-1}
+.help-persistent-log{max-height:280px;min-height:180px}
+.help-status-body{display:flex;flex-direction:column;gap:12px}
+.help-status-row{display:flex;align-items:center;flex-wrap:wrap;gap:14px}
+.help-status-head{display:flex;align-items:center;gap:8px;font-size:14px}
+.help-status-label{font-size:14px}
+.help-status-meta{display:flex;flex-wrap:wrap;gap:10px;font-size:12px;color:var(--text2)}
+.help-status-meta span{padding:2px 8px;background:var(--hover);border-radius:4px}
+.help-status-hint{font-size:12px;color:var(--text2);margin:0}
+.help-dot{font-size:14px;line-height:1}
+.help-dot.on{color:#2ecc71;text-shadow:0 0 6px rgba(46,204,113,.6)}
+.help-dot.off{color:#e74c3c;text-shadow:0 0 6px rgba(231,76,60,.6)}
+.help-btn-row{display:flex;flex-wrap:wrap;gap:8px;margin-top:4px}
+.help-action-btn{min-width:140px}
+.help-actions-hint{font-size:12px;color:var(--text2);margin:0 0 10px}
+.help-tokens-tbl{width:100%}
+.help-tokens-tbl th,.help-tokens-tbl td{padding:6px 10px;font-size:12px}
+.help-tokens-tbl td.mono{font-family:'Consolas','Courier New',monospace;color:var(--text2);font-size:11px}
+.btn-tiny{padding:2px 8px;font-size:11px;border-radius:4px}
+.help-install-intro{font-size:12px;color:var(--text2);margin:0 0 12px;line-height:1.6}
+.help-install-missing{font-size:12px;color:var(--warning);padding:8px 10px;background:var(--hover);border-radius:6px;margin:6px 0}
+.help-install-dl{list-style:none;padding:0;margin:0 0 12px}
+.help-install-dl li{padding:6px 0;font-size:12px}
+.help-install-dl a{color:var(--accent);text-decoration:none}
+.help-install-dl a:hover{text-decoration:underline}
+.help-install-steps{padding-left:20px;font-size:12px;color:var(--text2);line-height:1.8;margin:0}
+.help-spinner{font-size:14px;color:var(--text2)}
+.help-action-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:10px}
+.help-action-card{display:flex;align-items:center;gap:10px;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:var(--inp-bg);cursor:pointer;transition:transform .15s,border-color .15s,background .15s}
+.help-action-card:hover{transform:translateY(-2px);border-color:var(--accent);background:var(--hover)}
+.help-action-card.disabled{opacity:.55;cursor:not-allowed}
+.help-action-card.disabled:hover{transform:none}
+.hac-icon{font-size:22px;line-height:1;width:32px;text-align:center;flex-shrink:0}
+.hac-text{flex:1;min-width:0}
+.hac-title{font-size:13px;font-weight:600;color:var(--text);margin-bottom:2px}
+.hac-desc{font-size:11px;color:var(--text2);line-height:1.4}
+.help-actions-tip{font-size:11px;color:var(--text3);margin:8px 0 0;padding:6px 10px;background:var(--hover);border-radius:4px}
+/* 表格行内 helper 按钮 */
+.op-sep{display:inline-block;color:var(--text3);margin:0 2px;font-size:11px}
+.help-row-btn{background:transparent;border:1px solid transparent;border-radius:4px;padding:2px 4px;cursor:pointer;font-size:13px;line-height:1;color:var(--text);transition:background .12s,border-color .12s,transform .12s}
+.help-row-btn:hover{border-color:var(--accent);background:var(--hover);transform:scale(1.15)}
+.help-row-btn:active{transform:scale(0.95)}
+.help-task-status{font-size:13px;padding:8px 12px;border-radius:6px;margin-bottom:10px}
+.help-task-status.running{background:var(--hover);color:var(--text)}
+.help-task-status.success{background:rgba(46,204,113,.12);color:var(--success);border:1px solid rgba(46,204,113,.4)}
+.help-task-status.error{background:rgba(231,76,60,.12);color:var(--danger);border:1px solid rgba(231,76,60,.4)}
+.help-task-elapsed{display:inline-block;margin-left:10px;padding:2px 8px;font-size:11px;color:var(--text2);background:var(--hover);border-radius:4px;font-family:'Consolas','Courier New',monospace}
+.help-version-warn{font-size:12px;padding:8px 12px;margin:8px 0;background:rgba(241,196,15,.12);color:var(--warning);border:1px solid rgba(241,196,15,.4);border-radius:6px}
+.log-line{padding:1px 0;white-space:pre-wrap;word-break:break-word}
+.log-line.log-info{color:var(--text)}
+.log-line.log-warning{color:var(--warning)}
+.log-line.log-error{color:var(--danger)}
+.log-line.log-success{color:var(--success)}
 
 /* Progress */
 .progress-bar{width:100%;height:8px;background:var(--hover);border-radius:4px;overflow:hidden;margin:12px 0}
@@ -412,7 +465,7 @@ body[data-theme="cyber"] .tbl,
 body[data-theme="cyber"] .dash-card,
 body[data-theme="cyber"] .dash-section,
 body[data-theme="cyber"] .settings-card,
-body[data-theme="cyber"] .oauth-card,
+body[data-theme="cyber"] .help-card,
 body[data-theme="cyber"] .modal{
   background:var(--card);
   backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);

@@ -188,6 +188,10 @@ def _auth_state_for(c) -> str:
     return parse_qs(urlparse(r.json()["url"]).query)["state"][0]
 
 
+from .conftest import OAUTH_REMOVED_SKIP
+
+
+@OAUTH_REMOVED_SKIP
 def test_oauth_exchange_rejects_request_without_state(client):
     """没带 state 的 redirect_url 必须拒绝。"""
     import web_app
@@ -205,6 +209,7 @@ def test_oauth_exchange_rejects_request_without_state(client):
     assert "state" in body.get("error", "")
 
 
+@OAUTH_REMOVED_SKIP
 def test_oauth_exchange_rejects_unknown_state(client):
     """未颁发过的随机 state 必须拒绝。"""
     import web_app
@@ -222,6 +227,7 @@ def test_oauth_exchange_rejects_unknown_state(client):
     assert "state" in body.get("error", "")
 
 
+@OAUTH_REMOVED_SKIP
 def test_oauth_exchange_state_is_one_shot(client):
     """成功消费 state 之后，再用同一个 state 提交必须失败（防 replay）。"""
     import web_app
@@ -248,6 +254,7 @@ def test_oauth_exchange_state_is_one_shot(client):
     assert "state" in body2.get("error", "")
 
 
+@OAUTH_REMOVED_SKIP
 def test_oauth_state_isolated_per_user(client2):
     """alice 颁发的 state 不能被 bob 用来交换 token。"""
     import web_app

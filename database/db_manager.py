@@ -894,6 +894,26 @@ class DatabaseManager:
                 self._bump_account_rev_in_conn(conn, owner_id)
             return ok
 
+    def update_account_password(
+        self, owner_id: int, account_id: int, password: str,
+    ) -> bool:
+        """改密成功后由「邮箱助手 Helper」回写新密码到账号表。
+
+        ``accounts.password`` 字段全程用 ``SecretBox`` 加密；DB 文件即便
+        泄露也拿不到明文。仅 helper 的"自动改密"流程会触发本调用。
+        """
+        box = SecretBox.instance()
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE accounts SET password = ? "
+                "WHERE id = ? AND owner_id = ?",
+                (box.encrypt(password or ""), account_id, owner_id),
+            )
+            ok = cur.rowcount > 0
+            if ok:
+                self._bump_account_rev_in_conn(conn, owner_id)
+            return ok
+
     def update_account_status(
         self, owner_id: int, account_id: int, status: str
     ) -> bool:

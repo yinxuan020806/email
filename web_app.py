@@ -36,8 +36,6 @@ from contextlib import asynccontextmanager
 from typing import List, Optional
 
 import anyio
-import certifi
-import requests as req_lib
 from fastapi import (
     Cookie,
     Depends,
@@ -71,8 +69,11 @@ from core.auth import (  # noqa: E402
     verify_password,
 )
 from core.email_client import EmailClient  # noqa: E402
+from core.helper_routes import (  # noqa: E402
+    configure as configure_helper_routes,
+    helper_router,
+)
 from core.models import Account  # noqa: E402
-from core.oauth2_helper import OAuth2Helper, TOKEN_URL  # noqa: E402
 from core.rate_limit import (  # noqa: E402
     IP_LOGIN_LIMITER_KEY,
     REGISTER_LIMITER_KEY,
@@ -108,12 +109,13 @@ _CLEANUP_INTERVAL_SEC = 24 * 3600
 
 async def _periodic_cleanup() -> None:
     """后台周期任务：清理过期会话 / 老审计 / 老接码查询日志 / 过期 token 缓存
-    / 跨用户的 OAuth 暂存桶。
+    / 长期未用的 helper token。
 
     任何步骤异常都仅 ``logger.exception`` 记录，不让单步失败拖垮整个 loop。
     被 ``cancel()`` 后立即退出。注意：``asyncio.sleep`` 是天然的 cancellation point。
     """
     from core.oauth_token import evict_expired_token_cache  # noqa: WPS433
+    from database.helper_token import purge_expired as purge_helper_tokens  # noqa: WPS433
     while True:
         try:
             await asyncio.sleep(_CLEANUP_INTERVAL_SEC)
@@ -124,15 +126,12 @@ async def _periodic_cleanup() -> None:
             n_audit = await asyncio.to_thread(db.cleanup_old_audit)
             n_qlog = await asyncio.to_thread(db.cleanup_old_code_query_log)
             n_tok = await asyncio.to_thread(evict_expired_token_cache)
-            # OAuth 暂存桶 GC：``_gc_pending_oauth`` 操作的是模块级 dict +
-            # threading.Lock，纯 CPU 操作不阻塞事件循环（ms 级），无需
-            # to_thread；直接同步调用即可。
-            n_state, n_cred = _gc_pending_oauth()
-            if n_sess or n_audit or n_qlog or n_tok or n_state or n_cred:
+            n_helper = await asyncio.to_thread(purge_helper_tokens)
+            if n_sess or n_audit or n_qlog or n_tok or n_helper:
                 logger.info(
                     "周期清理: 过期会话=%d, 老审计=%d, 老接码日志=%d, "
-                    "过期 token=%d, OAuth state=%d, OAuth cred=%d",
-                    n_sess, n_audit, n_qlog, n_tok, n_state, n_cred,
+                    "过期 token=%d, 过期 helper token=%d",
+                    n_sess, n_audit, n_qlog, n_tok, n_helper,
                 )
         except Exception:
             logger.exception("周期清理异常（已吞掉，下轮再试）")
@@ -645,23 +644,6 @@ class ExportRequest(BaseModel):
     separator: str = "newline"   # "newline" 一行一个；"dollar" 用 $$ 拼接成单行
 
 
-class OAuth2ExchangeRequest(BaseModel):
-    """OAuth2 授权码交换请求模型。
-
-    两阶段提交（与 ``exchange_oauth2`` 一致）：
-    - 首次：``redirect_url`` + 可选 ``group``
-    - 二次：仅 ``email``，从内存暂存中恢复 client_id / refresh_token / group
-
-    ``redirect_url`` 长度上限 4096 — Microsoft 实际 URL 远小于此，给畸形/恶意
-    超大 body 留出明确边界；``email`` 限 256 字符，``group`` 限 64 字符。
-    没有用 ``HttpUrl`` 强校验是因为合法 redirect 形如 ``https://localhost/?code=...``
-    且本地开发可能含 ``http://localhost``，留给业务层去做协议白名单更灵活。
-    """
-    redirect_url: Optional[str] = Field(default=None, max_length=4096)
-    email: Optional[str] = Field(default=None, max_length=256)
-    group: Optional[str] = Field(default=None, max_length=64)
-
-
 # ── Helpers ─────────────────────────────────────────────────────
 
 
@@ -951,12 +933,12 @@ async def root() -> Response:
     return _serve_index()
 
 
-# SPA 前端路由：/login、/register、/dashboard、/settings、/oauth 都返回 index.html
+# SPA 前端路由：/login、/register、/dashboard、/settings、/help 都返回 index.html
 @app.get("/login")
 @app.get("/register")
 @app.get("/dashboard")
 @app.get("/settings")
-@app.get("/oauth")
+@app.get("/help")
 async def spa_routes() -> Response:
     return _serve_index()
 
@@ -2179,279 +2161,19 @@ def update_settings(req: SettingUpdate, user: dict = CurrentUser) -> dict:
     return {"ok": True}
 
 
-# ── OAuth2 ──────────────────────────────────────────────────────
-
-
-@app.get("/api/oauth2/auth-url")
-def get_oauth2_url(user: dict = CurrentUser) -> dict:
-    """颁发 OAuth2 授权 URL，并把绑定到当前用户的 ``state`` 记入服务端缓存。
-
-    后续 ``/api/oauth2/exchange`` 必须把 redirect_url 中的 state 与服务端
-    记录比对一致才能继续，否则视为 CSRF / 绑号尝试拒绝。
-    """
-    import secrets as _secrets
-    state = _secrets.token_urlsafe(24)
-    _record_oauth_state(user["id"], state)
-    return {"url": OAuth2Helper().get_auth_url(state=state)}
-
-
-def _fetch_oauth2_email(client_id: str, refresh_token: str) -> Optional[str]:
-    """根据 OAuth2 凭据查询账户邮箱地址。"""
-    try:
-        resp = req_lib.post(
-            TOKEN_URL,
-            data={
-                "client_id": client_id,
-                "refresh_token": refresh_token,
-                "grant_type": "refresh_token",
-            },
-            timeout=30,
-            verify=certifi.where(),
-        )
-        if resp.status_code != 200:
-            return None
-        access_token = resp.json().get("access_token")
-        headers = {"Authorization": f"Bearer {access_token}"}
-
-        for url, key in (
-            ("https://outlook.office.com/api/v2.0/me", "EmailAddress"),
-            ("https://graph.microsoft.com/v1.0/me", "mail"),
-            ("https://graph.microsoft.com/v1.0/me", "userPrincipalName"),
-        ):
-            try:
-                r = req_lib.get(url, headers=headers, timeout=10, verify=certifi.where())
-                if r.status_code == 200:
-                    val = r.json().get(key)
-                    if val:
-                        return val
-            except req_lib.RequestException:
-                logger.exception("调用 %s 失败", url)
-    except req_lib.RequestException:
-        logger.exception("OAuth2 token 端点访问失败")
-    return None
-
-
-# OAuth 凭据"半成品"暂存：refresh_token 已换到、但 _fetch_oauth2_email 失败时
-# 用户需要手动补 email 后二次提交。authorization code 是一次性的，丢失后只能
-# 重新走整个授权流程；这里在内存里短期保留 refresh_token，避免那次刷新被浪费。
+# ── Helper（邮箱助手 / xiaoxuan 专属） ──────────────────────────
 #
-# 选择内存而不是 cookie：refresh_token 是高敏字段，不能暴露到前端 JS；放服务端
-# 内存里、按 (user_id) 索引、5 分钟自动过期，最安全。
-# 单进程多 worker 的 uvicorn 部署下，二次提交可能落到不同 worker → 拿不到缓存，
-# 此时 fallback 为返回错误让用户重新授权，体验降级但不会卡住。
-_PENDING_OAUTH_TTL = 300.0  # 5 分钟
-_pending_oauth: dict[int, tuple[str, str, str, float]] = {}
-_pending_oauth_lock = threading.Lock()
-
-
-# OAuth state 暂存：``/api/oauth2/auth-url`` 生成 state 后写入，
-# ``/api/oauth2/exchange`` 校验后弹出。绑定到当前登录用户，TTL 15 分钟。
+# 历史上这里有一组「手动授权 OAuth2」接口（/api/oauth2/auth-url 与
+# /api/oauth2/exchange），需要用户自己粘贴 Microsoft 重定向 URL。
+# 该流程现在已彻底被「邮箱助手 Helper」替代 —— 用户在本地装一个 Helper
+# .exe，由 Helper 自动打开浏览器、自动登录、自动获取 refresh_token 后
+# 回传给服务器落库。
 #
-# 防御目标：CSRF 绑号攻击 ——
-#   攻击者在自己机器上发起授权流，把生成的 ``code`` 拐到受害者已登录的
-#   本服务面板（社工 / 钓鱼链接），如果服务端不校验 state 则会把攻击者
-#   的 RT 写到受害者账号；后续受害者的"账号管理"看到一个陌生 OAuth 账号，
-#   攻击者通过它读受害者的 IMAP / SMTP。
-#
-# state 用 ``secrets.token_urlsafe(24)`` 生成，每个用户**最多保留 8 条**最近
-# 未使用的 state（覆盖"用户连续点了几次授权按钮"的情况），过期或超过容量
-# 后 LRU 淘汰；多 worker 下二次提交可能落到不同 worker，命中失败回退到
-# "认 state 失败 → 拒绝交换"，需要用户重新点授权按钮（损失体验换安全）。
-_PENDING_STATE_TTL = 900.0  # 15 分钟
-_PENDING_STATE_PER_USER = 8
-# user_id → list[(state, expires_at)]
-_pending_oauth_states: dict[int, list[tuple[str, float]]] = {}
-_pending_oauth_states_lock = threading.Lock()
-
-
-def _record_oauth_state(user_id: int, state: str) -> None:
-    """记录新颁发的 state；自动 GC 过期项 + 限制每用户最大条数。"""
-    if not state:
-        return
-    now = time.monotonic()
-    with _pending_oauth_states_lock:
-        bucket = _pending_oauth_states.setdefault(user_id, [])
-        bucket[:] = [(s, t) for (s, t) in bucket if t > now]
-        bucket.append((state, now + _PENDING_STATE_TTL))
-        if len(bucket) > _PENDING_STATE_PER_USER:
-            del bucket[0:len(bucket) - _PENDING_STATE_PER_USER]
-
-
-def _consume_oauth_state(user_id: int, state: str) -> bool:
-    """命中并消费 state；不存在 / 已过期 / 不归当前 user 都返回 False。
-
-    "消费"语义：成功命中后立即移除该 state，防止 replay。
-    """
-    if not state:
-        return False
-    now = time.monotonic()
-    with _pending_oauth_states_lock:
-        bucket = _pending_oauth_states.get(user_id) or []
-        idx = -1
-        for i, (s, t) in enumerate(bucket):
-            if t <= now:
-                continue
-            if s == state:
-                idx = i
-                break
-        if idx < 0:
-            return False
-        bucket.pop(idx)
-        # 顺手清理过期项，保持 bucket 紧凑
-        bucket[:] = [(s, t) for (s, t) in bucket if t > now]
-        if not bucket:
-            _pending_oauth_states.pop(user_id, None)
-        return True
-
-
-def _gc_pending_oauth() -> tuple[int, int]:
-    """全局 GC：扫描所有用户的 OAuth 暂存桶，删除整体过期 / 已无活项的条目。
-
-    必要性：``_record_oauth_state`` 仅在写入"该用户"的桶时清理那个桶，
-    ``_consume_oauth_state`` 仅在消费成功后才 ``pop`` 空桶。如果某个用户
-    颁发了 state 之后再没回来消费（关浏览器、改主意），他的 user_id 会
-    永久占据 dict 一个 entry —— 长期跑的进程下，user_id 不断累积，buckets
-    里残留过期项也清不掉，慢速内存泄漏。
-
-    类似地 ``_pending_oauth``（refresh_token 暂存）也只在新写入时局部 GC，
-    没人新调用就永远卡着旧条目。
-
-    本函数被 ``_periodic_cleanup`` 一日一次调用，全局扫一遍。
-    返回 ``(states_dropped, creds_dropped)`` 用于日志统计。
-    """
-    now = time.monotonic()
-    states_dropped = 0
-    creds_dropped = 0
-
-    with _pending_oauth_states_lock:
-        empty_users: list[int] = []
-        for uid, bucket in _pending_oauth_states.items():
-            before = len(bucket)
-            bucket[:] = [(s, t) for (s, t) in bucket if t > now]
-            states_dropped += before - len(bucket)
-            if not bucket:
-                empty_users.append(uid)
-        for uid in empty_users:
-            _pending_oauth_states.pop(uid, None)
-
-    with _pending_oauth_lock:
-        expired_users = [
-            uid for uid, v in _pending_oauth.items() if v[3] <= now
-        ]
-        for uid in expired_users:
-            _pending_oauth.pop(uid, None)
-            creds_dropped += 1
-
-    return states_dropped, creds_dropped
-
-
-def _extract_state_from_redirect(redirect_url: str) -> Optional[str]:
-    """从 redirect URL 的 query 中解析 ``state``；缺失返回 None。"""
-    try:
-        parsed = urllib.parse.urlparse(redirect_url or "")
-        qs = urllib.parse.parse_qs(parsed.query, keep_blank_values=False)
-        values = qs.get("state") or []
-        return values[0] if values else None
-    except (ValueError, TypeError):
-        return None
-
-
-def _pending_oauth_set(user_id: int, client_id: str, refresh_token: str, group: str) -> None:
-    now = time.monotonic()
-    with _pending_oauth_lock:
-        # 顺手清理过期项，避免长期累积
-        for k in [k for k, v in _pending_oauth.items() if v[3] <= now]:
-            _pending_oauth.pop(k, None)
-        _pending_oauth[user_id] = (client_id, refresh_token, group, now + _PENDING_OAUTH_TTL)
-
-
-def _pending_oauth_pop(user_id: int) -> Optional[tuple[str, str, str]]:
-    """取出并删除暂存条目；过期或不存在返回 None。"""
-    now = time.monotonic()
-    with _pending_oauth_lock:
-        entry = _pending_oauth.pop(user_id, None)
-    if not entry or entry[3] <= now:
-        return None
-    return entry[0], entry[1], entry[2]
-
-
-@app.post("/api/oauth2/exchange")
-def exchange_oauth2(req: OAuth2ExchangeRequest, user: dict = CurrentUser) -> dict:
-    """OAuth2 授权码换 refresh_token 并落库。
-
-    两阶段提交：
-    - 首次：``{redirect_url, group}`` → 后端换 token + 自动取邮箱地址
-      若邮箱获取失败，refresh_token 暂存于服务端内存，返回 ``needs_email=True``
-    - 二次：``{email}`` → 后端用之前暂存的 token + 用户提供的 email 完成落库
-
-    新增 CSRF 防御：首次调用必须携带先前由 ``/api/oauth2/auth-url`` 颁发并绑定
-    到当前 user_id 的 ``state``。校验失败立即拒绝，不消费 authorization code。
-    """
-    explicit_email = (req.email or "").strip().lower()
-    redirect_url = req.redirect_url or ""
-    group = (req.group or "默认分组").strip() or "默认分组"
-
-    if explicit_email and not redirect_url:
-        # ── 二次提交分支 ──
-        pending = _pending_oauth_pop(user["id"])
-        if not pending:
-            return {
-                "success": False,
-                "error": "凭据已过期或不存在，请重新点击授权按钮",
-            }
-        client_id, refresh_token, group = pending
-        email = explicit_email
-    else:
-        # ── 首次分支 ──
-        # 先校验 state，避免在 CSRF 场景下白白消费一次性 authorization code
-        state = _extract_state_from_redirect(redirect_url)
-        if not state:
-            return {
-                "success": False,
-                "error": "授权链接缺少 state 参数；请重新点击授权按钮",
-            }
-        if not _consume_oauth_state(user["id"], state):
-            return {
-                "success": False,
-                "error": "授权 state 校验失败（可能跨用户/跨标签/已过期）；请重新点击授权按钮",
-            }
-        helper = OAuth2Helper()
-        client_id, refresh_token, error = helper.exchange_code_for_token(redirect_url)
-        if error:
-            return {"success": False, "error": error}
-
-        email = explicit_email or (_fetch_oauth2_email(client_id, refresh_token) or "")
-        if not email:
-            # 暂存 refresh_token，让用户手动填 email 后二次提交，避免授权码白白浪费
-            _pending_oauth_set(user["id"], client_id, refresh_token, group)
-            return {
-                "success": False,
-                "needs_email": True,
-                "error": "无法自动获取邮箱地址，请手动填写邮箱后再次提交（5 分钟内有效）",
-            }
-
-    existing = db.get_account_by_email(user["id"], email)
-    if existing:
-        ok = db.update_account_oauth(user["id"], existing.id, client_id, refresh_token)
-        if not ok:
-            logger.error("OAuth2 update_account_oauth 失败 user=%s email=%s", user["id"], email)
-            return {"success": False, "error": "更新已有账号失败"}
-    else:
-        ok, msg = db.add_account(
-            user["id"],
-            email,
-            "",
-            group,
-            client_id=client_id,
-            refresh_token=refresh_token,
-        )
-        if not ok:
-            logger.error(
-                "OAuth2 add_account 失败 user=%s email=%s msg=%s",
-                user["id"], email, msg,
-            )
-            return {"success": False, "error": f"添加账号失败: {msg}"}
-    return {"success": True, "email": email}
+# 路由实现在 ``core/helper_routes.py``，本文件只负责挂载并注入数据库 +
+# 站长用户名。注入而非 import 是为了避免 ``helper_routes`` 反向依赖
+# ``web_app`` 形成循环。
+configure_helper_routes(db, CODE_OWNER_USERNAME)
+app.include_router(helper_router)
 
 
 # ── 入口 ────────────────────────────────────────────────────────
@@ -2466,8 +2188,16 @@ def main() -> None:
     ssl_certfile = os.getenv("EMAIL_WEB_SSL_CERT", "").strip() or None
     scheme = "https" if ssl_keyfile and ssl_certfile else "http"
 
+    # 多 worker 检测：HelperRegistry 是进程内单例（_sessions / _pending /
+    # _log_subscribers 全部内存），多 worker 会让 helper register 落在
+    # worker A，但 dispatch 调用可能命中 worker B 拿不到 session。
+    # 邮箱助手功能在多 worker 下**不可用**；这里在启动时强警告而不是
+    # silently 接受，避免运维误配。
+    workers_env = os.getenv("EMAIL_WEB_WORKERS", "").strip()
+    workers = int(workers_env) if workers_env.isdigit() else 1
+
     print("=" * 50)
-    print(f"  邮箱管家 Web v3.1 (多用户 + 审计)")
+    print(f"  邮箱管家 Web v3.1 (多用户 + 审计 + 邮箱助手)")
     print(f"  访问: {scheme}://{host}:{port}")
     print(f"  注册: {'已禁用' if DISABLE_REGISTER else '开放（首次访问可注册账号）'}")
     print(f"  反代: {'信任 X-Forwarded-* 头' if TRUST_PROXY else '不信任反代头（公网直连推荐）'}")
@@ -2475,6 +2205,20 @@ def main() -> None:
         print(f"  TLS:  启用 (cert={ssl_certfile})")
     elif host not in {"127.0.0.1", "localhost", "::1"}:
         print(f"  [WARN] HTTP 明文传输；公网/内网建议设置 EMAIL_WEB_SSL_KEY/CERT 或经由反代")
+    if workers > 1:
+        print("=" * 50, file=sys.stderr)
+        print(
+            f"  [WARN] EMAIL_WEB_WORKERS={workers} 多 worker 模式：",
+            file=sys.stderr,
+        )
+        print(
+            "         「📬 邮箱助手 Helper」功能**不可用**（HelperRegistry 是进程内单例）。",
+            file=sys.stderr,
+        )
+        print(
+            "         如需 helper，请设置 EMAIL_WEB_WORKERS=1 或不设置该环境变量。",
+            file=sys.stderr,
+        )
     print("=" * 50)
 
     # 启动时打印安全警告（POSIX 平台权限检查 + 主密钥共目录提示）
@@ -2517,6 +2261,10 @@ def main() -> None:
     except Exception:
         logger.exception("启动清理失败（忽略）")
 
+    # 注意：``uvicorn.run(app=<对象>, workers=N)`` workers 不会生效（uvicorn
+    # 要求多 worker 时必须传 import path 字符串）。这里没传 workers，
+    # 永远是单 worker；要多 worker 请通过 ``uvicorn web_app:app --workers N``
+    # 命令行启动 —— **但那会破坏邮箱助手功能**（见 main() 开头警告）。
     uvicorn.run(
         app,
         host=host,

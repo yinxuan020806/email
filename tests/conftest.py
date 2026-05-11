@@ -15,6 +15,19 @@ from pathlib import Path
 
 import pytest
 
+
+# ── 已移除的接口标记 ────────────────────────────────────────────
+#
+# 「手动授权」OAuth2 接口（``/api/oauth2/auth-url`` / ``/api/oauth2/exchange``
+# / ``_pending_oauth_*`` 内部状态）在「邮箱助手 Helper」上线时被整体替换为
+# helper 派发流程。下面这组测试针对的接口已经不存在了，但暂时保留测试文件
+# 作为历史回归覆盖；用 ``OAUTH_REMOVED_SKIP`` 标记统一跳过。
+#
+# 后续 Stage 2 移植完 outlook_service.py 后可以彻底删除这些测试。
+OAUTH_REMOVED_SKIP = pytest.mark.skip(
+    reason="/api/oauth2/* 接口已被「邮箱助手 Helper」替代；此回归测试已过期",
+)
+
 # 让测试能 import 到项目根模块
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

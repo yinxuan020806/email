@@ -15,6 +15,7 @@
 - **HTTPS 支持** — 通过环境变量挂载证书；附带自签证书生成脚本
 - **中英双语** — 前端实时切换 zh/en
 - **测试覆盖** — 230+ 个 pytest 用例覆盖核心逻辑（鉴权 / 加密 / DB / 路由 / 限流 / OAuth / 提取器）
+- **📬 邮箱助手 Helper（站长专属）** — 本地 Windows 客户端 + HTTP 长轮询，让 Web 面板在你的电脑上自动登录 Outlook、自动 OAuth2 取 refresh_token、自动改密、自动绑辅助邮箱（4 个独立小功能 + 批量版 + 每行账号一键派发）
 
 ---
 
@@ -28,29 +29,36 @@ email/
 │   ├── graph_client.py       # Microsoft Graph / Outlook REST 实现
 │   ├── oauth_token.py        # OAuth access_token 管理
 │   ├── oauth2_helper.py      # OAuth 授权码换取 refresh_token
-│   ├── folder_map.py         # 文件夹名映射
-│   ├── mail_parser.py        # RFC 822 解析辅助
-│   ├── server_config.py      # 邮件服务器配置注册表
+│   ├── helper_registry.py    # 📬 邮箱助手 — 连接池 + 任务派发 + SSE 日志
+│   ├── helper_routes.py      # 📬 邮箱助手 — FastAPI APIRouter（14 端点）
+│   ├── folder_map.py
+│   ├── mail_parser.py
+│   ├── server_config.py
 │   ├── security.py           # Fernet 加解密
-│   └── models.py             # 类型化数据模型
+│   └── models.py
 ├── database/
-│   └── db_manager.py         # SQLite 持久化、版本化迁移、WAL
-├── static/                   # 前端资源
+│   ├── db_manager.py         # SQLite 持久化、版本化迁移、WAL
+│   └── helper_token.py       # 📬 邮箱助手 — helper.db / helper_tokens
+├── helper/                   # 📬 本地 Windows 客户端
+│   ├── main.py / client.py / handlers.py / config.py / protocol.py
+│   ├── autostart.py / tray.py / EmailHelper.spec
+│   ├── actions/mailbox.py    # 邮箱浏览器自动化 action（Stage 2 实现）
+│   ├── install.ps1 / uninstall.ps1 / build.ps1
+│   ├── _smoke_e2e.py         # 端到端冒烟测试
+│   └── README.md / CHANGELOG.md
+├── static/
 │   ├── index.html
 │   ├── app.css
 │   ├── app.js
 │   └── i18n.js
 ├── scripts/
-│   └── gen_cert.py           # 自签 TLS 证书生成
-├── tests/                    # pytest 测试
-│   ├── test_security.py
-│   ├── test_db.py
-│   ├── test_email_client.py
-│   └── test_web_app.py
-├── data/                     # 运行时数据 (gitignored)
-│   ├── emails.db             # SQLite 数据库
-│   └── .master.key           # 主密钥（首次启动自动生成）
-├── web_app.py                # FastAPI 入口
+│   └── gen_cert.py
+├── tests/
+├── data/
+│   ├── emails.db
+│   ├── helper.db             # 📬 helper token 存储
+│   └── .master.key
+├── web_app.py
 ├── requirements.txt
 └── requirements-dev.txt
 ```
@@ -88,6 +96,65 @@ python web_app.py
 | `EMAIL_WEB_SSL_CERT` | _空_ | TLS 证书路径（PEM） |
 | `EMAIL_OAUTH_CLIENT_ID` | Thunderbird ID | 自托管 Azure 应用时填入自己的 client_id |
 | `EMAIL_OAUTH_REDIRECT_URI` | `https://localhost` | OAuth 授权回调地址 |
+| `CODE_OWNER_USERNAME` | `xiaoxuan` | 站长用户名 — 独占「📬 邮箱助手」与接码白名单功能 |
+
+---
+
+## 📬 邮箱助手 Helper（站长专属）
+
+把繁琐的「手动 OAuth2 复制重定向 URL」「在浏览器里改密」「手工绑辅助邮箱」全都
+**让本地客户端自动完成**。架构 = 本地 `EmailHelper.exe`（Windows 系统托盘）⇄
+FastAPI 后端 HTTP 长轮询。
+
+### 功能
+
+| 功能 | 触发位置 | Helper Action |
+|------|---------|-------------|
+| 🔓 自动登录邮箱 | 表格每行 / Help 卡片 / 批量按钮 | `open_mailbox` |
+| 🔑 获取 Refresh Token | 表格每行 / Help 卡片 / 批量按钮 | `get_ms_token` |
+| 🔒 修改邮箱密码 | 表格每行 / Help 卡片 | `change_email_password` |
+| 🔗 绑定辅助邮箱 | 表格每行 / Help 卡片 | `bind_recovery_email` |
+
+每次操作 = 一个独立任务 → SSE 实时日志推回 → 失败可重试、过程可取消。
+
+### 权限
+
+- **仅 `xiaoxuan`（CODE_OWNER_USERNAME）可见可用**
+- 普通用户访问 helper API 一律返回 `403 邮箱助手功能仅站长可用`
+- 表格每行的 🔓 🔑 🔒 🔗 按钮通过 `.owner-only` 显示控制 + 后端 `require_owner`
+  依赖**双层防御**
+
+### 使用流程
+
+1. xiaoxuan 登录 Web 面板，侧边栏点 **「📬 邮箱助手」**
+2. 点 **「📥 下载」** 拿 `EmailHelper.exe` + `install.ps1` + `uninstall.ps1`
+3. 把三个文件放同一目录，右键 `install.ps1` → 「用 PowerShell 运行」
+   - **被拒绝？** Win10/11 默认 ExecutionPolicy 是 Restricted，先跑：
+     `powershell -ExecutionPolicy Bypass -File install.ps1`
+4. 系统托盘出现 Email Helper 绿色圆点
+5. 回 Web 面板点 **「🚀 启动助手」** → 通过 `emailhelper://` URL 协议自动绑定
+   token
+6. 状态变绿后，表格里每个 Outlook 账号后面就有 🔓 🔑 🔒 🔗 4 个按钮可点
+
+### 端到端冒烟测试
+
+打包前用以下脚本验证全链路：
+
+```powershell
+# 假设 web_app 跑在 18888
+python helper\_smoke_e2e.py http://127.0.0.1:18888
+```
+
+详见 [`helper/README.md`](helper/README.md) 与 [`helper/CHANGELOG.md`](helper/CHANGELOG.md)。
+
+### 协议设计
+
+走 HTTP 长轮询而非 WebSocket，理由：
+- 多 worker / Cloudflare / Nginx 反代场景下 idle timeout 更难管控 WS
+- 所有 ASGI / WSGI 部署都能跑 HTTP 长轮询
+- 派单延迟 300ms-1s，业务可接受
+
+详细协议见 [`helper/README.md`](helper/README.md) 的「通信协议」一节。
 
 ---
 
