@@ -351,6 +351,52 @@ email----password----client_id----refresh_token$$--------组名
   </div>
 </div></div>
 
+<!-- Helper 启动助手 Modal：显示备用命令以防 URL 协议未注册 -->
+<div class="modal-bg" id="helperLaunchModal"><div class="modal" style="width:680px">
+  <div class="modal-h">
+    <h3 data-i18n="help_launch_title">🚀 启动助手</h3>
+    <button class="modal-close" data-close="helperLaunchModal">×</button>
+  </div>
+  <div class="modal-body">
+    <p style="font-size:13px;color:var(--text2);margin-bottom:10px" data-i18n="help_launch_intro">
+      已生成新 token。浏览器会尝试通过 <code>emailhelper://</code> 协议自动拉起本地 Helper。
+      如果 30 秒后状态仍未变绿，说明 URL 协议未注册，请用下方任一备用方案手动启动。
+    </p>
+
+    <div style="margin-top:14px">
+      <label style="font-size:12px;color:var(--text2);font-weight:600" data-i18n="help_launch_option_url">方案 A：浏览器 / Windows 拉起（推荐 — 协议已注册时秒连）</label>
+      <div class="help-launch-cmd-row">
+        <input type="text" id="helperLaunchUrl" readonly class="help-launch-cmd" />
+        <button class="btn btn-o btn-tiny" id="btnCopyLaunchUrl" data-i18n="btn_copy">复制</button>
+      </div>
+    </div>
+
+    <div style="margin-top:14px">
+      <label style="font-size:12px;color:var(--text2);font-weight:600" data-i18n="help_launch_option_exe">方案 B：PowerShell 直接跑 .exe（适用打包后的 EmailHelper.exe）</label>
+      <div class="help-launch-cmd-row">
+        <input type="text" id="helperLaunchExeCmd" readonly class="help-launch-cmd" />
+        <button class="btn btn-o btn-tiny" id="btnCopyLaunchExe" data-i18n="btn_copy">复制</button>
+      </div>
+    </div>
+
+    <div style="margin-top:14px">
+      <label style="font-size:12px;color:var(--text2);font-weight:600" data-i18n="help_launch_option_src">方案 C：源码模式（开发期）</label>
+      <div class="help-launch-cmd-row">
+        <input type="text" id="helperLaunchSrcCmd" readonly class="help-launch-cmd" />
+        <button class="btn btn-o btn-tiny" id="btnCopyLaunchSrc" data-i18n="btn_copy">复制</button>
+      </div>
+    </div>
+
+    <div style="margin-top:16px;padding:10px 12px;background:var(--hover);border-radius:6px;font-size:12px;color:var(--text2)" data-i18n="help_launch_note">
+      💡 注册 URL 协议（一次性）：跑 install.ps1，或在 PowerShell 跑：
+      <code style="display:block;margin-top:6px">powershell -ExecutionPolicy Bypass -File install.ps1</code>
+    </div>
+  </div>
+  <div class="modal-foot">
+    <button class="btn btn-p" data-close="helperLaunchModal" data-i18n="btn_close">关闭</button>
+  </div>
+</div></div>
+
 <!-- Helper 批量操作进度 Modal -->
 <div class="modal-bg" id="helperBatchModal"><div class="modal" style="width:640px">
   <div class="modal-h">

@@ -239,6 +239,10 @@ body{font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif;background
 .help-task-status.error{background:rgba(231,76,60,.12);color:var(--danger);border:1px solid rgba(231,76,60,.4)}
 .help-task-elapsed{display:inline-block;margin-left:10px;padding:2px 8px;font-size:11px;color:var(--text2);background:var(--hover);border-radius:4px;font-family:'Consolas','Courier New',monospace}
 .help-version-warn{font-size:12px;padding:8px 12px;margin:8px 0;background:rgba(241,196,15,.12);color:var(--warning);border:1px solid rgba(241,196,15,.4);border-radius:6px}
+/* 启动助手 Modal — 备用命令复制条 */
+.help-launch-cmd-row{display:flex;gap:6px;margin-top:6px}
+.help-launch-cmd{flex:1;font-family:'Consolas','Courier New',monospace;font-size:12px;padding:6px 10px;background:var(--inp-bg);border:1px solid var(--inp-bd);border-radius:4px;color:var(--text)}
+.help-launch-cmd:focus{outline:none;border-color:var(--accent)}
 .log-line{padding:1px 0;white-space:pre-wrap;word-break:break-word}
 .log-line.log-info{color:var(--text)}
 .log-line.log-warning{color:var(--warning)}

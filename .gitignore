@@ -60,3 +60,13 @@ terminals/
 _deploy_remote.py
 _deploy_remote.log
 
+# 邮箱助手 Helper PyInstaller 产物：
+# build.ps1 把打包好的 EmailHelper.exe 拷到 static/helper/ 给 Web 面板下载，
+# .exe 体积 ~20MB 不适合入库；install/uninstall 脚本也是从 helper/ 同步过来，
+# 源在 helper/ 已入库，整目录忽略即可。
+static/helper/
+helper/.build_venv/
+helper/build/
+helper/dist/
+helper/*.spec.bak
+

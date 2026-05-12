@@ -2230,13 +2230,44 @@ async function launchHelper() {
       toast(t('toast_help_provision_fail') + (r.error || ''), 'error');
       return;
     }
-    const url = `emailhelper://connect?token=${encodeURIComponent(r.token)}&server=${encodeURIComponent(location.origin)}`;
+    const token = r.token;
+    const server = location.origin;
+    const url = `emailhelper://connect?token=${encodeURIComponent(token)}&server=${encodeURIComponent(server)}`;
+    // .exe 命令：用户拷出来到 cmd / PowerShell 跑（quote 处理跨 shell 复制粘贴稳）
+    const exeCmd = `EmailHelper.exe --token ${token} --server ${server}`;
+    const srcCmd = `python helper/main.py --no-tray --debug --token ${token} --server ${server}`;
+
+    // 弹 Modal 显示 3 个方案的命令，让用户在 URL 协议未注册时也能手动启动
+    $('helperLaunchUrl').value = url;
+    $('helperLaunchExeCmd').value = exeCmd;
+    $('helperLaunchSrcCmd').value = srcCmd;
+    openModal('helperLaunchModal');
+
     _helperPollFastUntil = Date.now() + 30 * 1000;
+    // 浏览器拉起协议（已注册的话会秒连；未注册的话 user 看到 modal 后能复制 .exe 命令兜底）
     window.location.href = url;
-    setTimeout(() => toast(t('toast_help_launching'), 'info'), 200);
     setTimeout(() => loadHelperTokens(), 500);
   } catch (e) {
     toast(t('toast_help_provision_fail') + (e.message || ''), 'error');
+  }
+}
+
+function _copyLaunchField(fieldId) {
+  const el = $(fieldId);
+  if (!el || !el.value) return;
+  try {
+    el.select();
+    el.setSelectionRange(0, el.value.length);
+    document.execCommand('copy');
+    toast(t('toast_copied'), 'success');
+  } catch {
+    // 现代浏览器 fallback 到 navigator.clipboard
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(el.value).then(
+        () => toast(t('toast_copied'), 'success'),
+        () => toast(t('toast_clip_fail'), 'error'),
+      );
+    }
   }
 }
 
@@ -2742,6 +2773,9 @@ $('btnBatchHelperOpen').addEventListener('click', batchHelperOpen);
 $('btnBatchHelperToken').addEventListener('click', batchHelperGetToken);
 $('btnBatchHelperBind').addEventListener('click', batchHelperBindRecovery);
 $('helperBatchAbort').addEventListener('click', abortBatchHelper);
+$('btnCopyLaunchUrl').addEventListener('click', () => _copyLaunchField('helperLaunchUrl'));
+$('btnCopyLaunchExe').addEventListener('click', () => _copyLaunchField('helperLaunchExeCmd'));
+$('btnCopyLaunchSrc').addEventListener('click', () => _copyLaunchField('helperLaunchSrcCmd'));
 $('themeBtn').addEventListener('click', toggleTheme);
 $('langBtn').addEventListener('click', toggleLang);
 $('addGroupBtn').addEventListener('click', addGroup);
