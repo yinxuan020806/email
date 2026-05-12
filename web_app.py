@@ -56,7 +56,8 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from starlette.types import Scope
+from starlette.datastructures import MutableHeaders
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from pydantic import BaseModel, Field, field_validator
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -260,25 +261,80 @@ _CSP_HEADER = (
 )
 
 
-@app.middleware("http")
-async def add_security_headers(request: Request, call_next):
-    response = await call_next(request)
-    response.headers.setdefault("X-Content-Type-Options", "nosniff")
-    response.headers.setdefault("X-Frame-Options", "DENY")
-    response.headers.setdefault("Referrer-Policy", "no-referrer")
-    response.headers.setdefault("Content-Security-Policy", _CSP_HEADER)
-    response.headers.setdefault(
-        "Permissions-Policy",
-        "camera=(), microphone=(), geolocation=(), payment=()",
-    )
-    if _is_https(request):
-        # max-age=1 年；includeSubDomains 让所有子域同享。不加 ``preload``
-        # 避免被 hsts preload list 收录后想下线极难。
-        response.headers.setdefault(
-            "Strict-Transport-Security",
-            "max-age=31536000; includeSubDomains",
-        )
-    return response
+# ⚠ 不要把这段改回 ``@app.middleware("http")`` / ``BaseHTTPMiddleware``。
+# 实测教训（2026-05-12，evuzdnd.cn 524 事件）：
+# BaseHTTPMiddleware 在 SSE / 客户端中途断连 / 路由抛裸异常 三类场景下，
+# ``call_next`` 拿不到 response 就抛 ``RuntimeError: No response returned``；
+# 该异常会顺着 anyio.TaskGroup 冒到 starlette 顶层，留下没清理干净的
+# send/receive 流，**整个 uvicorn event loop 会卡死**——后续所有请求 hang，
+# 容器内部 curl 127.0.0.1:8000 都超时，docker healthcheck 失败，Cloudflare
+# 100s 等不到 origin 即返 524。详见 encode/starlette#1438。
+#
+# 纯 ASGI middleware 不走 BaseHTTPMiddleware 的 TaskGroup 路径，仅在
+# ``http.response.start`` 这一个 ASGI message 里给 header 加几个字段，
+# 不引入额外的异常吞噬层，SSE / 客户端断连场景下也只是把异常透传给上一
+# 层（uvicorn 自己能干净处理），不会卡 loop。
+class SecurityHeadersMiddleware:
+    """给所有 HTTP 响应批量补全安全相关 header（替代 BaseHTTPMiddleware 实现）。
+
+    实现要点：
+    - 只 wrap ``http.response.start`` 这一条 ASGI 消息；body 一字不动透传，
+      不会破坏 StreamingResponse / SSE。
+    - ``MutableHeaders(scope=message)`` 直接操作 ASGI raw headers 列表，
+      ``setdefault`` 行为与 ``Response.headers.setdefault`` 一致（已显式设
+      过的路由级 header —— 如 SSE 的 ``X-Accel-Buffering: no`` —— 不被覆盖）。
+    - HSTS 只在确认 HTTPS 时下发，避免 HTTP 部署被锁死强制 HTTPS。
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    @staticmethod
+    def _scope_is_https(scope: Scope) -> bool:
+        if scope.get("scheme") == "https":
+            return True
+        if not TRUST_PROXY:
+            return False
+        for name, value in scope.get("headers", ()):  # type: ignore[arg-type]
+            if name == b"x-forwarded-proto":
+                # 与 _is_https 同一规则：多值取首段、精确 ==。
+                raw = value.decode("latin-1", errors="ignore")
+                proto = raw.split(",", 1)[0].strip().lower()
+                return proto == "https"
+        return False
+
+    async def __call__(
+        self, scope: Scope, receive: Receive, send: Send,
+    ) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        is_https = self._scope_is_https(scope)
+
+        async def send_wrapper(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers.setdefault("X-Content-Type-Options", "nosniff")
+                headers.setdefault("X-Frame-Options", "DENY")
+                headers.setdefault("Referrer-Policy", "no-referrer")
+                headers.setdefault("Content-Security-Policy", _CSP_HEADER)
+                headers.setdefault(
+                    "Permissions-Policy",
+                    "camera=(), microphone=(), geolocation=(), payment=()",
+                )
+                if is_https:
+                    # max-age=1 年；includeSubDomains 让所有子域同享。不加
+                    # ``preload`` 避免被 hsts preload list 收录后想下线极难。
+                    headers.setdefault(
+                        "Strict-Transport-Security",
+                        "max-age=31536000; includeSubDomains",
+                    )
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+
+
+app.add_middleware(SecurityHeadersMiddleware)
 
 
 # ── 静态资源 ────────────────────────────────────────────────────

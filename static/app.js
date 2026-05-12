@@ -77,15 +77,50 @@ const el = (tag, attrs = {}, children = []) => {
 const clear = (node) => { while (node.firstChild) node.removeChild(node.firstChild); };
 
 // ───────── API ─────────
+// 普通 API 请求的默认客户端超时（毫秒）。
+// 设计目的：Cloudflare Free/Pro 默认 100s 才返 524，浏览器 fetch 又
+// 不设默认 timeout，于是用户在后端僵死时要干等 100s 才拿到 CF HTML
+// 错误页。30s 已经远大于所有"健康后端"上的接口（最慢的同步 SQLite
+// 操作 < 1s），早返回让 UI 早进入错误态、用户能更快意识到该刷一下。
+// SSE / 流式请求显式传 ``{ noTimeout: true }`` 豁免。
+const DEFAULT_REQUEST_TIMEOUT_MS = 30000;
+
 async function request(url, options = {}) {
-  const opts = { credentials: 'include', headers: {}, ...options };
+  const { noTimeout, timeoutMs, ...rest } = options || {};
+  const opts = { credentials: 'include', headers: {}, ...rest };
   // 统一带上 cookie；显式声明，便于跨端口/HTTPS 一致
   opts.credentials = 'include';
   if (opts.body && !(opts.body instanceof FormData)) {
     opts.headers['Content-Type'] = 'application/json';
     if (typeof opts.body !== 'string') opts.body = JSON.stringify(opts.body);
   }
-  const r = await fetch(url, opts);
+  // 给短请求接 AbortController；SSE 流（``api.stream``）显式跳过
+  let timeoutId = null;
+  if (!noTimeout && !opts.signal) {
+    const ac = new AbortController();
+    opts.signal = ac.signal;
+    const ms = (typeof timeoutMs === 'number' && timeoutMs > 0)
+      ? timeoutMs : DEFAULT_REQUEST_TIMEOUT_MS;
+    timeoutId = setTimeout(() => ac.abort(), ms);
+  }
+  let r;
+  try {
+    r = await fetch(url, opts);
+  } catch (e) {
+    // AbortError → 把它包装成"网关超时"系列的可识别错误，避免上层显示
+    // 原始 ``signal is aborted without reason``
+    if (e && e.name === 'AbortError') {
+      const err = new Error('请求超时（已等待 ' +
+        Math.round((timeoutMs || DEFAULT_REQUEST_TIMEOUT_MS) / 1000) +
+        's，后端可能在重启或卡死）');
+      err.status = 0;
+      err.code = 'client_timeout';
+      throw err;
+    }
+    throw e;
+  } finally {
+    if (timeoutId !== null) clearTimeout(timeoutId);
+  }
   if (r.status === 401) {
     // 跳过 401 的特殊路径：不让 /api/auth/me 自身的 401 触发登录弹框反复展示
     if (!url.startsWith('/api/auth/')) {
@@ -99,16 +134,52 @@ async function request(url, options = {}) {
   return r;
 }
 
-// 解析后端错误 detail（JSON / 文本），便于在 toast 中展示
+// HTTP 状态码 → 用户能看懂的简短文案。空字符串 = 走 detail / fallback。
+const _GATEWAY_ERROR_HINT = {
+  502: '反代/网关错误（502 Bad Gateway）',
+  503: '服务暂时不可用（503）',
+  504: '反代超时（504 Gateway Timeout）',
+  520: 'Cloudflare 520：源站返回了空响应',
+  521: 'Cloudflare 521：源站拒绝连接（后端进程没起）',
+  522: 'Cloudflare 522：源站 TCP 握手超时（防火墙/网络问题）',
+  523: 'Cloudflare 523：源站不可达（路由问题）',
+  524: 'Cloudflare 524：源站响应超时（最常见原因 = 后端 event loop 卡死，需要重启 docker compose restart email-web）',
+  525: 'Cloudflare 525：源站 TLS 握手失败',
+  526: 'Cloudflare 526：源站证书无效',
+};
+
+// 解析后端错误 detail（JSON / 文本），便于在 toast 中展示。
+//
+// 关键改动：旧实现拿不到 JSON 就 ``await r.text()`` 全文返回，而 Cloudflare
+// 524/502 等会返一整页 HTML（~5KB），结果是 UI 卡片里堆一整坨
+// ``<!DOCTYPE html>...`` 之类的字符。这里做三步处理：
+//   1) 如果是 ``_GATEWAY_ERROR_HINT`` 里登记的 5xx 状态码，直接返登记文案
+//   2) 否则尝试 JSON.parse；解出 detail/error 字段就回那一段
+//   3) 否则 text() 取首段不含 HTML 标签的内容；全是 HTML 就只显示状态码
 async function parseError(r) {
+  const hint = _GATEWAY_ERROR_HINT[r.status];
+  if (hint) return hint;
   try {
     const j = await r.clone().json();
     if (typeof j.detail === 'string') return j.detail;
     if (Array.isArray(j.detail)) return j.detail.map((d) => d.msg).join('; ');
+    if (typeof j.error === 'string') return j.error;
     return JSON.stringify(j);
   } catch {
-    try { return await r.text(); } catch { return r.statusText; }
+    /* not JSON, fall through */
   }
+  try {
+    const txt = await r.text();
+    const trimmed = (txt || '').trim();
+    // 看起来是 HTML 错误页（含 <html / <!DOCTYPE / </head> 等） → 不暴露全文
+    if (/^<!doctype|^<html/i.test(trimmed) || /<\/head>/i.test(trimmed)) {
+      // 尽量抓 <title> 里的内容（如 "524: A timeout occurred"）作为提示
+      const m = trimmed.match(/<title[^>]*>([^<]{1,160})<\/title>/i);
+      const title = m ? m[1].trim() : '';
+      return `HTTP ${r.status}${title ? ' · ' + title : ''}（反代/CDN 返回了 HTML 错误页，源站多半没响应）`;
+    }
+    return trimmed.slice(0, 240) || r.statusText || `HTTP ${r.status}`;
+  } catch { return r.statusText || `HTTP ${r.status}`; }
 }
 
 async function readJson(r) {
@@ -127,7 +198,10 @@ const api = {
   put: (u, d) => request(u, { method: 'PUT', body: d }).then(readJson),
   del: (u) => request(u, { method: 'DELETE' }).then(readJson),
   stream: async (u, d, onData) => {
-    const r = await request(u, { method: 'POST', body: d });
+    // SSE 长连接显式 noTimeout，不被默认 30s AbortController 切。
+    // 反代/CF 端的 idle timeout 由后端 SSE keepalive 注释帧 (`: keepalive\n\n`)
+    // 兜住，详见 core/helper_routes.py batch_mailbox 的实现。
+    const r = await request(u, { method: 'POST', body: d, noTimeout: true });
     if (!r.ok) {
       const msg = await parseError(r);
       throw new Error(msg);

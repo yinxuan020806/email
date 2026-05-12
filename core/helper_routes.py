@@ -961,10 +961,40 @@ async def batch_mailbox(
                         })
                         continue
 
-                result = await run_in_threadpool(
+                # 单条 helper 任务可能跑到 300s+（绑辅助 IMAP 轮询、改密
+                # proofs/Add 自动接管等）。这期间如果只 await 不输出，Cloudflare
+                # Free/Pro 100s idle 会把 SSE 流 524 切了；前端拿到 524 HTML
+                # 全文塞进 modal，体验崩。所以把 dispatch 包成"边等边吐
+                # keepalive 注释"的协程，每 ~25s 输出一次 `: keepalive\\n\\n`，
+                # 让 SSE 持续有字节流，绕过 CF idle timeout。
+                # 注：SSE 注释帧 (以 `:` 开头) 不会被前端 EventSource onmessage
+                # 回调感知到，只是保活心跳，前端 progress 处理逻辑完全不受影响。
+                dispatch_task = asyncio.create_task(run_in_threadpool(
                     registry.dispatch,
                     req.action, params, req.timeout, owner_id,
-                )
+                ))
+                try:
+                    while True:
+                        try:
+                            result = await asyncio.wait_for(
+                                asyncio.shield(dispatch_task),
+                                timeout=25.0,
+                            )
+                            break
+                        except asyncio.TimeoutError:
+                            # 25s 还没出结果，吐一条 SSE 注释帧续命
+                            yield ": keepalive\n\n"
+                            if await request.is_disconnected():
+                                # 客户端真的走了 → 取消等待并停掉本批
+                                dispatch_task.cancel()
+                                aborted = True
+                                break
+                    if aborted:
+                        break
+                except asyncio.CancelledError:
+                    dispatch_task.cancel()
+                    aborted = True
+                    break
 
                 if (
                     req.action == "get_ms_token"
