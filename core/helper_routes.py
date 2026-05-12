@@ -464,7 +464,10 @@ def get_imap_config(user: dict = Depends(require_owner)) -> dict:
         "qq_imap_password_set": bool(cfg.get("qq_imap_password")),
         "qq_imap_host": cfg.get("qq_imap_host", "imap.qq.com"),
         "qq_imap_port": cfg.get("qq_imap_port", 993),
-        "recovery_alias_suffix": cfg.get("recovery_alias_suffix", "evuzdnd.cn"),
+        # 默认留空：参考项目 cursor-manager 的 ``evuzdnd.cn`` 是作者私有
+        # catch-all 域名，用户用了会落到 Cloudflare 524 死域名。空字符串让
+        # 前端 placeholder 显示 ``example.com``，强制用户填自己的后缀。
+        "recovery_alias_suffix": cfg.get("recovery_alias_suffix", ""),
     }
 
 
@@ -828,24 +831,36 @@ async def mailbox_change_password(
 
 
 class BatchMailboxRequest(BaseModel):
-    """批量 helper 操作请求。
+    """批量 / 单条 helper 操作请求（SSE 流式响应）。
 
-    - ``action``：``open_mailbox`` / ``get_ms_token`` / ``bind_recovery_email``
-      （``change_email_password`` 不支持批量 —— 一次性给所有账号设同一密码
-      在生产场景几乎没意义，且容易误操作）
-    - ``account_ids``：要操作的账号 ID 列表
-    - ``timeout``：单个任务的超时（默认 180s）
-    - 串行执行，每完成一个就 yield 一条 SSE progress 事件
+    - ``action``：``open_mailbox`` / ``get_ms_token`` /
+      ``bind_recovery_email`` / ``change_email_password``
+    - ``account_ids``：要操作的账号 ID 列表（单条操作传 ``[id]`` 即可走
+      SSE 链路绕开 Cloudflare 100s 短超时）
+    - ``timeout``：单个任务的超时（默认 180s；范围 10~600s）
+    - action-specific 可选参数：
+      * ``alias_suffix`` / ``alias_email``：bind_recovery_email 专用
+      * ``new_password``：change_email_password 专用
+    - 串行执行，每完成一个就 yield 一条 SSE progress 事件，绕过反代短超时
+
+    ⚠ ``change_email_password`` 走批量时所有账号会被设为**同一**新密码 ——
+    生产几乎没意义；前端只在「单条改密」走批量 API（``account_ids=[id]``）
+    时才用上这个参数，UI 不暴露真正的"批量改密"按钮。
     """
     action: str = Field(min_length=1, max_length=64)
     account_ids: list[int] = Field(min_length=1, max_length=200)
     timeout: int = Field(default=180, ge=10, le=600)
+    # ── 单条 / 特定 action 的可选参数（仅在 action 匹配时被使用） ──
+    alias_suffix: Optional[str] = Field(default=None, max_length=64)
+    alias_email: Optional[str] = Field(default=None, max_length=256)
+    new_password: Optional[str] = Field(default=None, min_length=8, max_length=512)
 
 
 _BATCH_ALLOWED_ACTIONS = frozenset({
     "open_mailbox",
     "get_ms_token",
     "bind_recovery_email",
+    "change_email_password",
 })
 
 
@@ -924,6 +939,27 @@ async def batch_mailbox(
                 # proofs/Add 自动接管）都依赖 QQ IMAP 凭据 → 透传
                 if req.action in {"bind_recovery_email", "change_email_password"}:
                     _inject_imap_config(params)
+                # 单条调用经 batch SSE 链路时的 action-specific 字段透传：
+                # alias_suffix/alias_email（绑辅助）、new_password（改密）
+                if req.action == "bind_recovery_email":
+                    if req.alias_suffix:
+                        params["alias_suffix"] = req.alias_suffix
+                    if req.alias_email:
+                        params["alias_email"] = req.alias_email
+                if req.action == "change_email_password":
+                    if req.new_password:
+                        params["new_password"] = req.new_password
+                    else:
+                        # 改密缺新密码 → 直接当失败汇报，不浪费一次 dispatch
+                        fail_cnt += 1
+                        yield _sse({
+                            "type": "progress",
+                            "current": idx + 1, "total": total,
+                            "account_id": aid, "email": email,
+                            "success": False,
+                            "error": "缺少 new_password",
+                        })
+                        continue
 
                 result = await run_in_threadpool(
                     registry.dispatch,
@@ -949,6 +985,23 @@ async def batch_mailbox(
                                 aid, e,
                             )
                             result["db_update_failed"] = str(e)
+
+                # 单条改密走 SSE 链路成功后同样要落库（与
+                # POST /mailbox/change-password 行为对齐）
+                if (
+                    req.action == "change_email_password"
+                    and result.get("success")
+                    and req.new_password
+                    and _db is not None
+                ):
+                    try:
+                        _db.update_account_password(owner_id, aid, req.new_password)
+                    except Exception as e:  # noqa: BLE001
+                        logger.exception(
+                            "批量 change_email_password 落库失败 aid=%s: %s",
+                            aid, e,
+                        )
+                        result["db_update_failed"] = str(e)
 
                 ok = bool(result.get("success"))
                 if ok:

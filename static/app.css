@@ -115,10 +115,82 @@ body{font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif;background
 .email-cell{display:flex;align-items:center;gap:4px}
 .email-cell .email-t{flex:1;overflow:hidden;text-overflow:ellipsis;cursor:copy;white-space:nowrap;user-select:none}
 .email-cell .email-t:hover{color:var(--accent);text-decoration:underline}
-.op-btns{display:flex;gap:4px}
-.op-btns button{padding:4px 10px;border-radius:4px;border:1px solid var(--border);background:var(--card);color:var(--text);font-size:11px;cursor:pointer;transition:.15s;white-space:nowrap}
-.op-btns button:hover{border-color:var(--accent);color:var(--accent)}
-.op-btns button.danger:hover{border-color:var(--danger);color:var(--danger)}
+.op-btns{display:flex;align-items:center;gap:3px;flex-wrap:nowrap}
+/* 兼容：仍有少量旧代码用 .op-btns button 的旧矩形样式（已移除主路径，保留 fallback） */
+.op-btns > button:not(.row-ico-btn):not(.row-more-item){padding:4px 10px;border-radius:4px;border:1px solid var(--border);background:var(--card);color:var(--text);font-size:11px;cursor:pointer;transition:.15s;white-space:nowrap}
+.op-btns > button:not(.row-ico-btn):not(.row-more-item):hover{border-color:var(--accent);color:var(--accent)}
+.op-btns > button.danger:not(.row-ico-btn):hover{border-color:var(--danger);color:var(--danger)}
+
+/* ── 行内圆形 emoji 按钮（参考 cursor-manager `.btn-icon` 风格） ────────
+ *
+ * 设计要点
+ * 1. 28×28 圆形是密度 / 可点击平衡点：表格里 6~9 个按钮一行不挤；移动端
+ *    iOS HIG 触控目标 ≥28px，无障碍 ok
+ * 2. 全部 24×24 emoji 字号 14；hover 上浮 2px + 投影；active 反向缩放 0.93
+ * 3. 不同动作用不同色变体（.ico-h-* 走渐变色，跟参考项目一致）；普通操作
+ *    用 var(--inp-bg) 配 hover 高亮
+ * 4. owner-only 仅站长可见的几个按钮在 buildAccountRow 渲染时不输出，
+ *    不再依赖 `display:none`，避免 SR 读到隐藏按钮
+ */
+.row-ico-btn{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:28px;height:28px;
+  margin:0;padding:0;
+  border:1px solid var(--inp-bd);border-radius:50%;
+  background:var(--inp-bg);
+  cursor:pointer;
+  font-size:14px;line-height:1;
+  color:var(--text);
+  transition:transform .12s,box-shadow .15s,border-color .15s,background .15s,color .15s;
+  flex-shrink:0;
+}
+.row-ico-btn:hover{
+  transform:translateY(-1px) scale(1.08);
+  box-shadow:0 2px 8px rgba(0,0,0,.18);
+  border-color:var(--accent);
+}
+.row-ico-btn:active{transform:scale(0.93)}
+.row-ico-btn:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+
+/* 普通按钮（复制 / 查看 / 备注 / 更多） */
+.row-ico-btn.ico-copy:hover{color:#1976d2;border-color:#1976d2}
+.row-ico-btn.ico-view:hover{color:#26a69a;border-color:#26a69a}
+.row-ico-btn.ico-remark:hover{color:#ab47bc;border-color:#ab47bc}
+.row-ico-btn.ico-more:hover{color:var(--text);border-color:var(--accent);background:var(--hover)}
+.row-ico-btn.ico-del{color:#e57373}
+.row-ico-btn.ico-del:hover{background:linear-gradient(135deg,#ef5350,#c62828);color:#fff;border-color:#c62828}
+
+/* Helper 4 个按钮：彩色渐变（仅 owner 渲染） */
+.row-ico-btn.ico-h-open{background:linear-gradient(135deg,#1e88e5,#1565c0);border-color:#1565c0;color:#fff}
+.row-ico-btn.ico-h-open:hover{background:linear-gradient(135deg,#42a5f5,#1976d2);border-color:#0d47a1;color:#fff}
+.row-ico-btn.ico-h-tok{background:linear-gradient(135deg,#26a69a,#00897b);border-color:#00796b;color:#fff}
+.row-ico-btn.ico-h-tok:hover{background:linear-gradient(135deg,#4db6ac,#00897b);border-color:#00695c;color:#fff}
+.row-ico-btn.ico-h-pwd{background:linear-gradient(135deg,#ef6c00,#e65100);border-color:#e65100;color:#fff}
+.row-ico-btn.ico-h-pwd:hover{background:linear-gradient(135deg,#ff8a40,#ef6c00);border-color:#bf360c;color:#fff}
+.row-ico-btn.ico-h-bind{background:linear-gradient(135deg,#7e57c2,#5e35b1);border-color:#5e35b1;color:#fff}
+.row-ico-btn.ico-h-bind:hover{background:linear-gradient(135deg,#9575cd,#673ab7);border-color:#4527a0;color:#fff}
+
+/* ⋯ 更多下拉菜单（fixed 定位，body 末尾追加复用） */
+.row-more-wrap{position:relative;display:inline-flex}
+.row-more-menu{
+  position:fixed;display:none;z-index:200;
+  min-width:180px;
+  background:var(--card);
+  border:1px solid var(--border);border-radius:8px;
+  box-shadow:0 8px 24px rgba(0,0,0,.18);
+  padding:6px;
+}
+.row-more-item{
+  display:flex;align-items:center;gap:10px;
+  width:100%;padding:8px 12px;
+  background:transparent;border:none;border-radius:6px;
+  font-size:13px;color:var(--text);
+  cursor:pointer;text-align:left;
+  transition:background .12s;
+}
+.row-more-item:hover{background:var(--hover)}
+.row-more-icon{font-size:14px;width:16px;text-align:center;flex-shrink:0}
+.row-more-label{flex:1;white-space:nowrap}
 .empty-state{padding:40px;text-align:center;color:var(--text3)}
 
 /* Modal */

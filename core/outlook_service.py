@@ -706,13 +706,24 @@ def change_outlook_email_password(
 import re as _re_mod
 
 
-def derive_recovery_alias(outlook_email: str, suffix: str = "evuzdnd.cn") -> str:
+def derive_recovery_alias(outlook_email: str, suffix: str = "") -> str:
     """
     根据 outlook 邮箱用户名生成辅助邮箱（去掉末尾连续数字 + @suffix）。
 
-    例：mtcscvcffk2900@outlook.com → mtcscvcffk@evuzdnd.cn
+    例：``mtcscvcffk2900@outlook.com`` + ``suffix="mydomain.com"``
+       → ``mtcscvcffk@mydomain.com``
+
+    ⚠ suffix 不传 / 为空时直接抛 ValueError —— 旧版默认 ``evuzdnd.cn``
+    是参考项目作者私有 catch-all 域名，用户用了会落到 Cloudflare 524 死域名。
+    现在强制调用方在 ``config.recovery_alias_suffix`` 里填自己的后缀。
     """
-    suffix = (suffix or "evuzdnd.cn").lstrip("@")
+    suffix = (suffix or "").lstrip("@")
+    if not suffix:
+        raise ValueError(
+            "辅助邮箱后缀未配置：请到 Web 面板 → 📬 邮箱助手 → ✉ 辅助邮箱凭据 "
+            "(QQ IMAP) 卡片里填入你自己的 catch-all 域名后缀（例如 mydomain.com），"
+            "保存后再次重试"
+        )
     local = (outlook_email or "").split("@", 1)[0]
     if not local:
         raise ValueError(f"无法从 {outlook_email!r} 解析出用户名")

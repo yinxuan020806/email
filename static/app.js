@@ -599,43 +599,171 @@ function buildAccountRow(a, index, isOwner) {
   tr.appendChild(tdRemark);
 
   const ops = el('div', { class: 'op-btns' });
-  ops.appendChild(el('button', {
-    title: t('op_copy_full_hint'),
-    'aria-label': t('op_copy_full_aria'),
-    onclick: async () => {
-      // 列表响应不带 refresh_token；OAuth2 账号在这里按需补齐再拼复制串。
-      // 普通账号无 client_id → ensureAccountRefreshToken 立即 return，
-      // 不会有任何额外 IO；UX 与之前一致。
-      await ensureAccountRefreshToken(a);
-      const { text, dirty } = buildAccountFullString(a);
-      copyText(text, 'toast_copied_full', {
-        warningKey: dirty ? 'toast_copied_field_sanitized' : null,
-      });
-    },
-  }, t('btn_copy')));
-  ops.appendChild(el('button', { onclick: () => viewEmails(a.id) }, t('btn_view')));
-  ops.appendChild(el('button', { onclick: () => showDetail(a.id) }, t('btn_detail')));
-  ops.appendChild(el('button', { class: 'danger', onclick: () => deleteSingle(a.id) }, t('btn_del')));
-  // xiaoxuan 站长专属：每行 4 个 helper 操作按钮（仿 cursor-manager 风格）
-  // 设计：圆形彩色按钮 + emoji + tooltip，比之前的 transparent 图标更醒目；
-  // helper 离线时 disabled 灰色，点击给 toast 提示
+
+  // 帮助器：构造圆形 emoji 按钮（参考 cursor-manager 的 .btn-icon 风格）
+  const mkIco = (icon, cls, titleKey, onclick, extra = {}) => el('button', Object.assign({
+    class: `row-ico-btn ${cls}`,
+    title: t(titleKey),
+    'aria-label': t(titleKey),
+    onclick,
+  }, extra), icon);
+
+  // ── 高频按钮（所有用户都看得到） ──────────────────────────────
+  // 📋 复制完整账号串（兼容旧 op_copy_full_* i18n key）
+  ops.appendChild(mkIco('📋', 'ico-copy', 'op_copy_full_hint', async () => {
+    await ensureAccountRefreshToken(a);
+    const { text, dirty } = buildAccountFullString(a);
+    copyText(text, 'toast_copied_full', {
+      warningKey: dirty ? 'toast_copied_field_sanitized' : null,
+    });
+  }));
+
+  // ✉ 查看邮件
+  ops.appendChild(mkIco('✉', 'ico-view', 'btn_view', () => viewEmails(a.id)));
+
+  // ── 站长专属：4 个 Helper 行内按钮（圆形 + 彩色渐变） ───────────
   if (S.user && S.user.is_owner) {
-    const sep = el('span', { class: 'op-sep owner-only' }, '|');
-    ops.appendChild(sep);
-    const mkHelp = (icon, cls, key, fn) => el('button', {
-      class: `help-row-btn ${cls} owner-only`,
-      title: t(key),
-      'aria-label': t(key),
-      onclick: () => triggerHelperRowAction(fn, a, key),
-    }, icon);
-    ops.appendChild(mkHelp('📬', 'h-open', 'help_row_open', helperRowOpen));
-    ops.appendChild(mkHelp('🔑', 'h-tok', 'help_row_get_token', helperRowGetToken));
-    ops.appendChild(mkHelp('🔒', 'h-pwd', 'help_row_chpwd', helperRowChpwd));
-    ops.appendChild(mkHelp('🛡️', 'h-bind', 'help_row_bind', helperRowBind));
+    ops.appendChild(mkIco('📬', 'ico-h-open owner-only', 'help_row_open',
+      () => triggerHelperRowAction(helperRowOpen, a, 'help_row_open')));
+    ops.appendChild(mkIco('🔑', 'ico-h-tok owner-only', 'help_row_get_token',
+      () => triggerHelperRowAction(helperRowGetToken, a, 'help_row_get_token')));
+    ops.appendChild(mkIco('🔒', 'ico-h-pwd owner-only', 'help_row_chpwd',
+      () => triggerHelperRowAction(helperRowChpwd, a, 'help_row_chpwd')));
+    ops.appendChild(mkIco('🛡️', 'ico-h-bind owner-only', 'help_row_bind',
+      () => triggerHelperRowAction(helperRowBind, a, 'help_row_bind')));
   }
+
+  // 📝 备注（点开等同于双击备注列）
+  ops.appendChild(mkIco('📝', 'ico-remark', 'op_remark_edit',
+    () => editRemark(a.id, a.remark || '')));
+
+  // ⋯ 更多下拉（详情 / 接码切换 / 复制邮箱 / 复制密码）
+  const moreWrap = el('div', { class: 'row-more-wrap' });
+  const moreBtn = mkIco('⋯', 'ico-more', 'op_more', (ev) => {
+    ev.stopPropagation();
+    showRowMoreMenu(moreBtn, a);
+  });
+  moreWrap.appendChild(moreBtn);
+  ops.appendChild(moreWrap);
+
+  // ✕ 删除（保留红色危险按钮）
+  ops.appendChild(mkIco('✕', 'ico-del', 'btn_del', () => deleteSingle(a.id)));
+
   tr.appendChild(el('td', {}, ops));
 
   return tr;
+}
+
+// ── 行内「⋯ 更多」下拉菜单 ─────────────────────────────────────
+//
+// 设计：参考 cursor-manager `.more-dropdown-menu`，点击 ⋯ 按钮后 fixed 定位
+// 在按钮下方；菜单项命中 click / Esc / 外部点击都会自动关闭。
+// 不预渲染（每个 row 一个 div 占内存），用全局复用的 #rowMoreMenu。
+function showRowMoreMenu(anchorBtn, account) {
+  let menu = document.getElementById('rowMoreMenu');
+  if (!menu) {
+    menu = document.createElement('div');
+    menu.id = 'rowMoreMenu';
+    menu.className = 'row-more-menu';
+    document.body.appendChild(menu);
+  }
+  clear(menu);
+
+  const items = [];
+  items.push({
+    icon: '📋', label: t('op_detail'),
+    onclick: () => showDetail(account.id),
+  });
+  items.push({
+    icon: '🆔', label: t('op_copy_email'),
+    onclick: () => copyText(account.email, 'toast_copied_email'),
+  });
+  items.push({
+    icon: '🔑', label: t('op_copy_pwd'),
+    onclick: () => copyText(account.password || '', 'toast_copied'),
+  });
+  // 站长专属：单条加入 / 移出接码
+  if (S.user && S.user.is_owner) {
+    const isPub = S.publicIds.has(account.id);
+    items.push({
+      icon: isPub ? '📴' : '📡',
+      label: isPub ? t('op_unset_public_single') : t('op_set_public_single'),
+      onclick: () => toggleSinglePublic(account, !isPub),
+    });
+  }
+
+  for (const it of items) {
+    const btn = el('button', {
+      class: 'row-more-item',
+      onclick: () => {
+        closeRowMoreMenu();
+        try { it.onclick(); } catch (e) { console.error(e); }
+      },
+    }, [
+      el('span', { class: 'row-more-icon' }, it.icon),
+      el('span', { class: 'row-more-label' }, it.label),
+    ]);
+    menu.appendChild(btn);
+  }
+
+  // fixed 定位到 anchor 下方；按钮右对齐避免溢出右边界
+  const r = anchorBtn.getBoundingClientRect();
+  menu.style.display = 'block';
+  // 先 display 出来才有正确尺寸；offset 后用 setTimeout 避免布局抖动
+  const mw = menu.offsetWidth || 200;
+  let left = r.left;
+  if (left + mw > window.innerWidth - 8) left = window.innerWidth - mw - 8;
+  menu.style.left = `${left}px`;
+  menu.style.top = `${r.bottom + 4}px`;
+
+  // 外部点击 / Esc 关闭：用持续监听 + close 时移除（不能 once: true，
+  // 否则用户点到菜单内"消耗"了监听后，再点外面就关不掉了）
+  // setTimeout 0 让"打开菜单的那次 click 冒泡"先结束，避免立刻自关
+  setTimeout(_attachRowMoreOutsideHandlers, 0);
+}
+
+function _attachRowMoreOutsideHandlers() {
+  document.addEventListener('click', _closeRowMoreMenuOnOutsideClick, true);
+  document.addEventListener('keydown', _closeRowMoreMenuOnEsc);
+}
+
+function _detachRowMoreOutsideHandlers() {
+  document.removeEventListener('click', _closeRowMoreMenuOnOutsideClick, true);
+  document.removeEventListener('keydown', _closeRowMoreMenuOnEsc);
+}
+
+function _closeRowMoreMenuOnOutsideClick(e) {
+  const menu = document.getElementById('rowMoreMenu');
+  if (!menu || menu.style.display === 'none') return;
+  if (menu.contains(e.target)) return;
+  closeRowMoreMenu();
+}
+
+function _closeRowMoreMenuOnEsc(e) {
+  if (e.key === 'Escape') closeRowMoreMenu();
+}
+
+function closeRowMoreMenu() {
+  const menu = document.getElementById('rowMoreMenu');
+  if (menu) menu.style.display = 'none';
+  _detachRowMoreOutsideHandlers();
+}
+
+// 单条加入 / 移出接码（复用 batchSetPublic 的后端，传单个 id）
+async function toggleSinglePublic(account, isPublic) {
+  if (!S.user || !S.user.is_owner) return;
+  try {
+    await api.post('/api/accounts/set-public', {
+      ids: [account.id],
+      is_public: !!isPublic,
+    });
+    toast(t(isPublic ? 'toast_set_public_ok' : 'toast_unset_public_ok',
+            { n: 1 }), 'success');
+    await loadPublicIds();
+    renderAccounts();
+  } catch (e) {
+    toast(t('toast_load_fail') + (e?.message || ''), 'error');
+  }
 }
 
 // ── 表格行的 helper 操作（xiaoxuan 专属） ────────────────────
@@ -653,14 +781,60 @@ function triggerHelperRowAction(fn, account, titleKey) {
   fn(account, titleKey);
 }
 
-async function helperRowOpen(account, titleKey) {
+// ── 单条 helper 操作 SSE 公共流程 ───────────────────────────────
+//
+// 设计动机
+// --------
+// 单条改密 / 绑辅助 / 取 Token 可以跑到 5 分钟，但 Cloudflare Free/Pro 套餐
+// **默认 100s 就 524 死页**（用户也确实截到了 ``mail.evuzdnd.cn | 524``）。
+// 同步 ``POST /api/helper/mailbox/*`` 会在 100s 处被拦截。
+//
+// 改用 ``POST /api/helper/batch/mailbox`` SSE 端点 + ``account_ids=[id]``
+// 单条调用：SSE 流持续吐 progress 事件，Cloudflare 看到字节流就不 524；
+// 后端 batch_mailbox 已支持 ``bind_recovery_email`` / ``change_email_password``
+// 以及 action-specific 字段（alias_suffix / alias_email / new_password）。
+//
+// onSuccess 回调在 progress=success=true 时触发，用于行内成功后的副作用
+// （比如取 Token 后刷新账号列表）。
+async function runHelperSingleSse(action, accountId, extraParams, titleKey,
+                                  onSuccess, opts = {}) {
   openHelperTaskModal(titleKey);
-  appendHelperLog(`▶ 请求服务器派发 "登录邮箱" → ${account.email}`, 'info');
+  const intro = opts.intro || `▶ SSE 派发 → ${action} → account_id=${accountId}`;
+  appendHelperLog(intro, 'info');
+  let okFinal = false;
+  let errFinal = '';
+  let emailFinal = '';
   try {
-    const r = helperResponseGuard(await api.post('/api/helper/mailbox/open',
-      { account_id: account.id, timeout: 180 }));
-    setHelperTaskDone(!!r.success, r.error || '');
-    if (r.success) toast(`${account.email} 已自动登录`, 'success');
+    const body = Object.assign(
+      { action, account_ids: [accountId], timeout: 300 },
+      extraParams || {},
+    );
+    await api.stream('/api/helper/batch/mailbox', body, (msg) => {
+      if (msg.type === 'progress') {
+        emailFinal = msg.email || '';
+        okFinal = !!msg.success;
+        errFinal = msg.error || '';
+        if (msg.success) {
+          appendHelperLog(`✓ ${msg.email} 操作完成`, 'success');
+        } else {
+          appendHelperLog(`✗ ${msg.email}: ${msg.error || '失败'}`,
+                          msg.needs_helper_upgrade ? 'warning' : 'error');
+          if (msg.needs_helper_upgrade) {
+            appendHelperLog(
+              '⚠ 本机 Helper 版本过低，请到「📥 下载」处更新',
+              'warning',
+            );
+          }
+        }
+      } else if (msg.type === 'done') {
+        if (okFinal) {
+          setHelperTaskDone(true, opts.successMsg || '');
+          try { onSuccess && onSuccess({ email: emailFinal }); } catch { /* ignore */ }
+        } else {
+          setHelperTaskDone(false, errFinal);
+        }
+      }
+    });
   } catch (e) {
     setHelperTaskDone(false, e.message || '');
   } finally {
@@ -668,24 +842,23 @@ async function helperRowOpen(account, titleKey) {
   }
 }
 
+async function helperRowOpen(account, titleKey) {
+  return runHelperSingleSse(
+    'open_mailbox', account.id, {}, titleKey,
+    () => toast(t('toast_help_open_ok', { email: account.email }), 'success'),
+    { intro: `▶ 请求服务器派发 "登录邮箱" → ${account.email}（SSE）` },
+  );
+}
+
 async function helperRowGetToken(account, titleKey) {
-  openHelperTaskModal(titleKey);
-  appendHelperLog(`▶ 请求服务器派发 "获取 refresh_token" → ${account.email}`, 'info');
-  try {
-    const r = helperResponseGuard(await api.post('/api/helper/mailbox/get-token',
-      { account_id: account.id, timeout: 180 }));
-    if (r.success) {
-      setHelperTaskDone(true, t('toast_help_updated', { email: r.email || account.email }));
-      toast(t('toast_help_updated', { email: r.email || account.email }), 'success');
+  return runHelperSingleSse(
+    'get_ms_token', account.id, {}, titleKey,
+    () => {
+      toast(t('toast_help_updated', { email: account.email }), 'success');
       loadAccounts();
-    } else {
-      setHelperTaskDone(false, r.error || '');
-    }
-  } catch (e) {
-    setHelperTaskDone(false, e.message || '');
-  } finally {
-    setTimeout(closeHelperLogStream, 2000);
-  }
+    },
+    { intro: `▶ 请求服务器派发 "获取 refresh_token" → ${account.email}（SSE）` },
+  );
 }
 
 function helperRowChpwd(account, titleKey) {
@@ -699,7 +872,40 @@ function helperRowChpwd(account, titleKey) {
   openModal('helperChangePwdModal');
 }
 
-function helperRowBind(account, titleKey) {
+// 全局缓存：避免每次点 🛡 都查一次 imap-config
+window._IMAP_CFG_CACHE = window._IMAP_CFG_CACHE || null;
+
+async function ensureRecoverySuffixConfigured() {
+  // 已有缓存且 suffix 非空 → 直接通过
+  if (window._IMAP_CFG_CACHE && (window._IMAP_CFG_CACHE.recovery_alias_suffix || '').trim()) {
+    return true;
+  }
+  try {
+    const r = await api.get('/api/helper/imap-config');
+    window._IMAP_CFG_CACHE = r || {};
+    if ((r.recovery_alias_suffix || '').trim()) return true;
+  } catch (e) {
+    // 拉不到就让用户继续走（modal 内部填 suffix 也能绑）
+    return true;
+  }
+  // suffix 空 → 提示并跳到 Help 页 IMAP 卡片
+  toast(t('toast_help_need_suffix'), 'warning');
+  if (S.user && S.user.is_owner) {
+    showView('help');
+    setTimeout(() => {
+      const el = $('helpImapBody');
+      if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const inp = $('imapSuffix');
+      if (inp) inp.focus();
+    }, 250);
+  }
+  return false;
+}
+
+async function helperRowBind(account, titleKey) {
+  // 没配 catch-all 后缀 → 引导到 Help 页 IMAP 卡片再回来
+  const ok = await ensureRecoverySuffixConfigured();
+  if (!ok) return;
   $('helperBindEmail').value = account.email;
   $('helperBindSuffix').value = '';
   $('helperBindAlias').value = '';
@@ -1980,7 +2186,7 @@ async function loadHelperImapConfig() {
     body.appendChild(mkField('imapPort', 'help_imap_port',
       String(r.qq_imap_port || 993), 'number'));
     body.appendChild(mkField('imapSuffix', 'help_imap_suffix',
-      r.recovery_alias_suffix || 'evuzdnd.cn', 'text', 'example.com'));
+      r.recovery_alias_suffix || '', 'text', 'example.com'));
 
     const errEl = el('div', { id: 'imapErr',
       style: 'font-size:12px;color:var(--danger);min-height:16px;margin-top:6px' });
@@ -2729,17 +2935,28 @@ async function doHelperChpwd() {
   }
   const btn = $('btnHelperDoChpwd'); btn.disabled = true;
   closeModal('helperChangePwdModal');
+  // 行内入口（带 accountId）走 SSE 批量链路绕 Cloudflare 100s；
+  // 手工模式仍走单条 POST（用户主动等，可接受偶发 524）
+  if (accountId) {
+    btn.disabled = false;
+    return runHelperSingleSse(
+      'change_email_password', Number(accountId),
+      { new_password: newPwd }, titleKey,
+      () => {
+        toast(t('toast_help_change_pwd_ok'), 'success');
+        loadAccounts();
+      },
+      { intro: `▶ 请求服务器派发 "修改密码" → ${email}（SSE）` },
+    );
+  }
   openHelperTaskModal(titleKey);
   try {
     appendHelperLog(`▶ 请求服务器派发 "修改密码" → ${email}`, 'info');
-    const body = accountId
-      ? { account_id: Number(accountId), new_password: newPwd, timeout: 300 }
-      : { email, email_password: oldPwd, new_password: newPwd, timeout: 300 };
+    const body = { email, email_password: oldPwd, new_password: newPwd, timeout: 300 };
     const r = helperResponseGuard(await api.post('/api/helper/mailbox/change-password', body));
     if (r.success) {
       setHelperTaskDone(true, '');
       toast(t('toast_help_change_pwd_ok'), 'success');
-      if (accountId) loadAccounts();
     } else {
       setHelperTaskDone(false, r.error || '');
     }
@@ -2785,22 +3002,28 @@ async function doHelperBind() {
   const aliasEmail = $('helperBindAlias').value.trim();
   const btn = $('btnHelperDoBind'); btn.disabled = true;
   closeModal('helperBindRecoveryModal');
+  // 行内入口（带 accountId）走 SSE 批量链路；手工模式 fallback POST
+  if (accountId) {
+    btn.disabled = false;
+    const extras = {};
+    if (aliasSuffix) extras.alias_suffix = aliasSuffix;
+    if (aliasEmail) extras.alias_email = aliasEmail;
+    return runHelperSingleSse(
+      'bind_recovery_email', Number(accountId),
+      extras, titleKey,
+      () => toast(t('toast_help_bind_ok'), 'success'),
+      { intro: `▶ 请求服务器派发 "绑定辅助邮箱" → ${email}（SSE）` },
+    );
+  }
   openHelperTaskModal(titleKey);
   try {
     appendHelperLog(`▶ 请求服务器派发 "绑定辅助邮箱" → ${email}`, 'info');
-    const body = accountId
-      ? {
-          account_id: Number(accountId),
-          alias_suffix: aliasSuffix || null,
-          alias_email: aliasEmail || null,
-          timeout: 300,
-        }
-      : {
-          email,
-          alias_suffix: aliasSuffix || null,
-          alias_email: aliasEmail || null,
-          timeout: 300,
-        };
+    const body = {
+      email,
+      alias_suffix: aliasSuffix || null,
+      alias_email: aliasEmail || null,
+      timeout: 300,
+    };
     const r = helperResponseGuard(await api.post('/api/helper/mailbox/bind-recovery', body));
     if (r.success) {
       setHelperTaskDone(true, '');

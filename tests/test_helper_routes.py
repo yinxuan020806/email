@@ -327,19 +327,81 @@ def test_batch_mailbox_sse_progress_and_done(helper_client):
         stop.set(); th.join(timeout=2)
 
 
-def test_batch_mailbox_rejects_change_password(helper_client):
-    """批量接口禁止 change_email_password（防误操作）。"""
+def test_batch_mailbox_bind_recovery_passes_alias_params(helper_client):
+    """batch SSE 链路：bind_recovery_email 把 alias_suffix / alias_email 透传给 helper。
+
+    Phase 1B 把单条绑辅助 / 改密 / 取 Token 改走 batch SSE 绕 Cloudflare 100s。
+    确保 BatchMailboxRequest 新增的 alias_suffix / alias_email 字段确实落到
+    dispatch 的 params 里（而不是被丢弃）。
+    """
     xx, _ = helper_client
+    # 导入 1 个账号
+    xx.post("/api/accounts/import", json={
+        "text": "bind-test@x.com----pwd-xxx",
+        "group": "default", "skip_duplicate": True,
+    })
+    aid = xx.get("/api/accounts").json()[0]["id"]
+
+    captured = {}
+
+    def stub(task):
+        # action_handlers 拿到 task 后会把 params 透出来；这里直接捕获后失败收尾
+        captured["params"] = task.get("params") or {}
+        return {"success": False, "error": "stub-captured"}
+
+    token = xx.post("/api/helper/provision-token", json={"label": "b"}).json()["token"]
+    stop, th, _hid = _fake_helper(
+        "", token, xx,
+        {"bind_recovery_email": stub},
+    )
+    try:
+        with xx.stream(
+            "POST", "/api/helper/batch/mailbox",
+            json={
+                "action": "bind_recovery_email",
+                "account_ids": [aid],
+                "timeout": 10,
+                "alias_suffix": "mydomain.com",
+                "alias_email": "user@mydomain.com",
+            },
+        ) as r:
+            list(r.iter_lines())  # drain SSE
+    finally:
+        stop.set(); th.join(timeout=2)
+    p = captured.get("params", {})
+    assert p.get("alias_suffix") == "mydomain.com", f"captured: {p}"
+    assert p.get("alias_email") == "user@mydomain.com"
+
+
+def test_batch_mailbox_change_password_requires_new_password(helper_client):
+    """批量改密缺 ``new_password`` 时单条直接判失败，不浪费 dispatch。
+
+    v0.1.9 起为「单条改密走 SSE 绕 Cloudflare 100s」加了 change_email_password
+    到 batch 白名单（前端 UI 仅允许 ``account_ids=[id]`` 单条形式触发，
+    不开放真正的批量改密入口）。
+    """
+    xx, _ = helper_client
+    # 导入 1 个账号
+    xx.post("/api/accounts/import", json={
+        "text": "missing-newpwd@x.com----old-pwd",
+        "group": "default", "skip_duplicate": True,
+    })
+    aid = xx.get("/api/accounts").json()[0]["id"]
     with xx.stream("POST", "/api/helper/batch/mailbox",
                     json={"action": "change_email_password",
-                          "account_ids": [1], "timeout": 10}) as r:
+                          "account_ids": [aid], "timeout": 10}) as r:
         events = []
         for line in r.iter_lines():
             if line.startswith("data: "):
                 events.append(json.loads(line[6:]))
-    assert len(events) == 1
-    assert events[0]["type"] == "done"
-    assert "不支持" in events[0].get("error", "")
+    # 期望 2 条事件：progress(失败:缺 new_password) + done(fail=1)
+    progress = [e for e in events if e.get("type") == "progress"]
+    done = [e for e in events if e.get("type") == "done"]
+    assert len(progress) == 1
+    assert progress[0]["success"] is False
+    assert "new_password" in progress[0].get("error", "")
+    assert len(done) == 1
+    assert done[0]["fail"] == 1
 
 
 # ── cancel-task ─────────────────────────────────────────────────
