@@ -70,3 +70,8 @@ helper/build/
 helper/dist/
 helper/*.spec.bak
 
+# 给 git commit -F 用的临时 commit 消息文件（PowerShell 处理 heredoc 太麻烦）
+_commit_msg.txt
+_test_*.py
+_smoke_data/
+
