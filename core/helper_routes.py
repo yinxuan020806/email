@@ -471,8 +471,53 @@ def get_imap_config(user: dict = Depends(require_owner)) -> dict:
     }
 
 
+# QQ IMAP 在部分 VPS 上 TLS/握手较慢；放事件线程会阻塞整条 ASGI，
+# socket 也不宜过短以免误杀合法慢连接。
+_IMAP_CONNECT_TEST_SOCKET_TIMEOUT = 25.0
+
+
+def _imap_login_test_sync(
+    user_email: str,
+    pwd: str,
+    host: str,
+    port: int,
+    *,
+    socket_timeout: float,
+) -> dict:
+    """在线程池中执行阻塞 IMAP 探测，返回与前路由一致的 dict。"""
+    import imaplib
+    import socket
+
+    try:
+        with imaplib.IMAP4_SSL(host=host, port=port, timeout=socket_timeout) as M:
+            try:
+                M.login(user_email, pwd)
+            except imaplib.IMAP4.error as e:
+                msg = str(e).lower()
+                hint = ""
+                if "authentication failed" in msg:
+                    hint = (
+                        "（最常见：把 QQ 登录密码当成授权码填了 — 必须用 "
+                        "QQ 邮箱 → 设置 → 账户 → 开启 IMAP/SMTP 后生成的 "
+                        "16 位授权码）"
+                    )
+                return {"success": False, "error": f"IMAP 登录失败：{e}{hint}"}
+            M.select("INBOX")
+        return {
+            "success": True,
+            "message": f"✅ 连接成功！已通过 {host}:{port} 登录 {user_email}",
+        }
+    except socket.timeout:
+        t = int(socket_timeout) if socket_timeout >= 1 else socket_timeout
+        return {"success": False, "error": f"连接 {host}:{port} 超时（{t}s）"}
+    except socket.gaierror as e:
+        return {"success": False, "error": f"DNS 解析失败：{e}"}
+    except Exception as e:  # noqa: BLE001
+        return {"success": False, "error": f"{type(e).__name__}: {e}"}
+
+
 @helper_router.post("/imap-config/test")
-def test_imap_config(
+async def test_imap_config(
     request: Request,
     user: dict = Depends(require_owner),
 ) -> dict:
@@ -501,36 +546,20 @@ def test_imap_config(
             "error": "请先在上方填入 QQ 邮箱地址和授权码后保存",
         }
 
-    import imaplib
-    import socket
-    try:
-        with imaplib.IMAP4_SSL(host=host, port=port, timeout=10) as M:
-            try:
-                M.login(user_email, pwd)
-            except imaplib.IMAP4.error as e:
-                msg = str(e).lower()
-                hint = ""
-                if "authentication failed" in msg or b"\\xb1\\x71" in str(e).encode():
-                    hint = "（最常见：把 QQ 登录密码当成授权码填了 — 必须用 QQ 邮箱 → 设置 → 账户 → 开启 IMAP/SMTP 后生成的 16 位授权码）"
-                return {
-                    "success": False,
-                    "error": f"IMAP 登录失败：{e}{hint}",
-                }
-            M.select("INBOX")
+    result = await run_in_threadpool(
+        _imap_login_test_sync,
+        user_email,
+        pwd,
+        host,
+        port,
+        socket_timeout=_IMAP_CONNECT_TEST_SOCKET_TIMEOUT,
+    )
+    if result.get("success"):
         _audit(
             request, user, "helper_imap_test",
             target=user_email, success=True, detail=f"{host}:{port}",
         )
-        return {
-            "success": True,
-            "message": f"✅ 连接成功！已通过 {host}:{port} 登录 {user_email}",
-        }
-    except socket.timeout:
-        return {"success": False, "error": f"连接 {host}:{port} 超时（10s）"}
-    except socket.gaierror as e:
-        return {"success": False, "error": f"DNS 解析失败：{e}"}
-    except Exception as e:  # noqa: BLE001
-        return {"success": False, "error": f"{type(e).__name__}: {e}"}
+    return result
 
 
 @helper_router.put("/imap-config")

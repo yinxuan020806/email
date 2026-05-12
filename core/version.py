@@ -25,7 +25,7 @@ from typing import Optional, Union
 #   2. git commit -am "release: vX.Y.Z"
 #   3. git tag vX.Y.Z
 #   4. git push --tags
-__version__: str = "1.0.1"
+__version__: str = "1.0.2"
 """当前应用版本号（语义化）。bump 即发版。"""
 
 

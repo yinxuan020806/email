@@ -78,12 +78,11 @@ const clear = (node) => { while (node.firstChild) node.removeChild(node.firstChi
 
 // ───────── API ─────────
 // 普通 API 请求的默认客户端超时（毫秒）。
-// 设计目的：Cloudflare Free/Pro 默认 100s 才返 524，浏览器 fetch 又
-// 不设默认 timeout，于是用户在后端僵死时要干等 100s 才拿到 CF HTML
-// 错误页。30s 已经远大于所有"健康后端"上的接口（最慢的同步 SQLite
-// 操作 < 1s），早返回让 UI 早进入错误态、用户能更快意识到该刷一下。
-// SSE / 流式请求显式传 ``{ noTimeout: true }`` 豁免。
-const DEFAULT_REQUEST_TIMEOUT_MS = 30000;
+// 「测试连接」会触发服务端连 QQ IMAP（TLS）；VPS 网络偶发抖动时整条链路
+// 可能 >30s 仍合法完成，太短会误 Abort。辅助邮箱三张接口单独用更长常量。
+const DEFAULT_REQUEST_TIMEOUT_MS = 45000;
+const HELPER_IMAP_FETCH_TIMEOUT_MS = 90000;
+const HELPER_IMAP_TEST_TIMEOUT_MS = 125000;
 
 async function request(url, options = {}) {
   const { noTimeout, timeoutMs, ...rest } = options || {};
@@ -110,9 +109,13 @@ async function request(url, options = {}) {
     // AbortError → 把它包装成"网关超时"系列的可识别错误，避免上层显示
     // 原始 ``signal is aborted without reason``
     if (e && e.name === 'AbortError') {
-      const err = new Error('请求超时（已等待 ' +
-        Math.round((timeoutMs || DEFAULT_REQUEST_TIMEOUT_MS) / 1000) +
-        's，后端可能在重启或卡死）');
+      const secs = Math.round((timeoutMs || DEFAULT_REQUEST_TIMEOUT_MS) / 1000);
+      const hint = secs >= 90
+        ? '若刚点「测试连接」，多为服务器访问 QQ IMAP 较慢，可多试一两次。'
+        : '';
+      const err = new Error(
+        `请求超时（已等待 ${secs}s，后端可能繁忙或重启）${hint}`,
+      );
       err.status = 0;
       err.code = 'client_timeout';
       throw err;
@@ -193,12 +196,15 @@ async function readJson(r) {
 }
 
 const api = {
-  get: (u) => request(u).then(readJson),
-  post: (u, d) => request(u, { method: 'POST', body: d }).then(readJson),
-  put: (u, d) => request(u, { method: 'PUT', body: d }).then(readJson),
-  del: (u) => request(u, { method: 'DELETE' }).then(readJson),
+  get: (u, opts = {}) => request(u, opts).then(readJson),
+  post: (u, d, opts = {}) =>
+    request(u, Object.assign({}, { method: 'POST', body: d }, opts)).then(readJson),
+  put: (u, d, opts = {}) =>
+    request(u, Object.assign({}, { method: 'PUT', body: d }, opts)).then(readJson),
+  del: (u, opts = {}) =>
+    request(u, Object.assign({}, { method: 'DELETE' }, opts)).then(readJson),
   stream: async (u, d, onData) => {
-    // SSE 长连接显式 noTimeout，不被默认 30s AbortController 切。
+    // SSE 长连接显式 noTimeout，不被默认客户端 AbortController 切。
     // 反代/CF 端的 idle timeout 由后端 SSE keepalive 注释帧 (`: keepalive\n\n`)
     // 兜住，详见 core/helper_routes.py batch_mailbox 的实现。
     const r = await request(u, { method: 'POST', body: d, noTimeout: true });
@@ -955,7 +961,7 @@ async function ensureRecoverySuffixConfigured() {
     return true;
   }
   try {
-    const r = await api.get('/api/helper/imap-config');
+    const r = await api.get('/api/helper/imap-config', { timeoutMs: HELPER_IMAP_FETCH_TIMEOUT_MS });
     window._IMAP_CFG_CACHE = r || {};
     if ((r.recovery_alias_suffix || '').trim()) return true;
   } catch (e) {
@@ -2237,7 +2243,7 @@ async function loadHelperImapConfig() {
   const body = $('helpImapBody');
   if (!body) return;
   try {
-    const r = await api.get('/api/helper/imap-config');
+    const r = await api.get('/api/helper/imap-config', { timeoutMs: HELPER_IMAP_FETCH_TIMEOUT_MS });
     clear(body);
     body.appendChild(el('p', { class: 'help-imap-intro' }, t('help_imap_intro')));
 
@@ -2282,7 +2288,7 @@ async function loadHelperImapConfig() {
 async function testHelperImapConfig() {
   const errEl = $('imapErr'); if (errEl) errEl.textContent = '';
   try {
-    const r = await api.post('/api/helper/imap-config/test', {});
+    const r = await api.post('/api/helper/imap-config/test', {}, { timeoutMs: HELPER_IMAP_TEST_TIMEOUT_MS });
     if (r.success) {
       toast(r.message || t('toast_help_imap_test_ok'), 'success');
     } else if (errEl) {
@@ -2307,7 +2313,7 @@ async function saveHelperImapConfig() {
   if (pwd && pwd !== '••••••••') body.qq_imap_password = pwd;
 
   try {
-    const r = await api.put('/api/helper/imap-config', body);
+    const r = await api.put('/api/helper/imap-config', body, { timeoutMs: HELPER_IMAP_FETCH_TIMEOUT_MS });
     if (r.success) {
       toast(t('toast_help_imap_saved'), 'success');
       loadHelperImapConfig();
