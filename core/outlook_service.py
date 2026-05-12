@@ -952,7 +952,7 @@ def bind_recovery_email(
     if IS_HEADLESS_ENV:
         return {"success": False, "error": _HEADLESS_REJECT_MSG}
 
-    from config import load_config
+    from core.config_loader import load_config
 
     cfg = load_config()
     if imap_config:

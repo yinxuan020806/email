@@ -439,6 +439,74 @@ class CancelTaskRequest(BaseModel):
     task_id: str = Field(min_length=1, max_length=64)
 
 
+class ImapConfigUpdate(BaseModel):
+    """更新辅助邮箱 / IMAP 凭据。
+
+    用于 ``bind_recovery_email`` 自动从 QQ 邮箱拉验证码。所有字段都可选 —
+    仅传需要更新的字段，其它保留之前的值。
+    """
+    qq_imap_user: Optional[str] = Field(default=None, max_length=256)
+    qq_imap_password: Optional[str] = Field(default=None, max_length=128)
+    qq_imap_host: Optional[str] = Field(default=None, max_length=256)
+    qq_imap_port: Optional[int] = Field(default=None, ge=1, le=65535)
+    recovery_alias_suffix: Optional[str] = Field(default=None, max_length=64)
+
+
+@helper_router.get("/imap-config")
+def get_imap_config(user: dict = Depends(require_owner)) -> dict:
+    """读取当前 IMAP / 辅助邮箱配置（``qq_imap_password`` 始终脱敏）。"""
+    from core.config_loader import load_config
+    cfg = load_config()
+    return {
+        "success": True,
+        "qq_imap_user": cfg.get("qq_imap_user", ""),
+        # 密码只回显是否已设置，不回显明文
+        "qq_imap_password_set": bool(cfg.get("qq_imap_password")),
+        "qq_imap_host": cfg.get("qq_imap_host", "imap.qq.com"),
+        "qq_imap_port": cfg.get("qq_imap_port", 993),
+        "recovery_alias_suffix": cfg.get("recovery_alias_suffix", "evuzdnd.cn"),
+    }
+
+
+@helper_router.put("/imap-config")
+def put_imap_config(
+    req: ImapConfigUpdate,
+    request: Request,
+    user: dict = Depends(require_owner),
+) -> dict:
+    """更新 IMAP / 辅助邮箱配置。所有字段都可选；仅传需要更新的。
+
+    密码不通过 SecretBox 加密：服务端落到 ``imap_config.json``（明文 JSON）。
+    生产部署时需要保护这个文件的访问权限（已在 ``EMAIL_DATA_DIR`` 下，
+    与 .master.key / emails.db 同目录权限要求）。
+    """
+    from core.config_loader import save_config
+    updates: dict = {}
+    if req.qq_imap_user is not None:
+        updates["qq_imap_user"] = req.qq_imap_user.strip()
+    if req.qq_imap_password is not None and req.qq_imap_password:
+        # 空字符串保留旧值（避免无意清空）；明确传空要传 ``" "`` 或专用清除接口
+        updates["qq_imap_password"] = req.qq_imap_password
+    if req.qq_imap_host is not None:
+        updates["qq_imap_host"] = req.qq_imap_host.strip() or "imap.qq.com"
+    if req.qq_imap_port is not None:
+        updates["qq_imap_port"] = int(req.qq_imap_port)
+    if req.recovery_alias_suffix is not None:
+        updates["recovery_alias_suffix"] = req.recovery_alias_suffix.strip().lstrip("@")
+    if not updates:
+        return {"success": False, "error": "未提供任何要更新的字段"}
+    try:
+        save_config(updates)
+    except OSError as e:
+        return {"success": False, "error": f"写盘失败: {e}"}
+    _audit(
+        request, user, "helper_imap_config_update",
+        target="imap_config",
+        detail=",".join(sorted(updates.keys())),
+    )
+    return {"success": True, "updated": sorted(updates.keys())}
+
+
 @helper_router.post("/cancel-task")
 def cancel_task(
     req: CancelTaskRequest, user: dict = Depends(require_owner),
@@ -669,14 +737,17 @@ async def mailbox_change_password(
                success=False, detail="missing_password")
         return {"success": False, "error": "缺少当前密码（账号未保存或未提供）"}
 
+    # change_email_password 中途可能跳 proofs/Add 自动接管，需要 IMAP 凭据
+    chpwd_params = {
+        "email": email,
+        "email_password": password,
+        "new_password": req.new_password,
+    }
+    _inject_imap_config(chpwd_params)
     result = await run_in_threadpool(
         registry.dispatch,
         "change_email_password",
-        {
-            "email": email,
-            "email_password": password,
-            "new_password": req.new_password,
-        },
+        chpwd_params,
         req.timeout,
         user["id"],
     )
@@ -787,6 +858,10 @@ async def batch_mailbox(
                 params: dict = {"email": email}
                 if req.action in {"open_mailbox", "change_email_password"}:
                     params["email_password"] = acc.password or ""
+                # bind_recovery_email 与 change_email_password（中途可能跳
+                # proofs/Add 自动接管）都依赖 QQ IMAP 凭据 → 透传
+                if req.action in {"bind_recovery_email", "change_email_password"}:
+                    _inject_imap_config(params)
 
                 result = await run_in_threadpool(
                     registry.dispatch,
@@ -862,6 +937,29 @@ def _sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def _inject_imap_config(params: dict) -> dict:
+    """把服务端 imap_config.json 的字段塞进 helper 派发参数。
+
+    Helper EXE 在 PyInstaller frozen 环境下自带的 ``load_config()`` 读不到
+    web 后端的 ``imap_config.json``，**必须**靠这里把凭据透传过去。
+    """
+    try:
+        from core.config_loader import load_config
+        cfg = load_config()
+    except Exception:  # noqa: BLE001
+        return params
+    for k in (
+        "qq_imap_user", "qq_imap_password",
+        "qq_imap_host", "qq_imap_port",
+        "recovery_alias_suffix",
+    ):
+        v = cfg.get(k)
+        # 仅传非空字段，避免无意覆盖 helper 进程自己 load_config 读到的值
+        if v not in (None, ""):
+            params.setdefault(k, v)
+    return params
+
+
 @helper_router.post("/mailbox/bind-recovery")
 async def mailbox_bind_recovery(
     req: MailboxBindRecoveryRequest,
@@ -883,6 +981,8 @@ async def mailbox_bind_recovery(
         params["alias_suffix"] = req.alias_suffix
     if req.alias_email:
         params["alias_email"] = req.alias_email
+    # 把服务端配置的 QQ IMAP 凭据透传给 helper（关键 — 没这一步 helper 拿不到）
+    _inject_imap_config(params)
     result = await run_in_threadpool(
         registry.dispatch,
         "bind_recovery_email",

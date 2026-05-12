@@ -1920,6 +1920,12 @@ function renderHelp() {
     el('div', { id: 'helpInstallBody' }, t('help_install_intro')),
   ]));
 
+  // IMAP / 辅助邮箱 凭据配置（绑辅助邮箱时从 QQ IMAP 拉验证码用）
+  grid.appendChild(el('div', { class: 'help-card' }, [
+    el('h4', {}, t('help_card_imap_title')),
+    el('div', { id: 'helpImapBody' }, t('help_imap_loading')),
+  ]));
+
   // 实时日志（占满最后一行，常驻订阅）
   grid.appendChild(el('div', { class: 'help-card help-card-log' }, [
     el('h4', {}, [
@@ -1940,8 +1946,81 @@ function renderHelp() {
   renderHelpActions();
   loadHelperTokens();
   loadHelperDownloadInfo();
+  loadHelperImapConfig();
   // 启动 / 复用常驻 SSE 订阅（用户在 Help 页期间一直在收日志）
   startHelpPersistentLog();
+}
+
+// ── IMAP / 辅助邮箱配置（绑辅助邮箱时从 QQ IMAP 拉验证码用） ─────
+
+async function loadHelperImapConfig() {
+  const body = $('helpImapBody');
+  if (!body) return;
+  try {
+    const r = await api.get('/api/helper/imap-config');
+    clear(body);
+    body.appendChild(el('p', { class: 'help-imap-intro' }, t('help_imap_intro')));
+
+    const mkField = (id, key, value, type = 'text', placeholder = '') => {
+      const wrap = el('div', { class: 'help-imap-field' });
+      wrap.appendChild(el('label', {}, t(key)));
+      wrap.appendChild(el('input', {
+        id, type, value: value || '', placeholder,
+      }));
+      return wrap;
+    };
+
+    body.appendChild(mkField('imapUser', 'help_imap_user', r.qq_imap_user,
+                              'email', 'your@qq.com'));
+    body.appendChild(mkField('imapPwd', 'help_imap_pwd',
+      r.qq_imap_password_set ? '••••••••' : '',
+      'password', t('help_imap_pwd_placeholder')));
+    body.appendChild(mkField('imapHost', 'help_imap_host',
+      r.qq_imap_host || 'imap.qq.com'));
+    body.appendChild(mkField('imapPort', 'help_imap_port',
+      String(r.qq_imap_port || 993), 'number'));
+    body.appendChild(mkField('imapSuffix', 'help_imap_suffix',
+      r.recovery_alias_suffix || 'evuzdnd.cn', 'text', 'example.com'));
+
+    const errEl = el('div', { id: 'imapErr',
+      style: 'font-size:12px;color:var(--danger);min-height:16px;margin-top:6px' });
+    body.appendChild(errEl);
+
+    body.appendChild(el('div', { class: 'help-btn-row' }, [
+      el('button', { class: 'btn btn-p btn-tiny', onclick: saveHelperImapConfig },
+         t('help_imap_save')),
+    ]));
+  } catch (e) {
+    clear(body);
+    body.appendChild(el('p', { class: 'help-status-hint' },
+      t('toast_load_fail') + (e.message || '')));
+  }
+}
+
+async function saveHelperImapConfig() {
+  const errEl = $('imapErr'); if (errEl) errEl.textContent = '';
+  const user = $('imapUser').value.trim();
+  let pwd = $('imapPwd').value;
+  const host = $('imapHost').value.trim();
+  const port = parseInt($('imapPort').value, 10) || 993;
+  const suffix = $('imapSuffix').value.trim();
+
+  // 占位"••••••••" 表示用户没改密码 → 不传 password 字段（保留旧值）
+  const body = { qq_imap_user: user, qq_imap_host: host,
+                  qq_imap_port: port, recovery_alias_suffix: suffix };
+  if (pwd && pwd !== '••••••••') body.qq_imap_password = pwd;
+
+  try {
+    const r = await api.put('/api/helper/imap-config', body);
+    if (r.success) {
+      toast(t('toast_help_imap_saved'), 'success');
+      loadHelperImapConfig();
+    } else if (errEl) {
+      errEl.textContent = r.error || t('toast_load_fail');
+    }
+  } catch (e) {
+    if (errEl) errEl.textContent = e.message || t('toast_load_fail');
+  }
 }
 
 // ── Help 页常驻 SSE 日志（进入 Help 页就订阅，离开页面停止） ──

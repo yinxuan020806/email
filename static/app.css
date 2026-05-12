@@ -218,6 +218,11 @@ body{font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif;background
 .help-install-dl a:hover{text-decoration:underline}
 .help-install-steps{padding-left:20px;font-size:12px;color:var(--text2);line-height:1.8;margin:0}
 .help-spinner{font-size:14px;color:var(--text2)}
+.help-imap-intro{font-size:12px;color:var(--text2);margin:0 0 10px;line-height:1.6}
+.help-imap-field{margin-bottom:10px;display:flex;flex-direction:column;gap:4px}
+.help-imap-field label{font-size:11px;color:var(--text2)}
+.help-imap-field input{padding:6px 10px;border:1px solid var(--inp-bd);border-radius:4px;background:var(--inp-bg);color:var(--text);font-size:13px}
+.help-imap-field input:focus{outline:none;border-color:var(--accent)}
 .help-action-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:10px}
 .help-action-card{display:flex;align-items:center;gap:10px;padding:12px 14px;border:1px solid var(--border);border-radius:10px;background:var(--inp-bg);cursor:pointer;transition:transform .15s,border-color .15s,background .15s}
 .help-action-card:hover{transform:translateY(-2px);border-color:var(--accent);background:var(--hover)}
