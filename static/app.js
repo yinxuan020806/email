@@ -906,6 +906,21 @@ async function runHelperSingleSse(action, accountId, extraParams, titleKey,
             );
           }
         }
+        // helper 操作成功但服务端写回 DB 失败 —— 改密 / get_ms_token 这类
+        // 的灾难性边角：邮箱端密码 / refresh_token 已变，DB 没跟上，下次
+        // 自动登录用旧凭据 → Outlook 风控锁号。必须显眼提醒用户手工修复。
+        if (msg.db_update_failed) {
+          appendHelperLog(
+            `⚠ Helper 操作成功，但服务端写回 DB 失败：${msg.db_update_failed}` +
+            `。请到「账号」页面手工修正该账号的对应字段后再继续，` +
+            `否则下次自动登录会被风控拦下。`,
+            'warning',
+          );
+          toast(
+            'Helper 成功但 DB 未同步，请手工核对账号字段（见任务日志）',
+            'warning',
+          );
+        }
       } else if (msg.type === 'done') {
         if (okFinal) {
           setHelperTaskDone(true, opts.successMsg || '');
@@ -3035,8 +3050,24 @@ async function doHelperChpwd() {
     const body = { email, email_password: oldPwd, new_password: newPwd, timeout: 300 };
     const r = helperResponseGuard(await api.post('/api/helper/mailbox/change-password', body));
     if (r.success) {
-      setHelperTaskDone(true, '');
-      toast(t('toast_help_change_pwd_ok'), 'success');
+      if (r.db_update_failed) {
+        // 改密在邮箱端成功了但 DB 没同步 —— 必须显眼提醒，否则下次登录用
+        // 旧密码会风控锁号。这里不弹纯绿色 toast 误导用户。
+        appendHelperLog(
+          `⚠ 邮箱端密码已修改成功，但服务端写回 DB 失败：` +
+          `${r.db_update_failed}。请到「账号」页面手工把该账号的密码字段` +
+          `更新为新密码，否则下次自动登录会被 Outlook 风控拦下。`,
+          'warning',
+        );
+        setHelperTaskDone(true, '⚠ DB 未同步，请手工修正账号密码');
+        toast(
+          'Helper 改密成功，但服务端 DB 未同步，请手工核对账号密码',
+          'warning',
+        );
+      } else {
+        setHelperTaskDone(true, '');
+        toast(t('toast_help_change_pwd_ok'), 'success');
+      }
     } else {
       setHelperTaskDone(false, r.error || '');
     }

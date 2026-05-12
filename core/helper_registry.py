@@ -296,6 +296,7 @@ class HelperRegistry:
         timeout: int = DEFAULT_TASK_TIMEOUT,
         owner_id: Optional[int] = None,
         min_helper_version: Optional[str] = None,
+        task_id_holder: Optional[list] = None,
     ) -> dict:
         """把一个任务发给在线 Helper，阻塞等结果。
 
@@ -303,6 +304,10 @@ class HelperRegistry:
         - ``min_helper_version`` = 该 action 要求的最低 helper 版本（默认走全局
           ``MIN_HELPER_VERSION``）。低于此版本立即返回 ``needs_helper_upgrade=True``，
           引导用户在 Web 面板下载新 EXE
+        - ``task_id_holder`` = 可选 list；若提供，dispatch 在生成 task_id 并占坑
+          成功后会立刻 ``.append(task_id)``。SSE 流式调用方利用这一点在客户端
+          断开时**反查 task_id** 然后调 ``cancel_task`` 抢救（参考
+          ``helper_routes.batch_mailbox`` 的 abort 处理）。
         - 返回 ``{"success": bool, "data"?: ..., "error"?: ..., "task_id": str, ...}``
         - 离线 / 写入失败 / 超时 / 取消 都作为 ``success: False`` 的结果返回，
           且会同步广播一条 SSE 日志让前端实时看到原因
@@ -372,6 +377,11 @@ class HelperRegistry:
                     }
             if too_many_resp is None:
                 self._pending[task_id] = (result_q, sess.owner_id)
+                if task_id_holder is not None:
+                    try:
+                        task_id_holder.append(task_id)
+                    except Exception:  # noqa: BLE001
+                        pass
 
         if too_many_resp is not None:
             # broadcast 必须在锁外做（_broadcast 调 _log_sink 可能阻塞）
@@ -542,6 +552,26 @@ class HelperRegistry:
         except queue.Full:
             return False
         return True
+
+    def revoke_sessions_by_token(self, token: str) -> int:
+        """撤销 token 后的配套清理：把 registry 里所有挂着该 token 的 session 踢掉。
+
+        与外部直接遍历 ``_sessions`` 的旧实现（破坏封装且没法换内部存储结构）
+        相比，这里走公开方法 + 持锁取快照 + 锁外 ``unregister`` 串行调用，保证：
+        - 不会出现 dict mutated while iterating
+        - 不与 register/dispatch 抢锁互锁
+        - 返回真正被踢掉的会话数，方便 audit
+        """
+        if not token:
+            return 0
+        helper_ids: list[str] = []
+        with self._lock:
+            for hid, sess in self._sessions.items():
+                if sess.token == token:
+                    helper_ids.append(hid)
+        for hid in helper_ids:
+            self.unregister(hid)
+        return len(helper_ids)
 
     # ── helper 上报 ────────────────────────────────────────────
 

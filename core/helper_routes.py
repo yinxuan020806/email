@@ -39,6 +39,7 @@ Helper 端点用 ``token / helper_id`` 而非 cookie 鉴权 —— 因为 Helper
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -51,6 +52,7 @@ from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from core.helper_registry import (
+    ALWAYS_ALLOWED_ACTIONS,
     DEFAULT_TASK_TIMEOUT,
     MIN_HELPER_VERSION,
     POLL_BLOCK_SECONDS,
@@ -338,18 +340,16 @@ def revoke(
         token = sess.token
 
     ok = _tk.revoke_token(token, owner_id=owner_id)
+    kicked = 0
     if ok:
-        # 把对应 session 踢掉
-        for hid, sess in list(registry._sessions.items()):  # noqa: SLF001
-            if sess.token == token:
-                registry.unregister(hid)
+        kicked = registry.revoke_sessions_by_token(token)
     _audit(
         request, user, "helper_revoke",
         target=f"...{token[-8:]}",
         success=ok,
-        detail=f"revoked={1 if ok else 0}",
+        detail=f"revoked={1 if ok else 0},kicked={kicked}",
     )
-    return {"success": ok, "revoked": 1 if ok else 0}
+    return {"success": ok, "revoked": 1 if ok else 0, "kicked": kicked}
 
 
 @helper_router.get("/download-info")
@@ -379,17 +379,20 @@ def download_info(user: dict = Depends(require_owner)) -> dict:
     return out
 
 
-# /api/helper/dispatch 允许的 action 白名单：
-# - 连通性测试（与 ALWAYS_ALLOWED_ACTIONS 对齐）
-# - 4 个邮箱业务（与 helper.handlers.install_default_handlers 注册的对齐）
-# 限制目的：dispatch 是开放接口，可以收任意 ``action`` 字符串；如果不限制，
-# 前端误传 / 攻击者构造的奇怪 action 也能进 helper outbox 队列、消耗任务超时
-# 名额（每个 dispatch 都阻塞一个线程池 worker）。白名单挡住这些边缘情况。
-_DISPATCH_ALLOWED_ACTIONS = frozenset({
-    "echo", "ping", "version",
-    "open_mailbox", "get_ms_token",
-    "change_email_password", "bind_recovery_email",
-})
+# /api/helper/dispatch 允许的 action 白名单：仅连通性测试。
+#
+# 为什么不放业务 action：dispatch 是"裸派发"，**不会做 result → DB 落库**：
+# 如果允许 ``get_ms_token`` / ``change_email_password`` / ``bind_recovery_email``
+# 从这里走，helper 真的会完成操作，但 server 拿到 client_id/refresh_token/新密码
+# 就直接丢掉，账号表与邮箱真实状态发生失配（用户下次登录用旧密码→风控锁）。
+#
+# 业务接口请走专用路由：
+# - POST /api/helper/mailbox/open
+# - POST /api/helper/mailbox/get-token
+# - POST /api/helper/mailbox/change-password
+# - POST /api/helper/mailbox/bind-recovery
+# 或者批量 SSE：POST /api/helper/batch/mailbox
+_DISPATCH_ALLOWED_ACTIONS = frozenset(ALWAYS_ALLOWED_ACTIONS)
 
 
 @helper_router.post("/dispatch")
@@ -998,10 +1001,21 @@ async def batch_mailbox(
                 # 让 SSE 持续有字节流，绕过 CF idle timeout。
                 # 注：SSE 注释帧 (以 `:` 开头) 不会被前端 EventSource onmessage
                 # 回调感知到，只是保活心跳，前端 progress 处理逻辑完全不受影响。
-                dispatch_task = asyncio.create_task(run_in_threadpool(
+                #
+                # ``task_id_holder``：dispatch 在生成 task_id 占坑后立刻 append
+                # 进来，让我们能在客户端 abort 时主动 ``cancel_task`` 回收 helper
+                # 的并发名额（否则被 abort 的 batch 会让 dispatch 线程白白等到
+                # timeout 才释放，期间其它 task 无法 dispatch）。
+                task_id_holder: list[str] = []
+                dispatch_callable = functools.partial(
                     registry.dispatch,
                     req.action, params, req.timeout, owner_id,
-                ))
+                    None,  # min_helper_version
+                    task_id_holder,
+                )
+                dispatch_task = asyncio.create_task(
+                    run_in_threadpool(dispatch_callable),
+                )
                 try:
                     while True:
                         try:
@@ -1014,13 +1028,36 @@ async def batch_mailbox(
                             # 25s 还没出结果，吐一条 SSE 注释帧续命
                             yield ": keepalive\n\n"
                             if await request.is_disconnected():
-                                # 客户端真的走了 → 取消等待并停掉本批
+                                # 客户端真的走了 → 主动 cancel task，让 dispatch
+                                # 那一边阻塞的 result_q.get() 立刻返回 cancelled
+                                if task_id_holder:
+                                    try:
+                                        registry.cancel_task(
+                                            owner_id, task_id_holder[0],
+                                        )
+                                    except Exception:  # noqa: BLE001
+                                        logger.exception(
+                                            "batch abort 后 cancel_task 失败 "
+                                            "task_id=%s", task_id_holder[0],
+                                        )
                                 dispatch_task.cancel()
                                 aborted = True
                                 break
                     if aborted:
+                        # 等 dispatch 线程跑完 cancel 路径返回，吞掉返回值，
+                        # 避免 "Task was destroyed but it is pending!" warning
+                        try:
+                            await asyncio.wait_for(dispatch_task, timeout=5.0)
+                        except (asyncio.TimeoutError, asyncio.CancelledError,
+                                Exception):  # noqa: BLE001
+                            pass
                         break
                 except asyncio.CancelledError:
+                    if task_id_holder:
+                        try:
+                            registry.cancel_task(owner_id, task_id_holder[0])
+                        except Exception:  # noqa: BLE001
+                            pass
                     dispatch_task.cancel()
                     aborted = True
                     break
@@ -1082,6 +1119,9 @@ async def batch_mailbox(
                     "error": result.get("error") or "",
                     "task_id": result.get("task_id"),
                     "needs_helper_upgrade": result.get("needs_helper_upgrade", False),
+                    # 改密 / get_ms_token 走 helper 成功了但服务端写回 DB 失败
+                    # 时，前端要单独警示用户（DB 旧密码 vs 邮箱新密码已失配）。
+                    "db_update_failed": result.get("db_update_failed") or "",
                 })
         finally:
             # 不管正常完成还是 abort，都写一条汇总（让 audit_log 可追溯）
@@ -1276,6 +1316,43 @@ async def helper_poll_task(
     return JSONResponse({"success": True, "tasks": tasks})
 
 
+_HELPER_BODY_MAX_BYTES = 1 * 1024 * 1024  # 1 MiB
+"""``/task-result`` 与 ``/task-log`` 上限。
+
+helper_id 是 64-bit 随机会话凭据但仍属于明文 header；如果泄漏，攻击者能拿
+helper_id 灌大 body 把内存吃光。1 MiB 对正常 task-result（结构化 dict +
+小字段错误信息）绰绰有余；helper 端长 traceback 也会被截到 2 KB 内。"""
+
+
+def _helper_body_too_large(request: Request) -> Optional[JSONResponse]:
+    """检查 Content-Length；超过 ``_HELPER_BODY_MAX_BYTES`` 直接 413 拒收。
+
+    注意：chunked transfer-encoding 没 Content-Length，这一关挡不住所有攻击；
+    但 helper 客户端走 ``requests.Session().post(json=...)`` 默认会带 CL，
+    99% 的真实流量受这一关保护。
+    """
+    cl_raw = request.headers.get("content-length") or "0"
+    try:
+        cl = int(cl_raw)
+    except ValueError:
+        return JSONResponse(
+            {"success": False, "error": f"非法 Content-Length: {cl_raw}"},
+            status_code=400,
+        )
+    if cl > _HELPER_BODY_MAX_BYTES:
+        return JSONResponse(
+            {
+                "success": False,
+                "error": (
+                    f"body too large: {cl} bytes > "
+                    f"{_HELPER_BODY_MAX_BYTES} bytes upper limit"
+                ),
+            },
+            status_code=413,
+        )
+    return None
+
+
 @helper_router.post("/task-result")
 async def helper_task_result(request: Request) -> JSONResponse:
     """Helper 上报任务结果。"""
@@ -1284,6 +1361,10 @@ async def helper_task_result(request: Request) -> JSONResponse:
         return JSONResponse(
             {"success": False, "error": "缺少 helper_id"}, status_code=400,
         )
+
+    too_large = _helper_body_too_large(request)
+    if too_large is not None:
+        return too_large
 
     try:
         msg = await request.json()
@@ -1321,6 +1402,10 @@ async def helper_task_log(request: Request) -> JSONResponse:
         return JSONResponse(
             {"success": False, "error": "缺少 helper_id"}, status_code=400,
         )
+
+    too_large = _helper_body_too_large(request)
+    if too_large is not None:
+        return too_large
 
     try:
         msg = await request.json()

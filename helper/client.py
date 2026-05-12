@@ -50,6 +50,14 @@ _LOG_FLUSH_INTERVAL = 0.5    # 秒
 _HTTP_TIMEOUT_SHORT = 15     # 普通短请求
 _HTTP_TIMEOUT_LONG = 35      # 长轮询 (poll_block 25s + 余量)
 
+# task-result 重试参数：跑了 5 分钟的改密任务，如果上报恰好碰上网络抖一下
+# 就丢，server 端 _pending 会一直空等到 dispatch timeout 才知道失败 ——
+# 用户阻塞 5 分钟才看到「超时」但邮箱端密码已经改过了。这里加 3 次指数
+# 退避，把"已完成但回执发不出去"这一类失败的窗口收到几秒内。
+_TASK_RESULT_RETRIES = 3
+_TASK_RESULT_BACKOFF_MIN = 1.0
+_TASK_RESULT_BACKOFF_MAX = 8.0
+
 
 class HelperClient:
     """长轮询客户端 + 任务执行调度。"""
@@ -370,9 +378,68 @@ class HelperClient:
 
         body = {"task_id": task_id, **result}
         body.setdefault("success", False)
-        self._post(
-            "/api/helper/task-result", body, timeout=_HTTP_TIMEOUT_SHORT,
-        )
+        self._post_task_result_with_retry(body)
+
+    def _post_task_result_with_retry(self, body: dict) -> bool:
+        """上报 task-result + 指数退避重试。
+
+        服务端 ``submit_result`` 接收成功的 happy path 只有一种：HTTP 200 +
+        ``data.get("success") is True``。我们把 helper 自己执行任务的结果
+        ``success`` 字段塞在 body 里，但 ``submit_result`` 的回执 (``data``)
+        里 ``success`` 表示"服务端接受 / 写入 result_q 成功"——和任务本身
+        success 区分。这里只对服务端层面 ``success`` 做重试判定。
+
+        触发重试的场景：网络异常（``data is None``）、HTTP 5xx、HTTP 401 +
+        ``needs_register``（短暂的 helper_id 失效，外层正在重连）。
+
+        遇到 HTTP 401/needs_register 时立刻清空 helper_id，主循环会感知并
+        重新 register，再回来重试 ``task-result``。
+        """
+        task_id = body.get("task_id") or "?"
+        backoff = _TASK_RESULT_BACKOFF_MIN
+        for attempt in range(_TASK_RESULT_RETRIES + 1):
+            data, status_code = self._post(
+                "/api/helper/task-result", body,
+                timeout=_HTTP_TIMEOUT_SHORT,
+            )
+            if data is not None and status_code == 200 and data.get("success"):
+                if attempt > 0:
+                    logger.info(
+                        "[helper] task-result %s 第 %d 次重试成功",
+                        task_id, attempt,
+                    )
+                return True
+
+            if status_code == 401 and isinstance(data, dict) and data.get(
+                "needs_register"
+            ):
+                logger.warning(
+                    "[helper] task-result %s 收到 401，helper_id 失效；"
+                    "暂存到下次注册后再试",
+                    task_id,
+                )
+                self._helper_id = None
+                return False
+
+            if attempt >= _TASK_RESULT_RETRIES:
+                logger.warning(
+                    "[helper] task-result %s 重试 %d 次后仍失败 "
+                    "(status=%s data=%s)，放弃上报。"
+                    "服务端 _pending 将在 dispatch timeout 后回收。",
+                    task_id, _TASK_RESULT_RETRIES, status_code,
+                    (data or {}).get("error") if isinstance(data, dict) else "?",
+                )
+                return False
+
+            logger.warning(
+                "[helper] task-result %s 第 %d 次失败 status=%s，"
+                "%.1fs 后重试",
+                task_id, attempt + 1, status_code, backoff,
+            )
+            if self._stop.wait(backoff):
+                return False
+            backoff = min(backoff * 2, _TASK_RESULT_BACKOFF_MAX)
+        return False
 
     def _heartbeat_loop(self) -> None:
         while not self._stop.is_set():
