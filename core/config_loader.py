@@ -24,8 +24,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG = {
     # ── 辅助邮箱 (recovery email) 相关 ──
-    # 默认后缀，bind_recovery_email 会用它推算 ``user@<suffix>`` 作为辅助邮箱
-    "recovery_alias_suffix": "evuzdnd.cn",
+    # 默认后缀留空：参考项目 cursor-manager 的默认 ``evuzdnd.cn`` 是作者私有
+    # catch-all 域名，用户用了会落到 Cloudflare 524 死域名。本项目强制用户
+    # 在 Help 页「✉ 辅助邮箱凭据」卡片里填写**自己的**域名。
+    "recovery_alias_suffix": "",
     # QQ IMAP 凭据：用户手动配。helper 模式下也可通过服务器 imap_config 透传覆盖
     "qq_imap_user": "",
     "qq_imap_password": "",

@@ -968,7 +968,16 @@ def bind_recovery_email(
                 merged[k] = imap_config[k]
         cfg = merged
 
-    suffix = (alias_suffix or cfg.get("recovery_alias_suffix") or "evuzdnd.cn").lstrip("@")
+    suffix = (alias_suffix or cfg.get("recovery_alias_suffix") or "").lstrip("@")
+    if not suffix and not alias_email:
+        return {
+            "success": False,
+            "error": (
+                "未配置「辅助邮箱后缀」。请到 Web 面板 → 📬 邮箱助手 → "
+                "✉ 辅助邮箱凭据 (QQ IMAP) 卡片里填入你自己的 catch-all 域名后缀，"
+                "然后再点本按钮。"
+            ),
+        }
 
     if not alias_email:
         try:
@@ -1006,7 +1015,10 @@ def bind_recovery_email(
             )
         else:
             err_msg = (
-                "未配置 QQ 邮箱地址或授权码（请在 ⚙ 设置中填写 qq_imap_user / qq_imap_password）"
+                "未配置 QQ 邮箱授权码。请到 Web 面板 → 📬 邮箱助手 → "
+                "✉ 辅助邮箱凭据 (QQ IMAP) 填入 QQ 邮箱地址 + 16 位授权码"
+                "（不是 QQ 登录密码！QQ 邮箱 → 设置 → 账户 → 开启 IMAP 后生成），"
+                "再点「💾 保存」和「🧪 测试连接」验证后重试。"
             )
         return {"success": False, "error": err_msg}
 

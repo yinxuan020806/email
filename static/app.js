@@ -616,22 +616,22 @@ function buildAccountRow(a, index, isOwner) {
   ops.appendChild(el('button', { onclick: () => viewEmails(a.id) }, t('btn_view')));
   ops.appendChild(el('button', { onclick: () => showDetail(a.id) }, t('btn_detail')));
   ops.appendChild(el('button', { class: 'danger', onclick: () => deleteSingle(a.id) }, t('btn_del')));
-  // xiaoxuan 站长专属：每行 4 个 helper 图标按钮（仅当 helper 在线时可点）
-  // 设计上让按钮永远显示（owner-only），但 helper 离线时给 disabled
-  // 状态 + toast 提示，避免每次状态翻转都重建整张表
+  // xiaoxuan 站长专属：每行 4 个 helper 操作按钮（仿 cursor-manager 风格）
+  // 设计：圆形彩色按钮 + emoji + tooltip，比之前的 transparent 图标更醒目；
+  // helper 离线时 disabled 灰色，点击给 toast 提示
   if (S.user && S.user.is_owner) {
-    const sep = el('span', { class: 'op-sep owner-only' }, '·');
+    const sep = el('span', { class: 'op-sep owner-only' }, '|');
     ops.appendChild(sep);
-    const mkHelp = (icon, key, fn) => el('button', {
-      class: 'help-row-btn owner-only',
+    const mkHelp = (icon, cls, key, fn) => el('button', {
+      class: `help-row-btn ${cls} owner-only`,
       title: t(key),
       'aria-label': t(key),
       onclick: () => triggerHelperRowAction(fn, a, key),
     }, icon);
-    ops.appendChild(mkHelp('🔓', 'help_row_open', helperRowOpen));
-    ops.appendChild(mkHelp('🔑', 'help_row_get_token', helperRowGetToken));
-    ops.appendChild(mkHelp('🔒', 'help_row_chpwd', helperRowChpwd));
-    ops.appendChild(mkHelp('🔗', 'help_row_bind', helperRowBind));
+    ops.appendChild(mkHelp('📬', 'h-open', 'help_row_open', helperRowOpen));
+    ops.appendChild(mkHelp('🔑', 'h-tok', 'help_row_get_token', helperRowGetToken));
+    ops.appendChild(mkHelp('🔒', 'h-pwd', 'help_row_chpwd', helperRowChpwd));
+    ops.appendChild(mkHelp('🛡️', 'h-bind', 'help_row_bind', helperRowBind));
   }
   tr.appendChild(el('td', {}, ops));
 
@@ -1989,11 +1989,27 @@ async function loadHelperImapConfig() {
     body.appendChild(el('div', { class: 'help-btn-row' }, [
       el('button', { class: 'btn btn-p btn-tiny', onclick: saveHelperImapConfig },
          t('help_imap_save')),
+      el('button', { class: 'btn btn-o btn-tiny', onclick: testHelperImapConfig },
+         t('help_imap_test')),
     ]));
   } catch (e) {
     clear(body);
     body.appendChild(el('p', { class: 'help-status-hint' },
       t('toast_load_fail') + (e.message || '')));
+  }
+}
+
+async function testHelperImapConfig() {
+  const errEl = $('imapErr'); if (errEl) errEl.textContent = '';
+  try {
+    const r = await api.post('/api/helper/imap-config/test', {});
+    if (r.success) {
+      toast(r.message || t('toast_help_imap_test_ok'), 'success');
+    } else if (errEl) {
+      errEl.textContent = r.error || t('toast_load_fail');
+    }
+  } catch (e) {
+    if (errEl) errEl.textContent = e.message || t('toast_load_fail');
   }
 }
 

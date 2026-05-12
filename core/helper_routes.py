@@ -468,6 +468,68 @@ def get_imap_config(user: dict = Depends(require_owner)) -> dict:
     }
 
 
+@helper_router.post("/imap-config/test")
+def test_imap_config(
+    request: Request,
+    user: dict = Depends(require_owner),
+) -> dict:
+    """测试当前保存的 QQ IMAP 凭据是否能连上。
+
+    用户填完授权码 → 点「测试连接」→ 直接尝试 IMAP 登录。成功 = 凭据有效；
+    失败的最常见原因：
+    - 填的是 QQ 登录密码而不是授权码（要在 QQ 邮箱 → 设置 → 账户 → 开启 IMAP 后生成）
+    - 授权码已过期 / 被禁用
+    - QQ 账号被限制（异地登录、频繁尝试触发风控）
+    - host/port 不对（imap.qq.com:993 默认对，企业邮箱 / 海外邮箱要改）
+    """
+    from core.config_loader import load_config
+    cfg = load_config()
+    user_email = (cfg.get("qq_imap_user") or "").strip()
+    pwd = cfg.get("qq_imap_password") or ""
+    host = cfg.get("qq_imap_host") or "imap.qq.com"
+    try:
+        port = int(cfg.get("qq_imap_port") or 993)
+    except (TypeError, ValueError):
+        port = 993
+
+    if not user_email or not pwd:
+        return {
+            "success": False,
+            "error": "请先在上方填入 QQ 邮箱地址和授权码后保存",
+        }
+
+    import imaplib
+    import socket
+    try:
+        with imaplib.IMAP4_SSL(host=host, port=port, timeout=10) as M:
+            try:
+                M.login(user_email, pwd)
+            except imaplib.IMAP4.error as e:
+                msg = str(e).lower()
+                hint = ""
+                if "authentication failed" in msg or b"\\xb1\\x71" in str(e).encode():
+                    hint = "（最常见：把 QQ 登录密码当成授权码填了 — 必须用 QQ 邮箱 → 设置 → 账户 → 开启 IMAP/SMTP 后生成的 16 位授权码）"
+                return {
+                    "success": False,
+                    "error": f"IMAP 登录失败：{e}{hint}",
+                }
+            M.select("INBOX")
+        _audit(
+            request, user, "helper_imap_test",
+            target=user_email, success=True, detail=f"{host}:{port}",
+        )
+        return {
+            "success": True,
+            "message": f"✅ 连接成功！已通过 {host}:{port} 登录 {user_email}",
+        }
+    except socket.timeout:
+        return {"success": False, "error": f"连接 {host}:{port} 超时（10s）"}
+    except socket.gaierror as e:
+        return {"success": False, "error": f"DNS 解析失败：{e}"}
+    except Exception as e:  # noqa: BLE001
+        return {"success": False, "error": f"{type(e).__name__}: {e}"}
+
+
 @helper_router.put("/imap-config")
 def put_imap_config(
     req: ImapConfigUpdate,

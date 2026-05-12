@@ -233,11 +233,33 @@ body{font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif;background
 .hac-title{font-size:13px;font-weight:600;color:var(--text);margin-bottom:2px}
 .hac-desc{font-size:11px;color:var(--text2);line-height:1.4}
 .help-actions-tip{font-size:11px;color:var(--text3);margin:8px 0 0;padding:6px 10px;background:var(--hover);border-radius:4px}
-/* 表格行内 helper 按钮 */
-.op-sep{display:inline-block;color:var(--text3);margin:0 2px;font-size:11px}
-.help-row-btn{background:transparent;border:1px solid transparent;border-radius:4px;padding:2px 4px;cursor:pointer;font-size:13px;line-height:1;color:var(--text);transition:background .12s,border-color .12s,transform .12s}
-.help-row-btn:hover{border-color:var(--accent);background:var(--hover);transform:scale(1.15)}
-.help-row-btn:active{transform:scale(0.95)}
+/* 表格行内 helper 按钮（仿 cursor-manager 圆形彩色按钮风格） */
+.op-sep{display:inline-block;color:var(--text3);margin:0 4px;font-size:12px;opacity:.5}
+.help-row-btn{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:28px;height:28px;
+  margin:0 2px;
+  border:1px solid var(--inp-bd);border-radius:50%;
+  background:var(--inp-bg);
+  cursor:pointer;
+  font-size:14px;line-height:1;
+  color:var(--text);
+  transition:transform .12s,box-shadow .15s,border-color .15s,background .15s;
+}
+.help-row-btn:hover{
+  transform:translateY(-1px) scale(1.08);
+  box-shadow:0 2px 8px rgba(0,0,0,.15);
+}
+.help-row-btn:active{transform:scale(0.93)}
+/* 4 个 helper 按钮各自的主题色 */
+.help-row-btn.h-open{background:linear-gradient(135deg,#1e88e5,#1565c0);border-color:#1565c0;color:#fff}
+.help-row-btn.h-open:hover{background:linear-gradient(135deg,#42a5f5,#1976d2);border-color:#0d47a1}
+.help-row-btn.h-tok{background:linear-gradient(135deg,#26a69a,#00897b);border-color:#00796b;color:#fff}
+.help-row-btn.h-tok:hover{background:linear-gradient(135deg,#4db6ac,#00897b);border-color:#00695c}
+.help-row-btn.h-pwd{background:linear-gradient(135deg,#ef6c00,#e65100);border-color:#e65100;color:#fff}
+.help-row-btn.h-pwd:hover{background:linear-gradient(135deg,#ff8a40,#ef6c00);border-color:#bf360c}
+.help-row-btn.h-bind{background:linear-gradient(135deg,#7e57c2,#5e35b1);border-color:#5e35b1;color:#fff}
+.help-row-btn.h-bind:hover{background:linear-gradient(135deg,#9575cd,#673ab7);border-color:#4527a0}
 .help-task-status{font-size:13px;padding:8px 12px;border-radius:6px;margin-bottom:10px}
 .help-task-status.running{background:var(--hover);color:var(--text)}
 .help-task-status.success{background:rgba(46,204,113,.12);color:var(--success);border:1px solid rgba(46,204,113,.4)}
