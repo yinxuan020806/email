@@ -59,11 +59,11 @@ OUTBOX_MAX = 256
 # 挤爆，同时让用户的业务并发被限制。
 MAX_CONCURRENT_TASKS_PER_OWNER = 3
 
-# Helper 客户端最低支持版本：低于此版本的 helper 不允许 dispatch 业务 action，
-# 因为它可能缺少新加入的 action 或者新加入的 params 透传字段。
-# 当前 Stage 1 起步版 = 0.1.0；后续 Stage 2 引入新 action 时可升 0.2.0 并配合
-# ``needs_helper_upgrade`` 引导用户在 Web 面板下载新 EXE。
-MIN_HELPER_VERSION = "0.1.0"
+# Helper 客户端最低支持版本：低于此版本的 helper 不允许 dispatch 业务 action。
+# 0.2.0 之前的 helper EXE 里 `helper/actions/mailbox.py` 是 stub，调用业务
+# action 会立即返回"Stage 1 未实现"占位文案。Stage 2 上线后 server 端
+# 要把老 EXE 拦住引导用户重新下载，否则用户面对的是 stub 提示一脸懵。
+MIN_HELPER_VERSION = "0.2.0"
 
 # 只有这几个 action 不需要 helper 升级（连通性测试）。其它业务 action 都受版本守门
 ALWAYS_ALLOWED_ACTIONS = frozenset({"echo", "ping", "version"})

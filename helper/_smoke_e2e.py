@@ -128,18 +128,17 @@ def main(server: str, cookie: str) -> int:
     )
     print(f"      version → {resp.get('data')}")
 
-    print("[5/6] 调 mailbox/open（应返回 stub 失败信息，验证派发链路 + 完成日志）")
-    # stub 会立即返回 success=False；这里仅验证派发 → 任务执行 → 结果回传链路
+    print("[5/6] 调 dispatch echo（验证完整派发链路 + 实时日志桥接）")
+    # 不再用 mailbox/open 测（Stage 2 后真会启浏览器登录，stub 已无）。
+    # 改测 echo 派发：验证 server → helper poll → action 执行 → task-result 回传链路通
     resp = _http(
-        "POST", f"{server}/api/helper/mailbox/open",
-        {"email": "stub@x.com", "email_password": "p", "timeout": 10},
+        "POST", f"{server}/api/helper/dispatch",
+        {"action": "echo", "params": {"smoke": True}, "timeout": 10},
         cookie=cookie,
     )
-    print(f"      stub mailbox/open → success={resp.get('success')} error={(resp.get('error') or '')[:80]}")
-    if resp.get("success") is True:
-        print("      ⚠ stub 应该返回 False（Stage 2 才实现）"); client.shutdown(); return 4
-    if resp.get("success") is None:
-        print(f"      ✗ 返回缺 success 字段: {resp}"); client.shutdown(); return 4
+    print(f"      dispatch echo → success={resp.get('success')} echoed={resp.get('data', {}).get('echoed')}")
+    if resp.get("success") is not True:
+        print(f"      ✗ dispatch echo 失败: {resp}"); client.shutdown(); return 4
 
     print("[6/6] 撤销 token，预期 helper 被踢离线")
     _http("POST", f"{server}/api/helper/revoke", {}, cookie=cookie)

@@ -101,11 +101,11 @@ def test_session_send_returns_false_when_dead():
 
 def test_register_with_valid_token(fresh_registry):
     token = tk.provision_token(owner_id=42, label="laptop")
-    sess, err = fresh_registry.register(token, "0.1.2", "win32")
+    sess, err = fresh_registry.register(token, "0.2.0", "win32")
     assert err is None
     assert sess is not None
     assert sess.owner_id == 42
-    assert sess.version == "0.1.2"
+    assert sess.version == "0.2.0"
 
 
 def test_register_with_invalid_token(fresh_registry):
@@ -189,7 +189,7 @@ def _fake_helper_loop(reg_instance, sess, action_handlers):
 
 def test_dispatch_success_returns_helper_result(fresh_registry):
     token = tk.provision_token(owner_id=1)
-    sess, _ = fresh_registry.register(token, "0.1.2", "win32")
+    sess, _ = fresh_registry.register(token, "0.2.0", "win32")
 
     stop, th = _fake_helper_loop(
         fresh_registry, sess,
@@ -247,7 +247,7 @@ def test_dispatch_version_guard_exempts_connectivity(fresh_registry):
 def test_dispatch_timeout(fresh_registry):
     """helper 不响应 task-result 时 dispatch 应超时返回。"""
     token = tk.provision_token(owner_id=1)
-    sess, _ = fresh_registry.register(token, "0.1.2", "win32")
+    sess, _ = fresh_registry.register(token, "0.2.0", "win32")
     # 不启 fake helper，task 派出去后没人响应
 
     result = fresh_registry.dispatch(
@@ -260,7 +260,7 @@ def test_dispatch_timeout(fresh_registry):
 def test_dispatch_concurrent_limit(fresh_registry):
     """同 owner 同时 N 个业务任务派发 → 第 N+1 个被并发上限挡下。"""
     token = tk.provision_token(owner_id=1)
-    sess, _ = fresh_registry.register(token, "0.1.2", "win32")
+    sess, _ = fresh_registry.register(token, "0.2.0", "win32")
 
     # 把 _pending 手动填满（不真跑 fake helper，让 task 一直 pending）
     barrier = threading.Event()
@@ -309,7 +309,7 @@ def test_cancel_task_returns_false_for_unknown(fresh_registry):
 def test_cancel_task_blocks_cross_owner(fresh_registry):
     """owner B 不能取消 owner A 的 task。"""
     token_a = tk.provision_token(owner_id=1)
-    sess_a, _ = fresh_registry.register(token_a, "0.1.2", "win32")
+    sess_a, _ = fresh_registry.register(token_a, "0.2.0", "win32")
 
     # 手动塞一个 pending task
     q: queue.Queue = queue.Queue(maxsize=1)
@@ -326,7 +326,7 @@ def test_cancel_task_blocks_cross_owner(fresh_registry):
 def test_cancel_task_drains_outbox(fresh_registry):
     """cancel 时应该从 helper outbox 中清掉还没发的 task。"""
     token = tk.provision_token(owner_id=1)
-    sess, _ = fresh_registry.register(token, "0.1.2", "win32")
+    sess, _ = fresh_registry.register(token, "0.2.0", "win32")
 
     # 塞 2 个 task 进 outbox（helper 还没 poll）
     sess.send({"type": "task", "task_id": "t_a", "action": "ping"})
@@ -405,7 +405,7 @@ def test_subscribe_logs_lru_eviction(fresh_registry):
 def test_dispatch_broadcasts_status_logs(fresh_registry):
     """dispatch 应该在派发前/完成时主动 broadcast SSE 日志。"""
     token = tk.provision_token(owner_id=1)
-    sess, _ = fresh_registry.register(token, "0.1.2", "win32")
+    sess, _ = fresh_registry.register(token, "0.2.0", "win32")
     q = reg.subscribe_logs(owner_id=1)
 
     stop, th = _fake_helper_loop(

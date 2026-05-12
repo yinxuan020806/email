@@ -1,5 +1,81 @@
 # Email Helper Changelog
 
+## 0.2.0 - 2026-05-12  🎉 Stage 2：浏览器自动化全面实装
+
+> **重大版本**：4 个邮箱业务 action 不再是 stub —— 真的会启动 chromium
+> 自动登录 Outlook、拿 refresh_token、改密码、绑辅助邮箱。
+>
+> ⚠ **破坏性变更**：MIN_HELPER_VERSION 从 0.1.0 升到 **0.2.0**。所有
+> 0.1.x EXE 调业务 action 时会被服务端守门拦下并提示重新下载。
+
+### 新增（移植自 cursor-manager）
+
+| 文件 | 行数 | 用途 |
+|---|---|---|
+| `core/ms_oauth.py` | 11 | Microsoft OAuth2 共享常量 |
+| `core/runtime.py` | ~100 | IS_HEADLESS_ENV / GUI 可用性判定 |
+| `core/browser_pool.py` | ~290 | DrissionPage 浏览器池 + 反检测启动参数 |
+| `core/helper_log_bridge.py` | ~50 | add_log 默认实现（被 log_redirect monkey-patch） |
+| `core/outlook_service.py` | **1218** | open_mailbox / get_ms_token / change_password / bind_recovery 主体 |
+| `core/password_change_service.py` | **938** | 改密专用流程（含 Cloudflare Turnstile 适配） |
+
+### 改造
+
+- `helper/actions/mailbox.py` 从 Stage 1 stub 改为真调 `core/outlook_service`：
+  - 每个 action 自带 `log_redirect` context manager，把 outlook_service 内部
+    的 `add_log` 实时桥接到 helper 的 task-log → server SSE → 前端 Modal
+  - import 失败时给明确报错（"请在 helper venv 跑 pip install -r requirements.txt"）
+
+- `helper/requirements.txt` 新增：
+  ```
+  DrissionPage>=4.1,<5
+  pyautogui>=0.9.54,<1
+  opencv-python-headless>=4.8,<5
+  numpy>=1.26,<3
+  ```
+
+- `core/helper_registry.py`：MIN_HELPER_VERSION 0.1.0 → 0.2.0，让老 EXE
+  调业务 action 被守门拦下；echo/ping/version 仍豁免
+
+### Cloudflare Turnstile（可选）
+
+`core/password_change_service.py` 改密时可能遇到 Cloudflare 验证码。原参考
+项目的 `services/turnstile.py`（pyautogui + OpenCV 模板匹配）**未移植**：
+
+- 用 `try/except ImportError` 包裹，缺失时优雅退化
+- 跑改密遇到 Turnstile → helper 日志里要求用户在弹出的浏览器里**手动点一下**
+- 后续如需自动通过 Turnstile，需把 `services/turnstile.py` 和
+  `helper/assets/{full.png,check-box.png}` 模板图一起移植过来
+
+### 适配
+
+- 所有 `from services.X` → `from core.X`
+- 所有 `from utils.X` → `from core.X`（X = browser, runtime, ms_oauth, auth_service）
+- 注：仅 `services.turnstile` import 保留原路径（被 try/except 包裹无副作用）
+
+### 测试
+
+- 全套 pytest **360 passed / 17 skipped / 0 failed**
+- `_smoke_e2e.py` 第 5 步从"测 stub 失败"改为"测 dispatch echo 完整链路"
+  （避免真启动浏览器登录假邮箱 stub 挂死）
+- helper_registry / helper_routes 测试里 fake helper 版本从 0.1.2 升到 0.2.0
+
+### ⚠ 用户升级须知
+
+1. **必须重新打包并重装 EmailHelper.exe**。0.1.x EXE 调业务功能（登录 /
+   取 Token / 改密 / 绑辅助）会得到 `needs_helper_upgrade: True` 响应，
+   前端弹 confirm 引导下载新版
+2. **新依赖**：DrissionPage / pyautogui / opencv-python-headless / numpy。
+   PyInstaller 打包后 EmailHelper.exe 体积从 ~20MB 涨到 ~60MB
+3. **必须在 Windows 桌面跑** — 浏览器要可见才能让用户完成 Outlook 安全验证
+4. **首次打包步骤**：
+   ```powershell
+   cd D:\1\0-email\email
+   .\helper\build.ps1 -Clean
+   # 自动装 helper/requirements.txt 全部依赖，打包 EmailHelper.exe，
+   # 拷到 static/helper/ 让 Web 面板下载按钮直接给用户
+   ```
+
 ## 0.1.3 - 2026-05-11
 
 > 第四轮深度优化：从「值得用」到「敢上生产」。聚焦 P0/P1 测试覆盖、并发

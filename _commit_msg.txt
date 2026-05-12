@@ -1,0 +1,46 @@
+feat(helper): Stage 2 浏览器自动化全面实装 - 4 个邮箱 action 不再是 stub
+
+整体定位：Helper EXE 重大版本升级 0.1.3 → 0.2.0。从「能跑壳子」升级到
+「真能干活」—— 4 个邮箱业务 action（自动登录 / 取 Token / 改密 / 绑辅助）
+真的会启动 chromium 完成 Outlook 浏览器自动化。
+
+新增文件（从参考项目 cursor-manager 移植 + 适配本项目命名空间）
+- core/ms_oauth.py (11)            : MS OAuth2 共享常量
+- core/runtime.py (~100)           : IS_HEADLESS_ENV / HEADLESS_REJECT_MSG
+- core/browser_pool.py (~290)      : DrissionPage 浏览器池 + 反检测启动参数
+- core/helper_log_bridge.py (~50)  : add_log 默认实现（被 log_redirect monkey-patch）
+- core/outlook_service.py (1218)   : open_mailbox / get_ms_token / change_password / bind_recovery 主体
+- core/password_change_service.py (938) : 改密专用流程（含 Turnstile 适配）
+
+改造
+- helper/actions/mailbox.py: stub → 真调 core/outlook_service
+  · 每个 action 自带 log_redirect context manager
+  · add_log → helper task-log → server SSE → 前端 Modal 实时显示
+  · import 失败时给明确报错引导用户跑 pip install
+- helper/requirements.txt: 新增 DrissionPage / pyautogui / opencv-python-headless / numpy
+- core/helper_registry.py: MIN_HELPER_VERSION 0.1.0 → 0.2.0
+  · 0.1.x EXE 调业务 action 被守门拦下提示重新下载
+  · echo/ping/version 连通性测试仍豁免
+- helper/__init__.py: 0.1.3 → 0.2.0
+
+Cloudflare Turnstile（可选 — 未完整移植）
+- core/password_change_service.py 改密时可能遇 Turnstile
+- 原参考项目 services/turnstile.py（pyautogui + OpenCV 模板匹配）未移植
+- try/except ImportError 包裹，缺失时优雅退化（helper 日志提示用户手动点）
+
+适配规则
+- 所有 from services.X → from core.X
+- 所有 from utils.X → from core.X
+- 仅 services.turnstile 保留原路径（try/except 包裹无副作用）
+
+测试
+- 全套 pytest: 360 passed / 17 skipped / 0 failed
+- helper_registry / helper_routes 测试 fake helper 版本从 0.1.2 升到 0.2.0
+- _smoke_e2e.py 第 5 步从「测 stub 失败」改为「测 dispatch echo 链路」
+  避免真启动浏览器登录假邮箱 stub 挂死
+
+⚠ 用户升级须知
+1. 必须重新打包并重装 EmailHelper.exe（0.1.x EXE 业务功能被守门拦下）
+2. EmailHelper.exe 体积从 ~20MB 涨到 ~60MB（DrissionPage + numpy + cv2）
+3. 必须在 Windows 桌面跑 - 浏览器要可见才能让用户完成 Outlook 安全验证
+4. 重新打包：powershell -ExecutionPolicy Bypass -File helper\build.ps1 -Clean

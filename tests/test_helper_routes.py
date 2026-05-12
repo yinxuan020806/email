@@ -75,7 +75,7 @@ def _fake_helper(
     """
     # register
     r = test_client.post("/api/helper/register", json={
-        "token": token, "version": "0.1.2", "platform": "win32",
+        "token": token, "version": "0.2.0", "platform": "win32",
     })
     assert r.status_code == 200, r.text
     helper_id = r.json()["helper_id"]
@@ -205,7 +205,7 @@ def test_status_offline(helper_client):
     r = xx.get("/api/helper/status")
     data = r.json()
     assert data["online"] is False
-    assert data["min_helper_version"] == "0.1.0"
+    assert data["min_helper_version"] == "0.2.0"
 
 
 def test_status_online_with_version_ok(helper_client):
@@ -217,7 +217,7 @@ def test_status_online_with_version_ok(helper_client):
         r = xx.get("/api/helper/status").json()
         assert r["online"] is True
         assert r["version_ok"] is True
-        assert r["version"] == "0.1.2"
+        assert r["version"] == "0.2.0"
     finally:
         stop.set(); th.join(timeout=2)
 
