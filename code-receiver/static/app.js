@@ -621,7 +621,7 @@
       } else if (resp.status === 403) {
         hint = '人机校验未通过，刷新页面后重新校验';
       } else if (resp.status === 422 || resp.status === 400) {
-        hint = '输入格式不被接受 — 请检查邮箱与 6 位凭证';
+        hint = '';
       } else {
         var retryAfter = body && body.retry_after;
         hint = retryAfter ? formatRetryAfter(retryAfter) : '';

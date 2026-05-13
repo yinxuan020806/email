@@ -95,9 +95,7 @@ def parse_user_input(text: str) -> ParsedCredential:
     if not token:
         return ParsedCredential(email=email, needs_token=True)
     if not _TOKEN_RE.match(token):
-        raise InputParseError(
-            "邮箱凭证格式不合法：应是 4-16 位字母数字（去掉 0/O/1/I/l 等歧义字符）"
-        )
+        raise InputParseError("凭证错误")
 
     # 多余字段忽略：用户从分发链接粘贴时常带尾随空白或额外 ----
     return ParsedCredential(email=email, access_token=token)

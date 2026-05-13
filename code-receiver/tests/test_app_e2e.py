@@ -120,6 +120,7 @@ def test_lookup_rejects_malformed_token_format(client):
     assert r.status_code == 400, r.text
     # 关键安全：响应里**绝不能**含有用户原始字符串
     assert secret_value not in r.text
+    assert r.json().get("detail") == "凭证错误"
 
 
 def test_lookup_email_only_returns_401_token_required(client):

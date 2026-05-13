@@ -594,7 +594,7 @@ def lookup(req: LookupRequest, request: Request) -> JSONResponse:
             pre_decision = _limiter.begin(ip=ip, email="")
             if pre_decision.allowed:
                 inflight_started = True
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"输入格式错误: {exc}")
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
         email_for_log = cred.email
 
         # 1.5) v8 强制双因子：缺凭证 → 401 直接提示（不浪费 IMAP 调用）。
