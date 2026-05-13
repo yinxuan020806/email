@@ -111,12 +111,19 @@ class CodeReceiverDB:
 
     # ── 读：公开账号查询 ─────────────────────────────────────────
 
-    def lookup_public_account(self, email: str, category: str) -> Optional[Account]:
-        """前台输入邮箱（无密码）时调用：取站长名下、公开、允许此分类的账号。"""
-        if not email or not category:
+    def lookup_public_account(
+        self, email: str, category: str, access_token: Optional[str] = None,
+    ) -> Optional[Account]:
+        """前台输入"邮箱 + 凭证"时调用：取站长名下、公开、允许此分类、
+        且 ``access_token`` 完全匹配的账号。
+
+        v8 起 ``access_token`` 是**必填**——不传 / 传空 / 传错 → ``None``，
+        让上层把它当 ``auth_failed`` 计入限流锁定。
+        """
+        if not email or not category or not access_token:
             return None
         return self._db.get_public_account_for_lookup(
-            self.owner_username, email, category
+            self.owner_username, email, category, access_token=access_token,
         )
 
     def diagnose_lookup_failure(self, email: str, category: str) -> dict:

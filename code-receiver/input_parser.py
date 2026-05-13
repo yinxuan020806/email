@@ -1,29 +1,45 @@
 # -*- coding: utf-8 -*-
-"""用户输入凭据解析。
+"""用户输入凭据解析（v8: 仅 ``email----token`` 双段格式）。
 
-支持的 5 种输入格式（用 ``----`` 分隔，或仅邮箱地址）::
+历史背景
+--------
+v7 之前接码端支持 5 种输入格式（裸邮箱 / IMAP 密码 / OAuth 等），其中
+"仅邮箱"路径让任何人只要知道邮箱地址就能抓到验证码——只有站长侧的
+``is_public`` 白名单做防护，但凭据本身不是秘密，相当于"密码=邮箱"。
 
-    1. email                                              # 仅邮箱（要求 is_public 公开账号）
-    2. email----password                                  # 邮箱 + IMAP 密码 / Gmail 应用专用密码 / Yahoo 授权码
-    3. email----password----extra                         # 第 3 段当作"备注/分组"忽略，不影响协议
-    4. email----password----client_id----refresh_token    # Outlook OAuth2（4 段）
-    5. email----client_id----refresh_token                # Outlook OAuth2 无密码变体（3 段，第 2 段以 - 开头或 UUID）
+v8 收紧成"双因子"：
+- 站长在管理端为每个公开账号生成 6 位 ``access_token``（邮箱凭证）
+- 前台必须输入 ``email----token`` 才能换验证码
+- 站长可随时旋转 token，老链接立即失效，**无需**碰真实邮箱密码
 
-复用 ``email/web_app.py:parse_import_text`` 的核心策略，但前台只接受
-**单条输入**，故剥离了多账号 / ``$$`` 拼接 / 组名启发式那部分。
+本模块只负责把"用户输入字符串"拆成 ``(email, access_token)``；
+所有 IMAP/OAuth/refresh_token 业务字段都已下线（byo 路径在 v6 就关了）。
+
+支持的输入形态
+--------------
+- ``email----token``  规范形式，两段以 ``----`` 分隔
+- ``email``           仅邮箱（v8 起一律 422 拒绝，但解析阶段宽松接受
+                      让上层用 ``needs_token`` 字段判别后回包更友好的错误）
+
+非规范形式（3 段及以上）一律按"前 2 段是 email/token，其余忽略"处理，
+避免用户多复制了个换行被严格拒绝。
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Optional
 
 
 _EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
-_UUID_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-    re.IGNORECASE,
+# token：4 - 16 位，仅字符集中的字符（与 core.security.ACCESS_TOKEN_ALPHABET 对齐）。
+# 这里做语法预校验是为了让"用户拼写错 / 多复制了空格"在解析阶段就被拒绝，
+# 比走完限流→DB 查询→token 比对的全流程后再返回 401 体验好得多。
+#
+# 字符类直接复刻字符集字面量（不用 A-H 这种区间）—— 上次手写区间漏了 L，
+# 让合法 token "Vb4xL8" 被错误拒绝；用字面量集合最不容易出错。
+_TOKEN_RE = re.compile(
+    r"^[ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789]{4,16}$"
 )
 
 
@@ -32,20 +48,15 @@ class ParsedCredential:
     """解析后的凭据（绝不可序列化进日志）。"""
 
     email: str
-    password: str = ""
-    client_id: Optional[str] = None
-    refresh_token: Optional[str] = None
-    is_oauth: bool = False
-    needs_lookup: bool = False
-    """True 表示用户只输入了邮箱地址，需要去 DB 查 is_public 的公开账号。"""
+    access_token: str = ""
+    needs_token: bool = False
+    """True 表示用户只输入了邮箱地址、还差凭证 → 上层应回 401 提示补 token。"""
 
     def __repr__(self) -> str:
-        masked_pwd = "***" if self.password else ""
-        masked_rt = "***" if self.refresh_token else ""
+        masked = "***" if self.access_token else ""
         return (
-            f"ParsedCredential(email={self.email!r}, password={masked_pwd!r}, "
-            f"client_id={self.client_id!r}, refresh_token={masked_rt!r}, "
-            f"is_oauth={self.is_oauth}, needs_lookup={self.needs_lookup})"
+            f"ParsedCredential(email={self.email!r}, access_token={masked!r}, "
+            f"needs_token={self.needs_token})"
         )
 
 
@@ -53,55 +64,40 @@ class InputParseError(ValueError):
     """输入格式不合法。"""
 
 
-def _looks_like_uuid(s: str) -> bool:
-    return bool(_UUID_RE.match(s.strip()))
-
-
 def parse_user_input(text: str) -> ParsedCredential:
-    """解析单行用户输入；若无法识别返回 InputParseError。"""
+    """解析单行用户输入；不合法的整体格式抛 ``InputParseError``。
+
+    解析策略：
+    - 空输入 → ``InputParseError``
+    - 第 1 段必须是合法邮箱 → 否则 ``InputParseError``
+    - 仅邮箱（无 ``----``）→ 返回 ``needs_token=True``，由 app 路由层
+      回 401 提示用户补凭证（这里不抛错，保留更柔和的错误体验）
+    - 含 ``----`` 但第 2 段不是合法 6 位凭证 → ``InputParseError``
+      （token 字符集预校验，避免把 "abc 123" / 包含 ``$`` 这类一眼就错的输入
+      送进 DB 比对）
+    - 多余的 ``----`` 段（3 段及以上）一律忽略
+    """
     if not text or not text.strip():
         raise InputParseError("输入为空")
 
     raw = text.strip()
     fields = [f.strip() for f in raw.split("----")]
-    if not fields:
-        raise InputParseError("无法解析")
 
     email = fields[0]
     if not _EMAIL_RE.match(email):
         raise InputParseError("第一段不是合法邮箱地址")
 
-    n = len(fields)
-    if n == 1:
-        return ParsedCredential(email=email, needs_lookup=True)
+    if len(fields) == 1:
+        # 只有邮箱：不抛错，标记为"缺凭证"让上层回一个明确提示
+        return ParsedCredential(email=email, needs_token=True)
 
-    if n == 2:
-        return ParsedCredential(email=email, password=fields[1])
+    token = fields[1]
+    if not token:
+        return ParsedCredential(email=email, needs_token=True)
+    if not _TOKEN_RE.match(token):
+        raise InputParseError(
+            "邮箱凭证格式不合法：应是 4-16 位字母数字（去掉 0/O/1/I/l 等歧义字符）"
+        )
 
-    if n == 3:
-        # 两种可能：(email, password, 备注) 或 (email, client_id, refresh_token)
-        # 用第 2 段是不是 UUID 来区分 — Azure AD client_id 一定是 UUID。
-        if _looks_like_uuid(fields[1]):
-            return ParsedCredential(
-                email=email,
-                password="",
-                client_id=fields[1],
-                refresh_token=fields[2],
-                is_oauth=True,
-            )
-        # 否则按 (email, password, 第 3 段忽略) 处理
-        return ParsedCredential(email=email, password=fields[1])
-
-    if n >= 4:
-        # 标准 4 段：email, password, client_id, refresh_token；多余的字段忽略
-        if _looks_like_uuid(fields[2]):
-            return ParsedCredential(
-                email=email,
-                password=fields[1],
-                client_id=fields[2],
-                refresh_token=fields[3],
-                is_oauth=True,
-            )
-        return ParsedCredential(email=email, password=fields[1])
-
-    raise InputParseError("无法识别的输入格式")  # pragma: no cover
+    # 多余字段忽略：用户从分发链接粘贴时常带尾随空白或额外 ----
+    return ParsedCredential(email=email, access_token=token)

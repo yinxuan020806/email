@@ -23,7 +23,11 @@ from pathlib import Path
 from typing import Iterator, List, Optional
 
 from core.models import Account
-from core.security import SecretBox, SecretBoxDecryptError
+from core.security import (
+    SecretBox,
+    SecretBoxDecryptError,
+    generate_access_token,
+)
 from core.server_config import detect_server, get_imap_smtp
 
 
@@ -45,7 +49,7 @@ SORTABLE_COLUMNS = {
     "last_check",
 }
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # 审计日志保留天数（超过自动清理）
 AUDIT_RETENTION_DAYS = 90
@@ -258,6 +262,7 @@ class DatabaseManager:
                     is_public INTEGER DEFAULT 0,
                     allowed_categories TEXT DEFAULT '',
                     query_count INTEGER DEFAULT 0,
+                    access_token TEXT DEFAULT '',
                     UNIQUE (owner_id, email)
                 )
                 """
@@ -324,7 +329,7 @@ class DatabaseManager:
                 """
             )
 
-            # v4 → v5 增量：在线给已有 accounts 表补列（幂等）
+            # v4 → v5 / v7 → v8 增量：在线给已有 accounts 表补列（幂等）
             existing_cols = {
                 row[1] for row in cur.execute("PRAGMA table_info(accounts)").fetchall()
             }
@@ -332,6 +337,8 @@ class DatabaseManager:
                 ("is_public", "INTEGER DEFAULT 0"),
                 ("allowed_categories", "TEXT DEFAULT ''"),
                 ("query_count", "INTEGER DEFAULT 0"),
+                # v7 → v8：接码邮箱凭证（6 位强密码，SecretBox 加密存储）
+                ("access_token", "TEXT DEFAULT ''"),
             ):
                 col_name, col_type = col_def
                 if col_name not in existing_cols:
@@ -448,6 +455,38 @@ class DatabaseManager:
                         "命中某个分类（如 cursor），但其他分类（如 openai）拿不到——"
                         "v7 让『加入接码』按钮的语义彻底兑现：开放 = 允许所有分类。",
                         fixed_v7,
+                    )
+
+            # ── v7 → v8 一次性数据迁移：给所有公开账号生成「邮箱凭证」 ──
+            # 安全升级：从「输入邮箱就能拿验证码」收紧成「必须邮箱 + 6 位凭证」。
+            # 不生成的话，升级当下所有 is_public=1 账号的"老链接"会直接 401。
+            # 自动生成 → 老链接立即失效（站长必须重新分发新凭证），但用户至少
+            # 不会看到"管理端啥也没动，前台突然全挂"的窘境。
+            #
+            # 注意：access_token 用 SecretBox 加密存储（与 password 同套机制），
+            # DB 文件泄露也不会暴露凭证；生成走 secrets.choice，密码学安全。
+            if current_version < 8:
+                box = SecretBox.instance()
+                rows = cur.execute(
+                    "SELECT id FROM accounts "
+                    "WHERE is_public = 1 AND COALESCE(access_token, '') = ''"
+                ).fetchall()
+                migrated = 0
+                for (aid,) in rows:
+                    token = generate_access_token()
+                    cipher = box.encrypt(token) or ""
+                    cur.execute(
+                        "UPDATE accounts SET access_token = ? WHERE id = ?",
+                        (cipher, aid),
+                    )
+                    migrated += 1
+                if migrated:
+                    logger.warning(
+                        "v7→v8 数据迁移：已为 %d 个 is_public=1 的接码账号自动生成"
+                        " 6 位邮箱凭证。**老的『仅邮箱』前台链接立即失效**，"
+                        "请到管理端【📡 接码白名单】列查看新凭证并把"
+                        "『邮箱----凭证』重新分发给下游用户。",
+                        migrated,
                     )
 
             # 任意一次升级跑了数据迁移（accounts 实际被 UPDATE 过），都把所有
@@ -749,7 +788,7 @@ class DatabaseManager:
         "id", "email", "password", "group_name", "status", "account_type",
         "imap_server", "imap_port", "smtp_server", "smtp_port",
         "client_id", "refresh_token", "created_at", "last_check",
-        "has_aws_code", "remark",
+        "has_aws_code", "remark", "access_token",
     )
 
     def _select_account_columns(self, alias: str = "") -> str:
@@ -1214,7 +1253,7 @@ class DatabaseManager:
         account_id: int,
         is_public: bool,
         allowed_categories: Optional[List[str]] = None,
-    ) -> bool:
+    ) -> tuple[bool, Optional[str]]:
         """管理端：把某个账号对前台公开 / 取消公开。
 
         ``allowed_categories`` 取值约定：
@@ -1224,6 +1263,14 @@ class DatabaseManager:
           （与 ``get_public_account_for_lookup`` 的 ``allowed_categories='*'``
           分支配合；这是"加入接码白名单"按钮的默认语义）
         - 其他：按 ``ALLOWED_CODE_CATEGORIES`` 过滤后逗号拼接
+
+        返回 ``(ok, generated_token)``：
+        - ``ok``：UPDATE 是否命中（账号存在且属于该 owner）
+        - ``generated_token``：仅当 ``is_public=True`` **且**该账号原先尚未
+          生成过 access_token 时，自动生成一个 6 位明文凭证并返回（明文，
+          DB 里存的是 SecretBox 加密版本）；其它情况返回 ``None``。
+          已有凭证的账号**不会**被悄悄改 token——避免站长把"加入接码"误当
+          "旋转凭证"用，意外把分发出去的链接全部失效。
         """
         cats_str = ""
         if allowed_categories:
@@ -1235,48 +1282,154 @@ class DatabaseManager:
             else:
                 valid = [c for c in normalized if c in ALLOWED_CODE_CATEGORIES]
                 cats_str = ",".join(sorted(set(valid)))
+
+        generated_token: Optional[str] = None
         with self._connect() as conn:
+            # 先做 UPDATE。is_public=True 时若 access_token 还是空，
+            # 顺手生成一个 → 让"加入接码"按钮一次到位（直接拿到凭证可分发），
+            # 不需要再单独点"生成凭证"。
             cur = conn.execute(
                 "UPDATE accounts SET is_public = ?, allowed_categories = ? "
                 "WHERE id = ? AND owner_id = ?",
                 (1 if is_public else 0, cats_str, account_id, owner_id),
             )
             ok = cur.rowcount > 0
+            if ok and is_public:
+                # 读出当前 access_token（密文），空才补 — 不动已有的
+                row = conn.execute(
+                    "SELECT COALESCE(access_token, '') FROM accounts "
+                    "WHERE id = ? AND owner_id = ?",
+                    (account_id, owner_id),
+                ).fetchone()
+                if row and not row[0]:
+                    token = generate_access_token()
+                    cipher = SecretBox.instance().encrypt(token) or ""
+                    conn.execute(
+                        "UPDATE accounts SET access_token = ? "
+                        "WHERE id = ? AND owner_id = ?",
+                        (cipher, account_id, owner_id),
+                    )
+                    generated_token = token
             if ok:
                 self._bump_account_rev_in_conn(conn, owner_id)
-            return ok
+        return ok, generated_token
+
+    # ── 接码邮箱凭证（access_token）旋转 ─────────────────────────────
+    #
+    # 凭证的语义类似"专门给接码业务用的第二把密码"：
+    #   - 站长把 ``邮箱----凭证`` 分发给下游
+    #   - 想撤销下游访问 → 旋转该邮箱的凭证，老链接立即失效
+    #   - 真实邮箱密码 / refresh_token 全程不动，无需重新跑改密 / 重授权
+    #
+    # 这里只暴露"旋转"语义（生成新随机值并覆盖），**不**暴露"用户指定值"
+    # ——避免站长贪图好记把多个邮箱设成同一个弱凭证导致跨账号串号风险。
+
+    def rotate_access_token(
+        self, owner_id: int, account_id: int
+    ) -> Optional[str]:
+        """旋转单个账号的接码凭证，返回新凭证明文（DB 存加密版本）。
+
+        - 账号不存在 / owner 不匹配 → 返回 ``None``
+        - 命中即生成并写回；调用方拿到明文展示给站长用于复制分发
+        - **不**校验 ``is_public``：站长可以"预热"——先生成凭证留着、
+          等真要开放再点加入接码（开放时 set_account_public 不会覆盖已有凭证）
+        """
+        token = generate_access_token()
+        cipher = SecretBox.instance().encrypt(token) or ""
+        with self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE accounts SET access_token = ? "
+                "WHERE id = ? AND owner_id = ?",
+                (cipher, account_id, owner_id),
+            )
+            if cur.rowcount == 0:
+                return None
+            self._bump_account_rev_in_conn(conn, owner_id)
+        return token
+
+    def rotate_access_tokens_bulk(
+        self,
+        owner_id: int,
+        account_ids: Optional[List[int]] = None,
+        only_public: bool = False,
+    ) -> dict[int, str]:
+        """批量旋转，返回 ``{id: new_token_plain, ...}`` 字典。
+
+        - ``account_ids=None`` 表示"所有属于该 owner 的账号"
+          （配合 ``only_public=True`` 可缩小到"所有 is_public=1"）
+        - ``only_public=True`` 仅旋转当前已是接码白名单的账号
+          （UI 上"批量改凭证"按钮的默认语义）
+        - 仅旋转该 owner 名下的账号；越权 id 静默忽略，不会出现在返回字典
+        - 单事务执行：要么全成要么全回滚，避免半成功状态下分发到错的凭证
+        """
+        result: dict[int, str] = {}
+        box = SecretBox.instance()
+        with self._connect() as conn:
+            sql = "SELECT id FROM accounts WHERE owner_id = ?"
+            params: list = [owner_id]
+            if only_public:
+                sql += " AND is_public = 1"
+            if account_ids:
+                unique_ids = sorted({int(i) for i in account_ids if isinstance(i, int)})
+                if not unique_ids:
+                    return {}
+                placeholders = ",".join("?" for _ in unique_ids)
+                sql += f" AND id IN ({placeholders})"
+                params.extend(unique_ids)
+            rows = conn.execute(sql, params).fetchall()
+            if not rows:
+                return {}
+            for (aid,) in rows:
+                token = generate_access_token()
+                cipher = box.encrypt(token) or ""
+                conn.execute(
+                    "UPDATE accounts SET access_token = ? "
+                    "WHERE id = ? AND owner_id = ?",
+                    (cipher, aid, owner_id),
+                )
+                result[int(aid)] = token
+            self._bump_account_rev_in_conn(conn, owner_id)
+        return result
 
     def get_public_account_for_lookup(
-        self, owner_username: str, email: str, category: str
+        self,
+        owner_username: str,
+        email: str,
+        category: str,
+        access_token: Optional[str] = None,
     ) -> Optional[Account]:
-        """前台：按"接码站长用户名 + 邮箱地址 + 分类"取一个公开账号。
+        """前台：按"接码站长用户名 + 邮箱地址 + 分类 + 凭证"取一个公开账号。
 
-        命中规则（任一为真即命中）：
-        1. ``allowed_categories = '*'``                    显式声明允许所有分类
-        2. ``allowed_categories LIKE '%<category>%'``      显式包含该分类
-        3. ``allowed_categories`` 为空 + ``group_name``    在 GROUP_KEYWORDS_BY_CATEGORY[category]
-           里含任一关键字                                   推断出该账号天然属于此分类
+        命中规则（前 3 项必须**同时**满足，第 4 项至少一种为真）：
+        1. 邮箱属于 ``owner_username``、``is_public = 1``
+        2. ``access_token`` 与 DB 中加密存储的凭证**常量时间比较**相等
+           （由调用方在 db_proxy / app 层负责 ``hmac.compare_digest``；
+           本函数返回 ``Account`` 后再校验，DB 查询本身不做 token 匹配，
+           避免把 token 直接拼进 SQL/索引引起额外侧信道）
+        3. 分类匹配（与旧版一致）：
+            - ``allowed_categories = '*'``                显式允许所有分类
+            - ``allowed_categories LIKE '%<category>%'`` 显式包含该分类
+            - ``allowed_categories`` 为空 + ``group_name`` 含分类关键字
 
-        过滤前置条件：
-        - 该邮箱必须属于 ``owner_username`` 这一个用户
-        - ``is_public = 1``
+        命中后返回带解密的 Account；未命中返回 ``None``。
+        token 校验失败时也返回 ``None``（让外层把它当 ``auth_failed`` 计入限流）。
 
-        命中后返回带解密的 Account；未命中返回 None。
+        ``access_token`` 兼容旧调用方：传 ``None`` 时**直接拒绝**，
+        以前的"只输入邮箱即可"路径已彻底关闭。调用方传 ``None`` 一定是
+        bug（旧代码没改），返回 None 让接码端走 not_authorized 分支报错。
         """
         if not (owner_username and email and category):
+            return None
+        # 拒绝"无 token"的查询 — 这是接码业务的关键安全收紧：
+        # 任何调用方不传 token 都按"未授权"处理，绝不退化到老行为。
+        if not access_token:
             return None
 
         cat = category.strip().lower()
         keywords = GROUP_KEYWORDS_BY_CATEGORY.get(cat, (cat,))
 
         cols = self._select_account_columns(alias="a")
-        # 用占位符同时支撑显式 allowed_categories LIKE 与 N 个 group_name LIKE
         group_or = " OR ".join("lower(a.group_name) LIKE ?" for _ in keywords)
-        # email 用 LOWER() 让查询大小写不敏感；账号导入若大小写混存（如 User@x.com vs user@x.com）
-        # 也不会因输入形态不同而漏命中公开账号
-        # allowed_categories 用 token 严格匹配（前后包逗号，匹配 ',cursor,'）：
-        # 旧版 `LIKE '%cursor%'` 在未来引入 'cursor-disabled' / 'chatgpt-code' 之类
-        # 时会被误命中，token 匹配可彻底杜绝。
         sql = f"""
             SELECT {cols}
             FROM accounts a
@@ -1284,6 +1437,7 @@ class DatabaseManager:
             WHERE u.username = ?
               AND LOWER(a.email) = LOWER(?)
               AND a.is_public = 1
+              AND COALESCE(a.access_token, '') != ''
               AND (
                   a.allowed_categories = '*'
                   OR (',' || COALESCE(a.allowed_categories, '') || ',') LIKE ?
@@ -1303,7 +1457,20 @@ class DatabaseManager:
         with self._connect() as conn:
             cur = conn.execute(sql, params)
             row = cur.fetchone()
-        return self._row_to_account(row) if row else None
+        if not row:
+            return None
+
+        acc = self._row_to_account(row)
+        # token 校验放在 Python 层用 hmac.compare_digest 做常量时间比较——
+        # 不放进 SQL 是为了：
+        # 1. 避免 token 字符串出现在 SQLite 查询日志 / EXPLAIN 计划里
+        # 2. 让 SQL 索引按 (owner, email, is_public) 命中即可，不需要为
+        #    短 token 多维一个索引
+        # 3. 常量时间比较的语义只有应用层能保证；SQL = 比较是早 mismatch 短路的
+        from core.security import token_equals  # noqa: WPS433 — 延迟导入避免循环
+        if not token_equals(access_token, acc.access_token):
+            return None
+        return acc
 
     def incr_account_query_count(self, account_id: int) -> bool:
         """前台命中公开账号后自增 query_count（不校验 owner，控制权在调用方）。"""
@@ -1537,6 +1704,18 @@ class DatabaseManager:
                 acc.id,
             )
             acc.refresh_token = None
+        # access_token 与 password / refresh_token 同套加密机制；解密失败
+        # 同样降级为空串（前台查询会因为 stored_token='' 命中"未启用接码"分支
+        # 拒绝该次请求，比让整条 Account 加载崩掉更安全）。
+        try:
+            acc.access_token = box.decrypt(acc.access_token) or ""
+        except SecretBoxDecryptError:
+            logger.error(
+                "account.access_token 解密失败 acc.id=%s，本次回退为空字符串；"
+                "该账号将无法被前台接码访问，请到管理端旋转一个新凭证。",
+                acc.id,
+            )
+            acc.access_token = ""
         return acc
 
     @staticmethod

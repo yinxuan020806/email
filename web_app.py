@@ -703,7 +703,12 @@ class ExportRequest(BaseModel):
 # ── Helpers ─────────────────────────────────────────────────────
 
 
-def account_to_dict(acc: Account, *, include_refresh_token: bool = True) -> dict:
+def account_to_dict(
+    acc: Account,
+    *,
+    include_refresh_token: bool = True,
+    include_access_token: bool = True,
+) -> dict:
     """Account → 给前端的 dict（含密码，仅在本地受信任环境下使用）。
 
     ``include_refresh_token`` 默认 True 保持单条 GET / 详情页的旧行为不变。
@@ -712,6 +717,11 @@ def account_to_dict(acc: Account, *, include_refresh_token: bool = True) -> dict
       下 JSON 从 ~107KB 降到 ~50KB
     - 列表不需要它（前端只在「复制完整 / 详情」时才用，那两个动作走单条
       GET 现拉），少一次驻留浏览器内存的副本，安全性也好一点
+
+    ``include_access_token`` 控制是否回显接码邮箱凭证：
+    - 仅站长（``CODE_OWNER_USERNAME``）调用账号 API 时才应该传 True
+    - 普通用户即便绕过 UI 也只能拿到自己名下账号的 password / refresh_token，
+      access_token 字段被剥离，避免普通用户误把它当 password 用
     """
     base = {
         "id": acc.id,
@@ -732,6 +742,9 @@ def account_to_dict(acc: Account, *, include_refresh_token: bool = True) -> dict
     }
     if include_refresh_token:
         base["refresh_token"] = acc.refresh_token
+    if include_access_token:
+        # 加密失败时 _row_to_account 会写空串，此处保持空串语义（前端按"未生成"渲染）
+        base["access_token"] = acc.access_token or ""
     return base
 
 
@@ -1277,7 +1290,14 @@ def list_accounts(
     response.headers["ETag"] = etag
     response.headers["Cache-Control"] = cache_control
     # 列表里 refresh_token 不返回，前端按需走 /api/accounts/{id} 拉
-    return [account_to_dict(a, include_refresh_token=False) for a in accs]
+    # access_token 仅站长可见（前端表格里渲染「凭证」列需要）；普通用户拿不到
+    is_owner = user["username"] == CODE_OWNER_USERNAME
+    return [
+        account_to_dict(
+            a, include_refresh_token=False, include_access_token=is_owner,
+        )
+        for a in accs
+    ]
 
 
 # ⚠️ 注意：以下静态路径必须在 /{account_id} 之前声明，否则会被吞掉。
@@ -1375,28 +1395,31 @@ def set_accounts_public(
 
     - ``is_public=True``：加入接码白名单，``code-receiver`` 前台才会接受
       这些邮箱的查询请求；分类按 ``allowed_categories`` 控制（详见
-      ``SetPublicRequest`` 的字段说明）。
+      ``SetPublicRequest`` 的字段说明）。原先没有 ``access_token`` 的账号
+      会自动生成一个 6 位邮箱凭证，返回给前端展示给站长复制分发；
+      已有凭证的账号保留原值（避免一次"加入接码"误把所有分发出去的链接全废）。
     - ``is_public=False``：移出白名单，``allowed_categories`` 也会被清空，
-      接码端立即拒绝这些邮箱的查询。
+      接码端立即拒绝这些邮箱的查询。``access_token`` 保留——只是失去入口，
+      下次重新加入时不必再分发新凭证（如果旋转过，旧分发也仍然失效）。
+
+    返回结构新增 ``tokens: {id: "新凭证明文", ...}``：仅本次调用**新生成**
+    的凭证才会出现；老凭证不在返回里（站长想看老凭证可以走 GET /api/accounts/{id}
+    或表格列）。
     """
     _require_code_owner(user)
     cats = req.allowed_categories
-    # 前端"加入接码"按钮不会传 allowed_categories（None），历史会落到
-    # "按 group_name 自动推断"——分组名不含 cursor/gpt/... 关键字时
-    # 静默失效：UI 显示"已开放"而前台查不到。统一为放行所有分类，
-    # 让"加入接码白名单 ⟺ 前台所有分类都能查到"语义一致。
-    # is_public=False 时不补 '*'，由 DB 层把 allowed_categories 清空。
     if req.is_public and not cats:
         cats = ["*"]
     updated = 0
+    tokens: dict[int, str] = {}
     for aid in req.ids:
-        if db.set_account_public(
+        ok, new_token = db.set_account_public(
             user["id"], aid, req.is_public, allowed_categories=cats
-        ):
+        )
+        if ok:
             updated += 1
-    # audit 详情：明确区分"显式分类列表" / "通配 *" / "清空"。
-    # is_public=False 路径下 cats 必为 None（清空），is_public=True 路径下
-    # 路由层会把 None 升级为 ['*']，所以正常情况 cats 永远非空。
+            if new_token:
+                tokens[aid] = new_token
     cats_label = ",".join(cats) if cats else ("cleared" if not req.is_public else "auto-group")
     db.log_audit(
         "set_account_public", user_id=user["id"], username=user["username"],
@@ -1404,10 +1427,96 @@ def set_accounts_public(
         target=",".join(map(str, req.ids[:20])) + ("..." if len(req.ids) > 20 else ""),
         detail=(
             f"is_public={int(req.is_public)},updated={updated},"
-            f"requested={len(req.ids)},cats={cats_label}"
+            f"requested={len(req.ids)},cats={cats_label},"
+            f"new_tokens={len(tokens)}"
         ),
     )
-    return {"updated": updated, "requested": len(req.ids), "is_public": req.is_public}
+    return {
+        "updated": updated,
+        "requested": len(req.ids),
+        "is_public": req.is_public,
+        "tokens": tokens,
+    }
+
+
+@app.post("/api/accounts/{account_id}/rotate-token")
+def rotate_access_token(
+    account_id: int, request: Request, user: dict = CurrentUser
+) -> dict:
+    """旋转单个账号的接码邮箱凭证（仅站长）。
+
+    成功返回 ``{"id": ..., "email": ..., "access_token": "新凭证明文"}``。
+    凭证以明文返回，站长复制后可重新分发；DB 中存的是 SecretBox 加密版本。
+    审计日志只记录 id + email，**绝不**记录 token 原文（避免 audit 表泄露
+    + grep 历史日志即可拿到所有有效凭证的可怕场景）。
+    """
+    _require_code_owner(user)
+    # 先 get 一下拿邮箱，确认账号存在且属于站长（顺带防越权 404 - rotate 一旦
+    # 成功就 bump 了 rev，这里多一次 SELECT 换"不存在时立即 404 而不是返回 None"
+    # 的清晰错误体验）
+    acc = db.get_account(user["id"], account_id)
+    if not acc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
+    new_token = db.rotate_access_token(user["id"], account_id)
+    if not new_token:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
+    db.log_audit(
+        "rotate_access_token", user_id=user["id"], username=user["username"],
+        ip=_client_ip(request), user_agent=request.headers.get("user-agent", ""),
+        target=str(account_id),
+        detail=f"email={acc.email}",
+    )
+    return {"id": account_id, "email": acc.email, "access_token": new_token}
+
+
+class RotateTokensBulkRequest(BaseModel):
+    """批量旋转邮箱凭证。
+
+    - ``ids`` 为空 + ``only_public=True``：旋转该用户名下**所有**已加入接码
+      白名单的账号（"一键失效所有分发出去的旧链接"——重大安全事件应急用）
+    - ``ids`` 非空：仅旋转指定的、且属于当前用户的账号；不存在 / 越权的 id
+      静默忽略
+    - ``only_public=False`` 且 ``ids`` 为空时**禁止**（避免误操作把所有账号
+      包括从未加入接码的也生成 token；走 422 拒绝）
+    """
+    ids: Optional[List[int]] = Field(default=None, max_length=5000)
+    only_public: bool = True
+
+
+@app.post("/api/accounts/rotate-tokens-bulk")
+def rotate_access_tokens_bulk(
+    req: RotateTokensBulkRequest, request: Request, user: dict = CurrentUser
+) -> dict:
+    """批量旋转接码邮箱凭证（仅站长）。
+
+    返回 ``{"tokens": {id: "新凭证明文", ...}, "count": N}``。
+    单次响应即装下所有新凭证，前端展示一个"邮箱----新凭证"列表让站长复制全部。
+
+    安全：响应 token 仅在本次 HTTP 响应里出现一次；不写 audit detail，
+    仅记录 count + ids 的前缀，保证审计表泄露不会暴露任何 token。
+    """
+    _require_code_owner(user)
+    if not req.ids and not req.only_public:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "批量旋转必须指定 ids，或勾选 only_public=true 才允许全量",
+        )
+    tokens = db.rotate_access_tokens_bulk(
+        user["id"], account_ids=req.ids, only_public=req.only_public,
+    )
+    ids_label = ""
+    if req.ids:
+        ids_label = ",".join(map(str, req.ids[:20])) + (
+            "..." if len(req.ids) > 20 else ""
+        )
+    db.log_audit(
+        "rotate_access_tokens_bulk", user_id=user["id"], username=user["username"],
+        ip=_client_ip(request), user_agent=request.headers.get("user-agent", ""),
+        target=ids_label,
+        detail=f"only_public={int(req.only_public)},count={len(tokens)},"
+               f"requested={len(req.ids) if req.ids else 'all'}",
+    )
+    return {"tokens": tokens, "count": len(tokens)}
 
 
 @app.post("/api/accounts/delete")
@@ -1544,7 +1653,11 @@ def export_accounts(
 
 @app.get("/api/accounts/{account_id}")
 def get_account(account_id: int, user: dict = CurrentUser) -> dict:
-    return account_to_dict(get_account_or_404(user["id"], account_id))
+    is_owner = user["username"] == CODE_OWNER_USERNAME
+    return account_to_dict(
+        get_account_or_404(user["id"], account_id),
+        include_access_token=is_owner,
+    )
 
 
 @app.put("/api/accounts/{account_id}/group")

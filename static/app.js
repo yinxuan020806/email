@@ -378,7 +378,8 @@ async function loadMe() {
 /** 站长可见元素的统一显隐控制（按钮 + 表头 + 表格列）。 */
 function applyOwnerVisibility() {
   const isOwner = !!(S.user && S.user.is_owner);
-  document.querySelectorAll('.owner-only, .col-public').forEach((node) => {
+  // col-token 与 col-public 同样仅站长可见
+  document.querySelectorAll('.owner-only, .col-public, .col-token').forEach((node) => {
     if (isOwner) node.removeAttribute('hidden');
     else node.setAttribute('hidden', '');
   });
@@ -671,6 +672,9 @@ function buildAccountRow(a, index, isOwner) {
       isPub ? t('public_yes') : t('public_no'),
     );
     tr.appendChild(el('td', { class: 'col-public' }, badge));
+
+    // 凭证列（仅站长可见，与表头 .col-token 一一对应）
+    tr.appendChild(el('td', { class: 'col-token' }, buildTokenCell(a)));
   }
 
   const tdRemark = el('td', { title: a.remark || '', ondblclick: () => editRemark(a.id, a.remark || '') });
@@ -833,17 +837,119 @@ function closeRowMoreMenu() {
 async function toggleSinglePublic(account, isPublic) {
   if (!S.user || !S.user.is_owner) return;
   try {
-    await api.post('/api/accounts/set-public', {
+    const r = await api.post('/api/accounts/set-public', {
       ids: [account.id],
       is_public: !!isPublic,
     });
     toast(t(isPublic ? 'toast_set_public_ok' : 'toast_unset_public_ok',
             { n: 1 }), 'success');
     await loadPublicIds();
-    renderAccounts();
+    await loadAccounts();
+    // 后端为新公开账号自动生成 token；返回里有就弹一个让站长马上看到/复制
+    if (r && r.tokens && Object.keys(r.tokens).length > 0) {
+      const lines = Object.entries(r.tokens).map(([id, tok]) => {
+        const acc = S.accounts.find((x) => String(x.id) === String(id));
+        return `${acc ? acc.email : '#' + id}----${tok}`;
+      });
+      showTokenModal(lines, { fresh: true });
+    }
   } catch (e) {
     toast(t('toast_load_fail') + (e?.message || ''), 'error');
   }
+}
+
+/* ── 接码凭证：渲染表格凭证单元格 + 单条旋转 + 批量旋转 ─────────
+ *
+ * 设计原则
+ * --------
+ * - 凭证明文仅在站长侧的内存里短暂存在；接码端拿到 token 后会立即 wipe
+ * - 旋转 / 复制按钮只对当前用户=站长可见，UI 上的隐藏已由 .col-token[hidden] 控制
+ * - "邮箱----凭证"是分发给下游的标准串，单条"复制 邮箱----凭证"按钮一键完成
+ */
+
+function buildTokenCell(account) {
+  const wrap = el('span', { class: 'token-cell' });
+  const tok = account.access_token || '';
+  if (!tok) {
+    wrap.appendChild(el('span', { class: 'token-empty' }, t('token_empty')));
+  } else {
+    wrap.appendChild(el('span', { class: 'token-text', title: tok }, tok));
+    wrap.appendChild(el('button', {
+      type: 'button',
+      title: t('token_copy_hint'),
+      'aria-label': t('token_copy_hint'),
+      onclick: () => copyText(`${account.email}----${tok}`, 'toast_token_copied'),
+    }, '📋'));
+  }
+  wrap.appendChild(el('button', {
+    type: 'button',
+    title: t('token_rotate_hint'),
+    'aria-label': t('token_rotate_hint'),
+    onclick: () => rotateSingleToken(account),
+  }, '🔄'));
+  return wrap;
+}
+
+async function rotateSingleToken(account) {
+  if (!S.user || !S.user.is_owner) return;
+  if (!confirm(t('confirm_rotate_single', { email: account.email }))) return;
+  try {
+    const r = await api.post(`/api/accounts/${account.id}/rotate-token`, {});
+    if (!r || !r.access_token) {
+      toast(t('toast_load_fail'), 'error');
+      return;
+    }
+    toast(t('toast_token_rotated', { email: account.email }), 'success');
+    // 刷新列表让新 token 显示出来；同时弹出一个含分享串的弹窗便于站长复制
+    await loadAccounts();
+    showTokenModal([`${account.email}----${r.access_token}`], { fresh: true });
+  } catch (e) {
+    toast(t('toast_load_fail') + (e?.message || ''), 'error');
+  }
+}
+
+async function batchRotateTokens() {
+  if (!S.user || !S.user.is_owner) return;
+  const ids = [...S.selected];
+  if (!ids.length) { toast(t('toast_select_acc'), 'warning'); return; }
+  if (!confirm(t('confirm_rotate_n', { n: ids.length }))) return;
+  try {
+    // only_public=true：仅旋转已加入接码的账号；其它默默跳过
+    // （未公开的账号生成 token 也没意义——前台 lookup 在 is_public=1 处就过不去）
+    const r = await api.post('/api/accounts/rotate-tokens-bulk', {
+      ids,
+      only_public: true,
+    });
+    const tokens = r && r.tokens ? r.tokens : {};
+    const count = Object.keys(tokens).length;
+    if (!count) {
+      toast(t('toast_rotate_none'), 'warning');
+      return;
+    }
+    toast(t('toast_rotate_ok', { n: count }), 'success');
+    await loadAccounts();
+    const lines = Object.entries(tokens).map(([id, tok]) => {
+      const acc = S.accounts.find((x) => String(x.id) === String(id));
+      return `${acc ? acc.email : '#' + id}----${tok}`;
+    });
+    showTokenModal(lines, { fresh: true });
+  } catch (e) {
+    toast(t('toast_load_fail') + (e?.message || ''), 'error');
+  }
+}
+
+function showTokenModal(lines, opts) {
+  opts = opts || {};
+  const ta = $('tokenList');
+  if (!ta) return;
+  ta.value = (lines || []).join('\n');
+  const intro = $('tokenModalIntro');
+  if (intro) intro.textContent = t('modal_token_intro');
+  openModal('tokenModal');
+  // 自动 focus 文本框 + 全选，方便键盘党直接 Ctrl+C
+  setTimeout(() => {
+    try { ta.focus(); ta.select(); } catch (_) {}
+  }, 50);
 }
 
 // ── 表格行的 helper 操作（xiaoxuan 专属） ────────────────────
@@ -1260,7 +1366,17 @@ async function batchSetPublic(isPublic) {
     const okKey = isPublic ? 'toast_set_public_ok' : 'toast_unset_public_ok';
     toast(t(okKey, { n: r.updated || 0 }), 'success');
     await loadPublicIds();
-    renderAccounts();
+    // is_public=True 时后端会顺手给"尚无 token"的账号生成新凭证，刷新账号让 token 列更新
+    if (isPublic) await loadAccounts();
+    else renderAccounts();
+    // 后端有新生成的 token 时弹一个含分享串的窗口
+    if (isPublic && r.tokens && Object.keys(r.tokens).length > 0) {
+      const lines = Object.entries(r.tokens).map(([id, tok]) => {
+        const acc = S.accounts.find((x) => String(x.id) === String(id));
+        return `${acc ? acc.email : '#' + id}----${tok}`;
+      });
+      showTokenModal(lines, { fresh: true });
+    }
   } catch (e) {
     toast(t('toast_load_fail') + (e?.message || ''), 'error');
   }
@@ -3222,6 +3338,19 @@ $('btnBatchCheck').addEventListener('click', batchCheck);
 $('btnBatchSend').addEventListener('click', showBatchSend);
 $('btnSetPublic').addEventListener('click', () => batchSetPublic(true));
 $('btnUnsetPublic').addEventListener('click', () => batchSetPublic(false));
+{
+  // 批量改凭证按钮 / 弹窗一键复制（用块级作用域避免污染顶层 const）
+  const rotateBtn = document.getElementById('btnRotateTokens');
+  if (rotateBtn) rotateBtn.addEventListener('click', batchRotateTokens);
+  const copyAll = document.getElementById('btnCopyTokens');
+  if (copyAll) {
+    copyAll.addEventListener('click', () => {
+      const ta = document.getElementById('tokenList');
+      if (!ta || !ta.value) return;
+      copyText(ta.value, 'toast_copied');
+    });
+  }
+}
 $('btnDelete').addEventListener('click', deleteSelected);
 $('btnImportClipboard').addEventListener('click', importFromClipboard);
 $('btnDoImport').addEventListener('click', doImport);

@@ -109,10 +109,11 @@ def test_is_auth_failure_does_not_overmatch():
 
 
 def test_lookup_request_accepts_valid_email_max_length():
-    """仅邮箱：合法最长形态（接近 254）应通过校验。"""
+    """仅邮箱（不带 token）：合法最长形态应通过 pydantic 校验。
+    上层路由再拒绝 needs_token=True，但本测试只看 schema 层。
+    """
     from app import LookupRequest
 
-    # 256 长度边界内：65(local) + @ + 186(domain) = 252（有效邮箱形态）
     local = "a" * 64
     domain = "b" * 180 + ".com"
     email = f"{local}@{domain}"
@@ -121,24 +122,27 @@ def test_lookup_request_accepts_valid_email_max_length():
     assert req.input == email
 
 
-def test_lookup_request_rejects_byo_dash_pattern():
-    """含 ``----`` 的 byo 输入在 field_validator 阶段拒绝。"""
-    from pydantic import ValidationError
+def test_lookup_request_accepts_email_token_dash_pattern():
+    """v8: ``email----token`` 是合法形态（pydantic 不再拦）。
 
+    历史上 v6/v7 用 field_validator 拦下含 ``----`` 的输入（byo 路径下线），
+    v8 引入凭证后这个格式恰恰是规范输入；上层 parse_user_input 负责拆分
+    并校验 token 字符集，所以 schema 层应该放行。
+    """
     from app import LookupRequest
 
-    with pytest.raises(ValidationError):
-        LookupRequest(input="x@outlook.com----pwd", category="cursor")
+    req = LookupRequest(input="x@outlook.com----Ab3xK9", category="cursor")
+    assert req.input == "x@outlook.com----Ab3xK9"
 
 
 def test_lookup_request_rejects_oversized_input():
-    """超出 256 字符上限应被拦截。"""
+    """超出 input.max_length=320 字符上限应被拦截。"""
     from pydantic import ValidationError
 
     from app import LookupRequest
 
     with pytest.raises(ValidationError):
-        LookupRequest(input="x@outlook.com" + ("y" * 260), category="cursor")
+        LookupRequest(input="x@outlook.com" + ("y" * 400), category="cursor")
 
 
 # ── 单元测试：M6 — email 大小写不敏感查询 ────────────────────────
@@ -157,7 +161,11 @@ def fresh_db(tmp_path, monkeypatch):
 
 
 def test_lookup_email_case_insensitive(fresh_db):
-    """账号以 ``User@Outlook.COM`` 入库，前台用 ``user@outlook.com`` 查询也应命中。"""
+    """账号以 ``User@Outlook.COM`` 入库，前台用 ``user@outlook.com`` 查询也应命中。
+
+    v8 起 ``get_public_account_for_lookup`` 必须带 ``access_token``，
+    由 ``set_account_public(is_public=True)`` 返回的自动生成凭证传入。
+    """
     db = fresh_db
     uid = db.create_user("xiaoxuan", "fake-pbkdf2")
     assert uid is not None
@@ -166,14 +174,20 @@ def test_lookup_email_case_insensitive(fresh_db):
     )
     assert ok is True
     acc_id = db.get_account_by_email(uid, "User@Outlook.COM").id
-    db.set_account_public(uid, acc_id, is_public=True, allowed_categories=None)
+    ok, token = db.set_account_public(
+        uid, acc_id, is_public=True, allowed_categories=None,
+    )
+    assert ok is True
+    assert token and len(token) == 6
 
-    # 不同大小写形态都能命中
+    # 不同大小写形态都能命中（前提是 token 正确）
     for variant in (
         "user@outlook.com",
         "USER@OUTLOOK.COM",
         "User@Outlook.COM",
         "useR@OUTLOOK.com",
     ):
-        result = db.get_public_account_for_lookup("xiaoxuan", variant, "cursor")
+        result = db.get_public_account_for_lookup(
+            "xiaoxuan", variant, "cursor", access_token=token,
+        )
         assert result is not None, f"大小写形态 {variant!r} 未命中公开账号"

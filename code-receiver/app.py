@@ -260,29 +260,24 @@ ALLOWED_CATEGORIES = frozenset({"cursor", "openai"})
 
 
 class LookupRequest(BaseModel):
-    # 邮箱地址 RFC 5321 上限 254 字符，留 256 容错；本接口只接受邮箱地址，
-    # 不再支持 ``email----password`` / OAuth2 等扩展格式（byo 路径已下线）。
-    input: str = Field(min_length=3, max_length=256)
+    """前台查询请求。
+
+    v8 起前台必须输入 ``email----token`` 双段格式（``input`` 字段），
+    或者前端拆成 ``email`` / ``access_token`` 两个字段单独传——
+    路由会先合成成 ``input`` 再走统一的 ``parse_user_input``。
+
+    保留 ``input`` 单字段为主输入是为了：
+    1. 前端可以提供"一键粘贴分享串"的复制路径（站长分发的就是 ``email----token``）
+    2. 与历史 API 形状兼容（旧版字段名就叫 input），改动面最小
+    """
+    # input 上限调大到 320 = 254 (邮箱 RFC 上限) + 4 (----) + 64 (token 留余量)
+    input: str = Field(default="", max_length=320)
+    # 兼容字段：允许前端单独传 email / access_token，让"双输入框 UI"实现更直白
+    email: Optional[str] = Field(default=None, max_length=256)
+    access_token: Optional[str] = Field(default=None, max_length=64)
     category: str = Field(min_length=1, max_length=32)
     # Cloudflare Turnstile 人机校验 token；仅在 TURNSTILE_ENABLED=True 时强制要求。
-    # 长度上限放宽到 4096 — 实测 cf-turnstile-response 大致 200~600 字符，预留余量。
     cf_token: Optional[str] = Field(default=None, max_length=4096)
-
-    @field_validator("input")
-    @classmethod
-    def _email_only(cls, v: str) -> str:
-        """前台只接受裸邮箱：含 ``----`` 一律 422 拒绝（在 pydantic 阶段就拦下）。
-
-        这是第一道防线；``lookup`` 路由里 ``parse_user_input`` 之后还会再做
-        一次 ``cred.needs_lookup`` 守卫，保证即使前端绕过 / 解析逻辑变化，
-        byo 路径也永远到不了 IMAP 调用层。
-        """
-        s = (v or "").strip()
-        if not s:
-            raise ValueError("输入不能为空")
-        if "----" in s:
-            raise ValueError("仅支持邮箱地址，不支持密码 / OAuth 等扩展格式")
-        return s
 
     @field_validator("category")
     @classmethod
@@ -291,6 +286,22 @@ class LookupRequest(BaseModel):
         if v not in ALLOWED_CATEGORIES:
             raise ValueError(f"category must be one of {sorted(ALLOWED_CATEGORIES)}")
         return v
+
+    def composed_input(self) -> str:
+        """把 input / (email, access_token) 任一种形态归一成 ``email----token``。
+
+        - 同时提供 input + email/token 时以 input 为准（避免前端两处写歧义）
+        - 仅提供 email 没 token → 返回纯邮箱串，由 parse_user_input 标记
+          ``needs_token=True``，上层回 401 提示
+        """
+        s = (self.input or "").strip()
+        if s:
+            return s
+        e = (self.email or "").strip()
+        t = (self.access_token or "").strip()
+        if e and t:
+            return f"{e}----{t}"
+        return e
 
 
 # ── 工具：根据凭据装配 EmailClient ─────────────────────────────
@@ -540,12 +551,14 @@ def public_config() -> dict:
 
 @app.post("/api/lookup")
 def lookup(req: LookupRequest, request: Request) -> JSONResponse:
-    """核心：解析输入 → 查白名单公开账号 → 拉邮件 → 提码 → 返回。
+    """核心：解析"邮箱----凭证" → 校验凭证 → 拉邮件 → 提码 → 返回。
 
-    流程（全程**只走白名单路径**，byo 已下线）：
-    1. ``parse_user_input`` 解析 — 必须 ``needs_lookup=True``（即纯邮箱）
+    流程（v8 起强制双因子）：
+    1. ``composed_input``→``parse_user_input`` 解析 — 必须拿到 email + 6 位 token
     2. ``_limiter.begin`` 一次完成 IP + email 双维度判定 + in-flight 登记
-    3. ``lookup_public_account`` 找站长名下、``is_public=1`` 且分类匹配的账号
+    3. ``lookup_public_account(email, category, token)`` —
+       owner + is_public + 分类 + ``hmac.compare_digest(token)`` 任一失败 → None
+       → 走 ``not_authorized`` / ``auth_failed`` 分支
     4. IMAP/Graph 拉收件箱前 20 封
     5. 按时间倒序排序后由分类 extractors 取首个 code/link
     6. ``finally`` 同时执行：落库 + 释放 in-flight + wipe 凭据
@@ -564,25 +577,37 @@ def lookup(req: LookupRequest, request: Request) -> JSONResponse:
 
     try:
         # 1) 解析输入（解析失败仍按 IP 维度计入限流，避免畸形请求蹭算力）。
+        composed = req.composed_input()
+        if not composed:
+            error_kind = "parse"
+            pre_decision = _limiter.begin(ip=ip, email="")
+            if pre_decision.allowed:
+                inflight_started = True
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "请输入「邮箱----6位凭证」或在两个输入框分别填写",
+            )
         try:
-            cred = parse_user_input(req.input)
+            cred = parse_user_input(composed)
         except InputParseError as exc:
             error_kind = "parse"
-            # 解析失败时也启动 in-flight，让连续畸形请求被 IP/min 拦下
             pre_decision = _limiter.begin(ip=ip, email="")
             if pre_decision.allowed:
                 inflight_started = True
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"输入格式错误: {exc}")
         email_for_log = cred.email
 
-        # 1.5) 防御纵深：byo 路径已下线，凡是带密码 / OAuth 凭据的输入一律拒绝。
-        # ``LookupRequest`` 的 pydantic field_validator 已在 422 阶段拦下含
-        # ``----`` 的输入；这里再做一次后端语义守卫，保证即使解析逻辑被未来
-        # 修改 / 上游校验绕过，byo 也永远到不了 IMAP 层。
-        if not cred.needs_lookup:
-            error_kind = "byo_disabled"
+        # 1.5) v8 强制双因子：缺凭证 → 401 直接提示（不浪费 IMAP 调用）。
+        # 用 401 而非 403/404，让前端能精准把"请补凭证"提示出来，与
+        # 真实"未授权"区分。计入 IP 限流防止"撞邮箱+空 token"扫描。
+        if cred.needs_token or not cred.access_token:
+            error_kind = "token_required"
+            pre_decision = _limiter.begin(ip=ip, email=cred.email)
+            if pre_decision.allowed:
+                inflight_started = True
             raise HTTPException(
-                status.HTTP_400_BAD_REQUEST, "仅支持邮箱地址，请确认输入"
+                status.HTTP_401_UNAUTHORIZED,
+                "请同时输入邮箱凭证（站长分发的 6 位强密码）",
             )
 
         # 1.7) Turnstile 人机校验（可选）：放在限流之前，校验失败也走 finally
@@ -614,26 +639,51 @@ def lookup(req: LookupRequest, request: Request) -> JSONResponse:
             )
         inflight_started = True
 
-        # 3) 查接码白名单 — 必须存在 & is_public=1 & 分类匹配
-        account = _db.lookup_public_account(cred.email, req.category)
+        # 3) 查接码白名单 — 必须存在 & is_public=1 & 分类匹配 & token 正确
+        # 用 access_token 参数一次性走 DB 端的"白名单 + 凭证"复合校验；
+        # token 错误时返回 None 与"邮箱根本不在白名单"形态相同，避免给攻击者
+        # 凭借响应差异区分"该邮箱存在但 token 错"和"该邮箱根本没加白名单"。
+        account = _db.lookup_public_account(
+            cred.email, req.category, access_token=cred.access_token,
+        )
         if not account:
             # 站长侧日志：把"为什么没命中"细化打到 logger，方便 docker logs 排错。
             # 用户响应里仍然只暴露统一的 not_authorized，避免攻击者盲注探测白名单。
             try:
                 diag = _db.diagnose_lookup_failure(cred.email, req.category)
-                # email_domain 不会泄露具体邮箱；reason 是站长配置维度
                 domain = cred.email.split("@", 1)[-1] if "@" in cred.email else ""
+                # 关键安全决策：诊断显示邮箱在 owner 名下且 is_public=1 / 分类匹配，
+                # 而 lookup 仍返回 None —— 那只可能是 token 校验失败。
+                # 落 error_kind=auth_failed 让 FailureLocker 把它当"凭据爆破"
+                # 计入 IP 锁定（30 次/h 后该 IP 5 分钟不能再查任何邮箱）。
+                reason = (diag.get("reason") or "unknown").strip()
+                is_token_failure = (
+                    reason not in {
+                        "no_owner_user", "no_account",
+                        "not_public", "category_mismatch",
+                    }
+                )
+                if is_token_failure:
+                    error_kind = "auth_failed"
+                    logger.info(
+                        "lookup auth_failed (token mismatch): cat=%s domain=%s",
+                        req.category, domain[:48],
+                    )
+                    raise HTTPException(
+                        status.HTTP_401_UNAUTHORIZED,
+                        "邮箱凭证无效或已被旋转，请向站长重新获取",
+                    )
                 logger.info(
                     "lookup not_authorized: cat=%s domain=%s reason=%s allowed=%s",
                     req.category, domain[:48],
-                    diag.get("reason"), str(diag.get("allowed_categories"))[:64],
+                    reason, str(diag.get("allowed_categories"))[:64],
                 )
-                # 用细化的 error_kind 落库，便于站长在管理端用 SQL 统计排错
-                reason = (diag.get("reason") or "unknown").strip()
                 if reason in {"no_owner_user", "no_account", "not_public", "category_mismatch"}:
                     error_kind = f"not_authorized_{reason}"
                 else:
                     error_kind = "not_authorized"
+            except HTTPException:
+                raise
             except Exception:
                 logger.exception("not_authorized 诊断失败（已吞掉）")
                 error_kind = "not_authorized"
@@ -775,8 +825,13 @@ def lookup(req: LookupRequest, request: Request) -> JSONResponse:
                 account.refresh_token = None
             except (AttributeError, TypeError):
                 pass
-        # cred 是 ParsedCredential — byo 已下线，password / refresh_token 字段
-        # 永远是空（needs_lookup=True 时这些字段都不会被填充），不需要再 _wipe。
+        # cred 是 ParsedCredential — v8 起只持有 email + access_token。
+        # access_token 在 cred 里以明文存活到请求结束；显式置空缩短驻留窗口。
+        if cred is not None:
+            try:
+                cred.access_token = ""
+            except (AttributeError, TypeError):
+                pass
 
 
 # ── 启动 ────────────────────────────────────────────────────────

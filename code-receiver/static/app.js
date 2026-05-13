@@ -4,9 +4,54 @@
 
   var form = document.getElementById('lookup-form');
   var inputEl = document.getElementById('input-credential');
+  var tokenEl = document.getElementById('input-token');
   var btn = document.getElementById('submit-btn');
   var resultEl = document.getElementById('result');
   var themeBtn = document.getElementById('theme-toggle');
+
+  /* ── 粘贴拆分：用户把整段「邮箱----凭证」粘到任一框时自动切开 ── */
+  // 触发场景：站长在管理端复制 "name@x.com----Ab3xK9" 让用户一次粘。
+  // 比起强迫用户手动拆，自动拆分体验更顺；并对每段做基础校验。
+  function splitEmailToken(raw) {
+    if (typeof raw !== 'string') return null;
+    var s = raw.trim();
+    if (!s || s.indexOf('----') < 0) return null;
+    var parts = s.split('----');
+    if (parts.length < 2) return null;
+    var email = (parts[0] || '').trim();
+    var token = (parts[1] || '').trim();
+    if (!email || !token) return null;
+    // 邮箱基础格式（与后端 _EMAIL_RE 同等宽松度即可，前端不必苛求）
+    if (email.indexOf('@') < 1 || email.indexOf('.') < 0) return null;
+    return { email: email, token: token };
+  }
+  function applyEmailTokenSplit(parts) {
+    inputEl.value = parts.email;
+    if (tokenEl) tokenEl.value = parts.token.slice(0, 6);
+    // 拆分后焦点回到 submit，方便直接回车
+    if (parts.token && parts.token.length >= 6) {
+      btn.focus();
+    } else if (tokenEl) {
+      tokenEl.focus();
+    }
+  }
+  function handlePaste(e) {
+    var data = e.clipboardData || window.clipboardData;
+    if (!data) return;
+    var pasted = data.getData('text');
+    var parts = splitEmailToken(pasted);
+    if (!parts) return;
+    e.preventDefault();
+    applyEmailTokenSplit(parts);
+  }
+  inputEl.addEventListener('paste', handlePaste);
+  if (tokenEl) tokenEl.addEventListener('paste', handlePaste);
+  // 在邮箱框输入时即时拆（用户连续敲）：仅当能拆出 token 才动 tokenEl
+  inputEl.addEventListener('input', function () {
+    if (inputEl.value.indexOf('----') < 0) return;
+    var parts = splitEmailToken(inputEl.value);
+    if (parts) applyEmailTokenSplit(parts);
+  });
 
   /* ── Cloudflare Turnstile（可选）─ 服务端 /api/config 决定是否启用 ── */
   var TURNSTILE = { enabled: false, sitekey: '', widgetId: null };
@@ -484,20 +529,36 @@
   form.addEventListener('submit', async function (e) {
     e.preventDefault();
     var input = (inputEl.value || '').trim();
+    var token = tokenEl ? (tokenEl.value || '').trim() : '';
     var category =
       (document.querySelector('input[name="category"]:checked') || {}).value ||
       'openai';
+
+    // 兜底：如果用户把 email----token 直接粘进 input 框、token 框为空，
+    // 这里再拆一次（input 事件已经拆过，这里是双保险）
+    if (!token && input.indexOf('----') > 0) {
+      var parts = splitEmailToken(input);
+      if (parts) {
+        input = parts.email;
+        token = parts.token;
+        inputEl.value = parts.email;
+        if (tokenEl) tokenEl.value = parts.token.slice(0, 6);
+      }
+    }
 
     if (!input) {
       renderError('请填写邮箱', '请输入已加入接码白名单的邮箱地址');
       inputEl.focus();
       return;
     }
-    // 与后端 LookupRequest field_validator 对齐：byo（邮箱----密码 / OAuth）
-    // 路径已下线，前端先做一次轻量提示，避免无意义请求消耗限流配额。
-    if (input.indexOf('----') !== -1) {
-      renderError('仅支持邮箱地址', '请只输入邮箱，不要附带密码或 OAuth 凭据');
-      inputEl.focus();
+    if (!token) {
+      renderError('请填写凭证', '请输入站长分发的 6 位邮箱凭证');
+      if (tokenEl) tokenEl.focus();
+      return;
+    }
+    if (token.length !== 6) {
+      renderError('凭证长度不对', '凭证应为站长分发的 6 位字符串');
+      if (tokenEl) tokenEl.focus();
       return;
     }
 
@@ -518,7 +579,8 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          input: input,
+          email: input,
+          access_token: token,
           category: category,
           cf_token: cfToken || undefined,
         }),
@@ -550,7 +612,8 @@
       if (resp.status === 404) {
         hint = '请确认：邮箱拼写无误 · 站长已在管理端把它"加入接码"';
       } else if (resp.status === 401) {
-        hint = '邮箱凭据已过期 — 请联系站长在管理端刷新 OAuth refresh_token';
+        // 401 现在涵盖两种：缺凭证 / 凭证错。后端 detail 已经分别说明。
+        hint = '若已正确填写凭证，多半是站长旋转过 — 请联系站长重新获取';
       } else if (resp.status === 502) {
         hint = '邮箱服务器暂时不可用，几秒后再试一次';
       } else if (resp.status === 429) {
@@ -558,7 +621,7 @@
       } else if (resp.status === 403) {
         hint = '人机校验未通过，刷新页面后重新校验';
       } else if (resp.status === 422 || resp.status === 400) {
-        hint = '输入格式不被接受 — 仅支持邮箱地址';
+        hint = '输入格式不被接受 — 请检查邮箱与 6 位凭证';
       } else {
         var retryAfter = body && body.retry_after;
         hint = retryAfter ? formatRetryAfter(retryAfter) : '';
@@ -581,7 +644,7 @@
     renderResult(body);
   });
 
-  renderEmpty('准备就绪', '输入已加入接码白名单的邮箱后点击"查询"即可');
+  renderEmpty('准备就绪', '输入邮箱与站长分发的 6 位凭证后点击"查询"即可');
   renderRecent();
 
   bootstrapConfig();

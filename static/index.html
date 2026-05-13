@@ -61,6 +61,7 @@
       <button class="btn btn-w" id="btnBatchSend" data-i18n="btn_batch_send">批量发信</button>
       <button class="btn btn-cyber owner-only" id="btnSetPublic" data-i18n="btn_set_public" data-i18n-title="btn_set_public_title" title="把选中邮箱加入接码白名单（仅站长）" hidden>📡 加入接码</button>
       <button class="btn btn-o owner-only" id="btnUnsetPublic" data-i18n="btn_unset_public" data-i18n-title="btn_unset_public_title" title="把选中邮箱移出接码白名单（仅站长）" hidden>📴 移出接码</button>
+      <button class="btn btn-w owner-only" id="btnRotateTokens" data-i18n="btn_rotate_tokens" data-i18n-title="btn_rotate_tokens_title" title="批量旋转选中邮箱的接码凭证（老链接立即失效）" hidden>🔄 批量改凭证</button>
       <button class="btn btn-s owner-only" id="btnBatchHelperOpen" data-i18n="btn_batch_helper_open" title="批量自动登录所选邮箱（Helper）" hidden>🔓 批量登录</button>
       <button class="btn btn-s owner-only" id="btnBatchHelperToken" data-i18n="btn_batch_helper_token" title="批量获取所选邮箱的 refresh_token（Helper）" hidden>🔑 批量取 Token</button>
       <button class="btn btn-s owner-only" id="btnBatchHelperBind" data-i18n="btn_batch_helper_bind" title="批量为所选邮箱绑辅助邮箱（Helper）" hidden>🔗 批量绑辅助</button>
@@ -79,6 +80,7 @@
           <th style="width:60px" data-i18n="col_type">类型</th>
           <th style="width:50px" data-i18n="col_aws">AWS</th>
           <th class="col-public" style="width:70px" data-i18n="col_public" hidden>接码</th>
+          <th class="col-token" style="width:120px" data-i18n="col_token" hidden>凭证</th>
           <th data-i18n="col_remark">备注</th>
           <th style="width:300px;min-width:240px" data-i18n="col_op">操作</th>
         </tr></thead><tbody id="accBody"></tbody></table>
@@ -153,6 +155,23 @@ email----password----client_id----refresh_token$$--------组名
     <button class="btn btn-o" id="btnImportClipboard" data-i18n="btn_clipboard">从剪贴板</button>
     <button class="btn btn-o" data-close="importModal" data-i18n="btn_cancel">取消</button>
     <button class="btn btn-p" id="btnDoImport" data-i18n="btn_import">导入</button>
+  </div>
+</div></div>
+
+<!-- 接码凭证查看 / 旋转结果弹窗 -->
+<div class="modal-bg" id="tokenModal"><div class="modal" style="width:560px">
+  <div class="modal-h"><h3 id="tokenModalTitle" data-i18n="modal_token_title">接码凭证</h3><button class="modal-close" data-close="tokenModal">×</button></div>
+  <div class="modal-body">
+    <p class="token-warn" id="tokenModalIntro" data-i18n="modal_token_intro">⚠ 凭证一旦旋转，老的"邮箱----凭证"分享串立刻失效。请把下列新凭证发给对应使用者。</p>
+    <div class="form-group">
+      <label data-i18n="modal_token_list">凭证清单（每行 邮箱----凭证）</label>
+      <textarea id="tokenList" rows="10" readonly spellcheck="false" autocomplete="off"></textarea>
+    </div>
+    <div id="tokenModalErr" style="font-size:12px;color:var(--danger);min-height:16px"></div>
+  </div>
+  <div class="modal-foot">
+    <button class="btn btn-o" data-close="tokenModal" data-i18n="btn_close">关闭</button>
+    <button class="btn btn-p" id="btnCopyTokens" data-i18n="btn_copy_all">一键复制全部</button>
   </div>
 </div></div>
 

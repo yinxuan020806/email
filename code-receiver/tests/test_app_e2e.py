@@ -50,8 +50,8 @@ def test_root_no_longer_lists_oauth2_format(client):
     """UI 改版后：底部"支持格式"应当不再展示
     ``email----密码----client_id----refresh_token (Outlook OAuth2)`` 这一项。
 
-    底层 `parse_user_input` 仍然支持 OAuth2 4 段输入（向后兼容），
-    只是不再在 UI 上把这种格式当作明确的"使用方式"暴露给终端用户。
+    v8 起底层也只支持 ``email----token`` 双段格式，连历史的 4 段 OAuth2
+    解析都已删除。
     """
     text = client.get("/").text
     assert "OAuth2" not in text, "UI 不应再显式提及 OAuth2 输入格式"
@@ -91,72 +91,69 @@ def test_healthz_ok(client):
 
 def test_lookup_validation_does_not_leak_input(client):
     """422 响应不能回显用户的 input 字段（我们覆盖了默认 handler）。"""
-    secret_pwd = "MySuperSecretPasswordXYZ"
+    secret_token = "Ab3xK9"  # 合法 token 格式，但会因 category 非法被 422
     r = client.post(
         "/api/lookup",
         json={
-            "input": f"alice@outlook.com----{secret_pwd}",
+            "input": f"alice@outlook.com----{secret_token}",
             "category": "github",  # 非法分类，会触发 422
         },
     )
     assert r.status_code == 422
     body_text = r.text
-    # 关键安全：响应里**绝不能**含有用户原始密码
-    assert secret_pwd not in body_text, f"422 响应泄漏了原始密码！body={body_text}"
+    # 关键安全：响应里**绝不能**含有用户原始 token
+    assert secret_token not in body_text, f"422 响应泄漏了原始 token！body={body_text}"
     body = r.json()
     assert "errors" in body or "detail" in body
 
 
-def test_lookup_rejects_byo_input_with_dashes(client):
-    """byo 路径已下线：含 ---- 的输入一律在 pydantic 阶段（422）就被拦下，
-    不会进入 lookup 函数体（也不会消耗限流配额或触发 IMAP 连接）。
-    """
-    secret_pwd = "AnotherSecretPwd123"
+def test_lookup_rejects_malformed_token_format(client):
+    """token 段含非字符集字符 / 长度不对 → 400 在 input 解析阶段拒绝。"""
+    secret_value = "MySpecial$Pwd"  # 含 $，肯定不是合法 token
     r = client.post(
         "/api/lookup",
         json={
-            "input": f"alice@outlook.com----{secret_pwd}",
-            "category": "cursor",  # 合法分类，单纯 input 校验失败
-        },
-    )
-    assert r.status_code == 422
-    # 关键安全：响应里**绝不能**含有用户原始密码
-    assert secret_pwd not in r.text, "422 响应泄漏了密码字段"
-    body = r.json()
-    # 字段错误信息应明确说明只支持邮箱
-    err_text = " ".join(
-        e.get("msg", "") for e in body.get("errors", []) if isinstance(e, dict)
-    ) + body.get("detail", "")
-    assert "邮箱" in err_text or "扩展格式" in err_text
-
-
-def test_lookup_rejects_byo_unknown_domain(client):
-    """未知域名 + 含 ---- → 仍然 422 在 pydantic 阶段拦下（连 SSRF 检查都不需要）。"""
-    r = client.post(
-        "/api/lookup",
-        json={
-            "input": "victim@internal-server.local----whatever",
+            "input": f"alice@outlook.com----{secret_value}",
             "category": "cursor",
         },
     )
-    assert r.status_code == 422
+    assert r.status_code == 400, r.text
+    # 关键安全：响应里**绝不能**含有用户原始字符串
+    assert secret_value not in r.text
 
 
-def test_lookup_email_only_not_public_returns_404(client):
-    """仅输入邮箱，但该邮箱不是 public 账号 → 404。"""
+def test_lookup_email_only_returns_401_token_required(client):
+    """v8: 仅输入邮箱 → 401 提示补凭证（不再回 404）。"""
     r = client.post(
         "/api/lookup",
         json={"input": "stranger@outlook.com", "category": "cursor"},
     )
-    # 404 因为查 DB 找不到 is_public=1 + 属于 xiaoxuan 的账号
-    assert r.status_code == 404
+    assert r.status_code == 401, r.text
+    detail = r.json().get("detail", "")
+    assert "凭证" in detail
+
+
+def test_lookup_email_token_not_public_returns_404(client):
+    """传了合法 token 但邮箱不在白名单 → 404（避免 401/404 混用泄露白名单存在性）。"""
+    r = client.post(
+        "/api/lookup",
+        json={
+            "input": "stranger@outlook.com----Ab3xK9",
+            "category": "cursor",
+        },
+    )
+    assert r.status_code == 404, r.text
     body = r.json()
-    assert "白名单" in body.get("detail", "") or "未授权" in body.get("detail", "") \
-        or "未公开" in body.get("detail", "")  # 兼容旧文案
+    assert "白名单" in body.get("detail", "") or "未授权" in body.get("detail", "")
 
 
-def _make_fake_account(email: str = "owner@outlook.com"):
-    """构造一个假的 Account 对象用来 mock 公开账号查询。"""
+def _make_fake_account(email: str = "owner@outlook.com", token: str = "Ab3xK9"):
+    """构造一个假的 Account 对象用来 mock 公开账号查询。
+
+    v8 起 Account.access_token 字段存在，但测试里 mock 的
+    lookup_public_account 已经在它层面做了"token 正确才返回 account"的
+    替身，所以这里写什么都行——保留字段填充让 dataclass 不报缺参数。
+    """
     from core.models import Account
     return Account(
         id=1,
@@ -175,11 +172,25 @@ def _make_fake_account(email: str = "owner@outlook.com"):
         last_check=None,
         has_aws_code=0,
         remark="",
+        access_token=token,
     )
 
 
+def _make_token_aware_lookup(account, expected_token: str):
+    """mock 替身：模拟"token 对 → 返回 account；token 错 → None"。
+
+    复刻 DatabaseManager.get_public_account_for_lookup 的核心安全语义，
+    让 e2e 测试能验证 lookup 路由确实把 token 传到了 DB 层。
+    """
+    def _lookup(email, category, access_token=None):
+        if access_token == expected_token:
+            return account
+        return None
+    return _lookup
+
+
 def test_lookup_success_path_public_cursor(app_module, client):
-    """公开账号路径：mock DB lookup_public_account 返回 cursor 账号 + IMAP 拉到验证码邮件。"""
+    """公开账号路径：mock DB lookup_public_account 在 token 正确时返回 cursor 账号。"""
     fake_mails = [
         {
             "sender": "no-reply@cursor.sh",
@@ -201,23 +212,51 @@ def test_lookup_success_path_public_cursor(app_module, client):
         def disconnect(self):
             pass
 
-    fake_account = _make_fake_account("alice@outlook.com")
+    token = "Ab3xK9"
+    fake_account = _make_fake_account("alice@outlook.com", token=token)
+    lookup_fn = _make_token_aware_lookup(fake_account, token)
 
     with patch.object(app_module, "EmailClient", FakeClient), \
-         patch.object(app_module._db, "lookup_public_account", return_value=fake_account), \
+         patch.object(app_module._db, "lookup_public_account", side_effect=lookup_fn), \
          patch.object(app_module._db, "incr_query_count", return_value=True):
         r = client.post(
             "/api/lookup",
-            json={"input": "alice@outlook.com", "category": "cursor"},
+            json={
+                "input": f"alice@outlook.com----{token}",
+                "category": "cursor",
+            },
         )
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["found"] is True
     assert body["code"] == "248135"
     assert body["category"] == "cursor"
-    # byo 已下线，source 永远是 public
     assert body["source"] == "public"
     assert body["sender"].startswith("no-reply@cursor.sh")
+
+
+def test_lookup_wrong_token_returns_401(app_module, client):
+    """token 错误 → 401 auth_failed（不能 200 也不能因 404 掩盖 token 校验）。"""
+    token = "Ab3xK9"
+    fake_account = _make_fake_account("alice@outlook.com", token=token)
+    lookup_fn = _make_token_aware_lookup(fake_account, token)
+
+    # 同时 mock diagnose_lookup_failure 让"token 错"分支走出来：
+    # diagnose 返回 reason=category_mismatch 之类的会被当成 not_authorized，
+    # 必须返回 reason != 那几个白名单 reason 时才进 auth_failed 路径。
+    # 简单起见这里返回 unknown reason，让 app 进入 auth_failed 分支。
+    diag = {"reason": "diagnostic-says-account-exists", "allowed_categories": "*"}
+    with patch.object(app_module._db, "lookup_public_account", side_effect=lookup_fn), \
+         patch.object(app_module._db, "diagnose_lookup_failure", return_value=diag):
+        r = client.post(
+            "/api/lookup",
+            json={
+                "input": "alice@outlook.com----XxYyZz",  # 6 位但与 token 不同
+                "category": "cursor",
+            },
+        )
+    assert r.status_code == 401, r.text
+    assert "凭证" in r.json().get("detail", "")
 
 
 def test_lookup_success_path_openai_link(app_module, client):
@@ -247,14 +286,19 @@ def test_lookup_success_path_openai_link(app_module, client):
         def disconnect(self):
             pass
 
-    fake_account = _make_fake_account("bob@outlook.com")
+    token = "Mn8pQ2"
+    fake_account = _make_fake_account("bob@outlook.com", token=token)
+    lookup_fn = _make_token_aware_lookup(fake_account, token)
 
     with patch.object(app_module, "EmailClient", FakeClient), \
-         patch.object(app_module._db, "lookup_public_account", return_value=fake_account), \
+         patch.object(app_module._db, "lookup_public_account", side_effect=lookup_fn), \
          patch.object(app_module._db, "incr_query_count", return_value=True):
         r = client.post(
             "/api/lookup",
-            json={"input": "bob@outlook.com", "category": "openai"},
+            json={
+                "input": f"bob@outlook.com----{token}",
+                "category": "openai",
+            },
         )
     assert r.status_code == 200, r.text
     body = r.json()
@@ -268,7 +312,7 @@ def test_security_headers_on_api(client):
     """API 路由也应带 5 项安全头。"""
     r = client.post(
         "/api/lookup",
-        json={"input": "stranger@outlook.com", "category": "cursor"},
+        json={"input": "stranger@outlook.com----Ab3xK9", "category": "cursor"},
     )
     assert r.headers.get("X-Frame-Options") == "DENY"
     assert r.headers.get("Referrer-Policy") == "no-referrer"
@@ -370,15 +414,22 @@ def test_preflight_failures_do_not_consume_ip_quota(app_module, client, monkeypa
         def disconnect(self):
             pass
 
-    fake_account = _make_fake_account("legit-preflight@outlook.com")
+    token = "Vb4xL8"
+    fake_account = _make_fake_account("legit-preflight@outlook.com", token=token)
+    lookup_fn = _make_token_aware_lookup(fake_account, token)
 
     # 1) 连续打 31 次"未加入白名单"的邮箱（lookup_public_account 返回 None）
+    # 注意：必须带合法 token 形态才能走到 lookup → diagnose 路径返回 404；
+    # 不带 token 会被 needs_token=True 路径拦下回 401，与本测试无关。
     for i in range(31):
         r = client.post(
             "/api/lookup",
-            json={"input": "stranger-preflight@outlook.com", "category": "cursor"},
+            json={
+                "input": "stranger-preflight@outlook.com----Ab3xK9",
+                "category": "cursor",
+            },
         )
-        # 必须是 404，而不能因为限流先于 lookup 触发变成 429
+        # 必须是 404 而不是 429 — 这些"前置失败"不能占用 IP/hour 配额
         assert r.status_code == 404, (
             f"前置失败应该返回 404，但第 {i+1} 次拿到 {r.status_code}: {r.text[:200]}"
         )
@@ -387,13 +438,16 @@ def test_preflight_failures_do_not_consume_ip_quota(app_module, client, monkeypa
     # 错误地计入了 IP/hour 配额（因为 31 > 30）
     monkeypatch.setattr(app_module._limiter, "ip_per_hour", 30)
 
-    # 3) 第 32 次用合法邮箱 → 必须 200，不能被 IP/hour 拦
+    # 3) 第 32 次用合法邮箱 + 正确 token → 必须 200
     with patch.object(app_module, "EmailClient", FakeClient), \
-         patch.object(app_module._db, "lookup_public_account", return_value=fake_account), \
+         patch.object(app_module._db, "lookup_public_account", side_effect=lookup_fn), \
          patch.object(app_module._db, "incr_query_count", return_value=True):
         r = client.post(
             "/api/lookup",
-            json={"input": "legit-preflight@outlook.com", "category": "cursor"},
+            json={
+                "input": f"legit-preflight@outlook.com----{token}",
+                "category": "cursor",
+            },
         )
     assert r.status_code == 200, (
         f"前置失败 31 次后合法请求应 200 而非被限流，实际 {r.status_code}: {r.text[:200]}"
@@ -409,11 +463,13 @@ def test_diagnose_lookup_failure_is_not_leaked_to_client(app_module, client):
     """
     r = client.post(
         "/api/lookup",
-        json={"input": "completely-unknown@example.invalid", "category": "cursor"},
+        json={
+            "input": "completely-unknown@example.invalid----Ab3xK9",
+            "category": "cursor",
+        },
     )
     assert r.status_code == 404
     text = r.text
-    # 响应体必须只回统一的"白名单"提示，不能含细化的 reason 关键字
     assert "no_account" not in text
     assert "not_public" not in text
     assert "category_mismatch" not in text

@@ -11,8 +11,10 @@
 from __future__ import annotations
 
 import base64
+import hmac
 import logging
 import os
+import secrets
 import stat
 import threading
 from collections import OrderedDict
@@ -190,3 +192,85 @@ class SecretBox:
             pass
         logger.info("已生成新的主密钥: %s", self.key_path)
         return new_key
+
+
+# ── 接码业务：邮箱凭证（access_token）生成与比较 ───────────────────────
+#
+# 设计动机
+# --------
+# 接码端把"输入邮箱即可拿验证码"改成"必须邮箱 + 6 位凭证"。
+# 这层凭证语义上像第二把密码：
+#   - 站长在管理端为已加入接码白名单的邮箱生成 access_token（明文加密保存）
+#   - 把"邮箱----凭证"分发给下游使用者
+#   - 想要撤销访问 → 旋转该邮箱的 token，老链接立即失效
+#   - 真实邮箱密码 / refresh_token 永远不会被分发出去
+#
+# 字符集与长度
+# -----------
+# - 默认 6 位，字符集 54 个（去掉 0/O/1/I/l 这些一眼分不清的字符），
+#   组合数 54^6 ≈ 246 亿。配合接码端的 IP/min 限流 + auth_failed 锁定
+#   + Cloudflare Turnstile，纯爆破不可行。
+# - 用 ``secrets.choice`` 走 OS CSPRNG，绝不用 ``random.choice``——
+#   后者是确定性 PRNG，泄露种子即可预测后续 token。
+#
+# 比较函数
+# --------
+# - ``token_equals`` 用 ``hmac.compare_digest`` 做常量时间比较，
+#   防御针对短 token 的时序侧信道（攻击者通过响应延迟差推断首字符是否匹配）。
+# - 调用方拿到用户输入后必须经过 ``normalize_access_token`` 标准化
+#   （去首尾空白）再比较，避免"末尾空格"误判为不匹配。
+
+# 字符集刻意排除：0(零)/O(欧) · 1(壹)/I(爱)/l(L 小写)/i(I 小写) ·
+# B/8 / G/6 / Z/2 这类肉眼极易混淆的字符也一并踢出。
+# 剩余 54 个对站长复制粘贴、用户人工输入都不会拼错。
+ACCESS_TOKEN_ALPHABET = (
+    "ABCDEFGHJKLMNPQRSTUVWXYZ"
+    "abcdefghjkmnpqrstuvwxyz"
+    "23456789"
+)
+ACCESS_TOKEN_LENGTH = 6
+
+
+def generate_access_token(length: int = ACCESS_TOKEN_LENGTH) -> str:
+    """生成一个 ``length`` 位的接码邮箱凭证（默认 6 位）。
+
+    - 使用 ``secrets`` 模块 → 走 OS CSPRNG，密码学安全
+    - 字符集 54 个，避开易混淆字符
+    - 调用方负责把返回值加密存库（``SecretBox.encrypt``）
+    """
+    if length < 4:
+        raise ValueError("access_token 长度不得小于 4 位（熵不足）")
+    return "".join(secrets.choice(ACCESS_TOKEN_ALPHABET) for _ in range(length))
+
+
+def normalize_access_token(value: Optional[str]) -> str:
+    """把用户输入的 token 标准化：去首尾空白；None / 非字符串 → 空串。
+
+    **不做大小写归一**——字符集刻意区分大小写以提高熵。
+    若调用方希望宽松匹配，请自行 lower()，并接受熵从 54^N 降到 33^N 的代价。
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
+
+
+def token_equals(input_token: Optional[str], stored_token: Optional[str]) -> bool:
+    """常量时间比较两个 token；任一为空返回 False。
+
+    - 防御目标：短 token 的时序侧信道（"匹配前缀越长 → 比较耗时越长"
+      会让攻击者按字符位枚举，把 ``O(54^6)`` 降到 ``O(54×6)``）
+    - 实现：``hmac.compare_digest`` 是为这种场景设计的，无论输入长度差异
+      都按 max(len) 跑完，且对早 mismatch 不短路
+    - 空值短路：两者都为空时仍**返回 False**——空 token 永远不应被视作合法
+      （未启用接码的账号 stored=""，应被 lookup 流程在更早的 is_public 守卫
+      处拦下，这里只是兜底）
+    """
+    a = normalize_access_token(input_token)
+    b = normalize_access_token(stored_token)
+    if not a or not b:
+        return False
+    if len(a) != len(b):
+        return False
+    return hmac.compare_digest(a, b)
