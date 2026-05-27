@@ -92,6 +92,10 @@ body{font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif;background
 .btn-d{background:var(--danger);color:#fff}.btn-d:hover{filter:brightness(.9)}
 .btn-o{background:var(--card);color:var(--text);border:1px solid var(--border)}.btn-o:hover{background:var(--hover)}
 .btn:disabled{opacity:.5;cursor:not-allowed}
+.credential-switch{height:30px;padding:0 12px;border-radius:var(--radius);border:1px solid var(--border);background:var(--card);color:var(--text2);font-size:12px;display:inline-flex;align-items:center;gap:8px;cursor:pointer;white-space:nowrap;transition:.15s}
+.credential-switch:hover{border-color:var(--accent);color:var(--text)}
+.credential-switch input{width:15px;height:15px;accent-color:var(--accent);cursor:pointer}
+.credential-switch[hidden]{display:none!important}
 .rec-cnt{margin-left:auto;color:var(--text3);font-size:12px}
 .content{flex:1;overflow:auto;padding:0 28px 28px}
 

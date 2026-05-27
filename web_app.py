@@ -85,6 +85,7 @@ from core.rate_limit import (  # noqa: E402
 from core.security_check import emit_warnings  # noqa: E402
 from database.db_manager import (  # noqa: E402
     ALLOWED_SETTING_KEYS,
+    CODE_RECEIVER_REQUIRE_TOKEN_KEY,
     DatabaseManager,
     get_data_dir,
 )
@@ -2446,6 +2447,9 @@ def get_settings(user: dict = CurrentUser) -> dict:
         "theme": db.get_setting(uid, "theme", "light"),
         "language": db.get_setting(uid, "language", "zh"),
         "font_size": db.get_setting(uid, "font_size", "13"),
+        CODE_RECEIVER_REQUIRE_TOKEN_KEY: db.get_setting(
+            uid, CODE_RECEIVER_REQUIRE_TOKEN_KEY, "1",
+        ),
     }
 
 
@@ -2453,6 +2457,13 @@ def get_settings(user: dict = CurrentUser) -> dict:
 def update_settings(req: SettingUpdate, user: dict = CurrentUser) -> dict:
     if req.key not in ALLOWED_SETTING_KEYS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"非法的 setting: {req.key}")
+    if req.key == CODE_RECEIVER_REQUIRE_TOKEN_KEY:
+        _require_code_owner(user)
+        if req.value not in {"0", "1"}:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "code_receiver_require_token 只能是 0 或 1",
+            )
     db.set_setting(user["id"], req.key, req.value)
     return {"ok": True}
 

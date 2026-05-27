@@ -97,6 +97,46 @@ def _import_one_account(c, email: str = "user1@outlook.com", group: str = "curso
     raise AssertionError(f"未找到刚导入的账号 {email}")
 
 
+# ── /api/settings: code_receiver_require_token ─────────────────────
+
+
+def test_owner_can_toggle_code_receiver_require_token(owner_client):
+    """站长可以关闭 / 开启接码站凭证验证，默认保持开启。"""
+    settings = owner_client.get("/api/settings")
+    assert settings.status_code == 200, settings.text
+    assert settings.json()["code_receiver_require_token"] == "1"
+
+    r = owner_client.put(
+        "/api/settings",
+        json={"key": "code_receiver_require_token", "value": "0"},
+    )
+    assert r.status_code == 200, r.text
+    assert owner_client.get("/api/settings").json()["code_receiver_require_token"] == "0"
+
+    r2 = owner_client.put(
+        "/api/settings",
+        json={"key": "code_receiver_require_token", "value": "1"},
+    )
+    assert r2.status_code == 200, r2.text
+    assert owner_client.get("/api/settings").json()["code_receiver_require_token"] == "1"
+
+
+def test_non_owner_cannot_toggle_code_receiver_require_token(normal_client):
+    r = normal_client.put(
+        "/api/settings",
+        json={"key": "code_receiver_require_token", "value": "0"},
+    )
+    assert r.status_code == 403
+
+
+def test_code_receiver_require_token_rejects_invalid_value(owner_client):
+    r = owner_client.put(
+        "/api/settings",
+        json={"key": "code_receiver_require_token", "value": "maybe"},
+    )
+    assert r.status_code == 400
+
+
 # ── /api/accounts/set-public ─────────────────────────────────────────
 
 

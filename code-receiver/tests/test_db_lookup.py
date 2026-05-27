@@ -108,6 +108,32 @@ def test_lookup_via_group_name_cursor(fresh_db):
     ) is None
 
 
+def test_lookup_can_skip_access_token_when_owner_disables_credentials(fresh_db):
+    """全局关闭凭证时，只跳过 token，比 owner / public / category 更外层的限制不变。"""
+    db = fresh_db
+    uid, acc_id = _create_owner_with_account(db, "xiaoxuan", "no-token@outlook.com", group="cursor")
+    _make_public(db, uid, acc_id)
+
+    assert db.get_public_account_for_lookup(
+        "xiaoxuan",
+        "no-token@outlook.com",
+        "cursor",
+        require_access_token=False,
+    ) is not None
+    assert db.get_public_account_for_lookup(
+        "xiaoxuan",
+        "no-token@outlook.com",
+        "openai",
+        require_access_token=False,
+    ) is None
+    assert db.get_public_account_for_lookup(
+        "other-owner",
+        "no-token@outlook.com",
+        "cursor",
+        require_access_token=False,
+    ) is None
+
+
 def test_lookup_via_group_name_cursor_plus_gpt(fresh_db):
     """group_name='cursor+gpt' + is_public=1 → cursor / openai 都命中。"""
     db = fresh_db

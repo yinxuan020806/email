@@ -23,6 +23,7 @@ const S = {
   // 已加入接码白名单的账号 id 集合（仅站长会被填充非空）
   publicIds: new Set(),
   publicCategories: {},
+  codeReceiverRequireToken: true,
 };
 
 // ───────── SPA 路由 ─────────
@@ -385,6 +386,32 @@ function applyOwnerVisibility() {
     if (isOwner) node.removeAttribute('hidden');
     else node.setAttribute('hidden', '');
   });
+  updateCodeRequireTokenToggle();
+}
+
+function updateCodeRequireTokenToggle() {
+  const cb = $('codeRequireTokenToggle');
+  if (cb) cb.checked = !!S.codeReceiverRequireToken;
+}
+
+async function setCodeReceiverRequireToken(enabled) {
+  if (!S.user || !S.user.is_owner) return;
+  const prev = S.codeReceiverRequireToken;
+  S.codeReceiverRequireToken = !!enabled;
+  updateCodeRequireTokenToggle();
+  try {
+    await api.put('/api/settings', {
+      key: 'code_receiver_require_token',
+      value: S.codeReceiverRequireToken ? '1' : '0',
+    });
+    toast(t(S.codeReceiverRequireToken
+      ? 'toast_code_token_enabled'
+      : 'toast_code_token_disabled'), 'success');
+  } catch (e) {
+    S.codeReceiverRequireToken = prev;
+    updateCodeRequireTokenToggle();
+    toast(t('toast_load_fail') + (e?.message || ''), 'error');
+  }
 }
 
 function updateUserDisplay() {
@@ -627,11 +654,19 @@ function tokenLinesFromResponse(tokens) {
   for (const [id, value] of Object.entries(tokens || {})) {
     const acc = S.accounts.find((x) => String(x.id) === String(id));
     const email = acc ? acc.email : '#' + id;
+    if (!S.codeReceiverRequireToken) {
+      lines.push(email);
+      continue;
+    }
     for (const entry of normalizeTokenEntries(value)) {
       lines.push(`${email}----${entry.token}`);
     }
   }
   return lines;
+}
+
+function codeLookupShareText(email, token) {
+  return S.codeReceiverRequireToken && token ? `${email}----${token}` : email;
 }
 
 function choosePublicCategories() {
@@ -970,7 +1005,10 @@ function buildTokenCell(account) {
         type: 'button',
         title: t('token_copy_hint'),
         'aria-label': t('token_copy_hint'),
-        onclick: () => copyText(`${account.email}----${entry.token}`, 'toast_token_copied'),
+        onclick: () => copyText(
+          codeLookupShareText(account.email, entry.token),
+          S.codeReceiverRequireToken ? 'toast_token_copied' : 'toast_copied_email',
+        ),
       }, '📋'));
       wrap.appendChild(item);
     }
@@ -997,7 +1035,12 @@ async function rotateSingleToken(account) {
     toast(t('toast_token_rotated', { email: account.email }), 'success');
     // 刷新列表让新 token 显示出来；同时弹出一个含分享串的弹窗便于站长复制
     await loadAccounts();
-    showTokenModal(entries.map((entry) => `${account.email}----${entry.token}`), { fresh: true });
+    showTokenModal(
+      S.codeReceiverRequireToken
+        ? entries.map((entry) => codeLookupShareText(account.email, entry.token))
+        : [account.email],
+      { fresh: true },
+    );
   } catch (e) {
     toast(t('toast_load_fail') + (e?.message || ''), 'error');
   }
@@ -1036,7 +1079,17 @@ function showTokenModal(lines, opts) {
   if (!ta) return;
   ta.value = (lines || []).join('\n');
   const intro = $('tokenModalIntro');
-  if (intro) intro.textContent = t('modal_token_intro');
+  if (intro) {
+    intro.textContent = S.codeReceiverRequireToken
+      ? t('modal_token_intro')
+      : t('modal_token_intro_disabled');
+  }
+  const label = $('tokenListLabel');
+  if (label) {
+    label.textContent = S.codeReceiverRequireToken
+      ? t('modal_token_list')
+      : t('modal_token_list_disabled');
+  }
   openModal('tokenModal');
   // 自动 focus 文本框 + 全选，方便键盘党直接 Ctrl+C
   setTimeout(() => {
@@ -3493,6 +3546,14 @@ $('btnBatchSend').addEventListener('click', showBatchSend);
 $('btnSetPublic').addEventListener('click', () => batchSetPublic(true));
 $('btnUnsetPublic').addEventListener('click', () => batchSetPublic(false));
 {
+  const requireTokenToggle = document.getElementById('codeRequireTokenToggle');
+  if (requireTokenToggle) {
+    requireTokenToggle.addEventListener('change', (e) => {
+      setCodeReceiverRequireToken(e.target.checked);
+    });
+  }
+}
+{
   // 批量改凭证按钮 / 弹窗一键复制（用块级作用域避免污染顶层 const）
   const rotateBtn = document.getElementById('btnRotateTokens');
   if (rotateBtn) rotateBtn.addEventListener('click', batchRotateTokens);
@@ -3594,6 +3655,8 @@ async function init() {
     const savedTheme = settings.theme;
     S.theme = THEME_ORDER.includes(savedTheme) ? savedTheme : 'cyber';
     S.lang = settings.language || 'zh';
+    S.codeReceiverRequireToken = settings.code_receiver_require_token !== '0';
+    updateCodeRequireTokenToggle();
     document.body.dataset.theme = S.theme;
     const themeBtnInit = $('themeBtn');
     if (themeBtnInit) themeBtnInit.textContent = THEME_ICON[S.theme];

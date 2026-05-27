@@ -89,6 +89,13 @@ def test_healthz_ok(client):
     assert body["rules"] is True
 
 
+def test_config_exposes_credentials_required_flag(app_module, client):
+    with patch.object(app_module._db, "credentials_required", return_value=False):
+        r = client.get("/api/config")
+    assert r.status_code == 200, r.text
+    assert r.json()["credentials"]["required"] is False
+
+
 def test_lookup_validation_does_not_leak_input(client):
     """422 响应不能回显用户的 input 字段（我们覆盖了默认 handler）。"""
     secret_token = "Ab3xK9"  # 合法 token 格式，但会因 category 非法被 422
@@ -234,6 +241,50 @@ def test_lookup_success_path_public_cursor(app_module, client):
     assert body["category"] == "cursor"
     assert body["source"] == "public"
     assert body["sender"].startswith("no-reply@cursor.sh")
+
+
+def test_lookup_success_when_credentials_disabled(app_module, client):
+    """站长关闭凭证验证后，已开放且分类匹配的邮箱只输邮箱即可查码。"""
+    fake_mails = [
+        {
+            "sender": "no-reply@cursor.sh",
+            "from": "no-reply@cursor.sh",
+            "subject": "Your Cursor verification code",
+            "body": "Your Cursor verification code is 975310.",
+            "preview": "Your Cursor verification code is 975310.",
+            "date": "2026-05-05T12:00:00",
+        }
+    ]
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def fetch_emails(self, *a, **kw):
+            return fake_mails, "ok"
+
+        def disconnect(self):
+            pass
+
+    fake_account = _make_fake_account("open@outlook.com")
+
+    def _lookup(email, category, access_token=None, require_access_token=True):
+        assert access_token in (None, "")
+        assert require_access_token is False
+        if email == "open@outlook.com" and category == "cursor":
+            return fake_account
+        return None
+
+    with patch.object(app_module, "EmailClient", FakeClient), \
+         patch.object(app_module._db, "credentials_required", return_value=False), \
+         patch.object(app_module._db, "lookup_public_account", side_effect=_lookup), \
+         patch.object(app_module._db, "incr_query_count", return_value=True):
+        r = client.post(
+            "/api/lookup",
+            json={"input": "open@outlook.com", "category": "cursor"},
+        )
+    assert r.status_code == 200, r.text
+    assert r.json()["code"] == "975310"
 
 
 def test_lookup_wrong_token_returns_401(app_module, client):

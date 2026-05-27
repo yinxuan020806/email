@@ -7,6 +7,7 @@
     * SELECT 公开账号（accounts.is_public=1 且属于配置中的接码站长用户名）
     * UPDATE accounts.query_count（自增 1，限定单条）
     * INSERT code_query_log
+    * SELECT settings（仅读站长的接码凭证全局开关）
     * SELECT extractor_rules WHERE enabled=1
     * SELECT COUNT(*) code_query_log（限流读 / 失败计数读）
     * DELETE code_query_log（仅按"超出保留期"清理，不能定向删除）
@@ -28,7 +29,11 @@ from pathlib import Path
 from typing import List, Optional
 
 from core.models import Account
-from database.db_manager import DatabaseManager, get_data_dir
+from database.db_manager import (
+    CODE_RECEIVER_REQUIRE_TOKEN_KEY,
+    DatabaseManager,
+    get_data_dir,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -112,19 +117,43 @@ class CodeReceiverDB:
     # ── 读：公开账号查询 ─────────────────────────────────────────
 
     def lookup_public_account(
-        self, email: str, category: str, access_token: Optional[str] = None,
+        self,
+        email: str,
+        category: str,
+        access_token: Optional[str] = None,
+        require_access_token: bool = True,
     ) -> Optional[Account]:
-        """前台输入"邮箱 + 凭证"时调用：取站长名下、公开、允许此分类、
-        且 ``access_token`` 完全匹配的账号。
+        """取站长名下、公开、允许此分类的账号。
 
-        v8 起 ``access_token`` 是**必填**——不传 / 传空 / 传错 → ``None``，
-        让上层把它当 ``auth_failed`` 计入限流锁定。
+        默认 ``require_access_token=True`` 保持 v8+ 行为：还必须匹配分类凭证。
+        只有站长关闭全局开关时，接码入口会传 ``False``，此时仍保留 owner /
+        is_public / 分类校验。
         """
-        if not email or not category or not access_token:
+        if not email or not category:
+            return None
+        if require_access_token and not access_token:
             return None
         return self._db.get_public_account_for_lookup(
-            self.owner_username, email, category, access_token=access_token,
+            self.owner_username,
+            email,
+            category,
+            access_token=access_token,
+            require_access_token=require_access_token,
         )
+
+    def credentials_required(self) -> bool:
+        """读取站长全局开关；缺失或异常时默认要求凭证。"""
+        try:
+            owner = self._db.get_user_by_username(self.owner_username)
+            if not owner:
+                return True
+            value = self._db.get_setting(
+                int(owner["id"]), CODE_RECEIVER_REQUIRE_TOKEN_KEY, "1",
+            )
+            return str(value or "1").strip() != "0"
+        except Exception:
+            logger.exception("读取接码凭证开关失败，按 require_token=True 处理")
+            return True
 
     def diagnose_lookup_failure(self, email: str, category: str) -> dict:
         """``lookup_public_account`` 返回 None 时调用，告诉站长**到底是哪一步**没满足。

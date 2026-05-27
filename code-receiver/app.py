@@ -544,10 +544,14 @@ def public_config() -> dict:
 
     **绝不**返回 secret、owner、限流阈值等可被反推内部策略的字段。
     """
+    credentials_required = _db.credentials_required()
     return {
         "turnstile": {
             "enabled": TURNSTILE_ENABLED,
             "sitekey": TURNSTILE_SITEKEY if TURNSTILE_ENABLED else "",
+        },
+        "credentials": {
+            "required": credentials_required,
         },
         "version": _APP_VERSION,
     }
@@ -578,6 +582,7 @@ def lookup(req: LookupRequest, request: Request) -> JSONResponse:
     source = "public"
     email_for_log = ""
     inflight_started = False  # 限流 in-flight 是否已登记，决定 finally 是否 end
+    require_token = True
 
     try:
         # 1) 解析输入（解析失败仍按 IP 维度计入限流，避免畸形请求蹭算力）。
@@ -600,11 +605,12 @@ def lookup(req: LookupRequest, request: Request) -> JSONResponse:
                 inflight_started = True
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
         email_for_log = cred.email
+        require_token = _db.credentials_required()
 
         # 1.5) v8 强制双因子：缺凭证 → 401 直接提示（不浪费 IMAP 调用）。
         # 用 401 而非 403/404，让前端能精准把"请补凭证"提示出来，与
         # 真实"未授权"区分。计入 IP 限流防止"撞邮箱+空 token"扫描。
-        if cred.needs_token or not cred.access_token:
+        if require_token and (cred.needs_token or not cred.access_token):
             error_kind = "token_required"
             pre_decision = _limiter.begin(ip=ip, email=cred.email)
             if pre_decision.allowed:
@@ -643,13 +649,21 @@ def lookup(req: LookupRequest, request: Request) -> JSONResponse:
             )
         inflight_started = True
 
-        # 3) 查接码白名单 — 必须存在 & is_public=1 & 分类匹配 & token 正确
-        # 用 access_token 参数一次性走 DB 端的"白名单 + 凭证"复合校验；
-        # token 错误时返回 None 与"邮箱根本不在白名单"形态相同，避免给攻击者
-        # 凭借响应差异区分"该邮箱存在但 token 错"和"该邮箱根本没加白名单"。
-        account = _db.lookup_public_account(
-            cred.email, req.category, access_token=cred.access_token,
-        )
+        # 3) 查接码白名单 — 必须存在 & is_public=1 & 分类匹配；开启凭证验证时
+        # 还必须 token 正确。token 错误时返回 None 与"邮箱根本不在白名单"
+        # 形态相同，避免给攻击者凭借响应差异区分"该邮箱存在但 token 错"
+        # 和"该邮箱根本没加白名单"。
+        if require_token:
+            account = _db.lookup_public_account(
+                cred.email, req.category, access_token=cred.access_token,
+            )
+        else:
+            account = _db.lookup_public_account(
+                cred.email,
+                req.category,
+                access_token=cred.access_token,
+                require_access_token=False,
+            )
         if not account:
             # 站长侧日志：把"为什么没命中"细化打到 logger，方便 docker logs 排错。
             # 用户响应里仍然只暴露统一的 not_authorized，避免攻击者盲注探测白名单。
@@ -661,7 +675,7 @@ def lookup(req: LookupRequest, request: Request) -> JSONResponse:
                 # 落 error_kind=auth_failed 让 FailureLocker 把它当"凭据爆破"
                 # 计入 IP 锁定（30 次/h 后该 IP 5 分钟不能再查任何邮箱）。
                 reason = (diag.get("reason") or "unknown").strip()
-                is_token_failure = (
+                is_token_failure = require_token and (
                     reason not in {
                         "no_owner_user", "no_account",
                         "not_public", "category_mismatch",

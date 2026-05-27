@@ -9,6 +9,7 @@
   var resultEl = document.getElementById('result');
   var themeBtn = document.getElementById('theme-toggle');
   var LOOKUP_POLL_DELAYS_MS = [1000, 1500, 2000, 3000, 5000, 7000, 10000];
+  var CREDENTIALS = { required: true };
 
   /* ── 粘贴拆分：用户把整段「邮箱----凭证」粘到任一框时自动切开 ── */
   // 触发场景：站长在管理端复制 "name@x.com----Ab3xK9" 让用户一次粘。
@@ -28,10 +29,10 @@
   }
   function applyEmailTokenSplit(parts) {
     inputEl.value = parts.email;
-    if (tokenEl) tokenEl.value = parts.token.slice(0, 6);
+    if (tokenEl) tokenEl.value = CREDENTIALS.required ? parts.token.slice(0, 6) : '';
     applyCategoryFromToken(parts.token);
     // 拆分后焦点回到 submit，方便直接回车
-    if (parts.token && parts.token.length >= 6) {
+    if (!CREDENTIALS.required || (parts.token && parts.token.length >= 6)) {
       btn.focus();
     } else if (tokenEl) {
       tokenEl.focus();
@@ -72,6 +73,45 @@
     if (!category) return;
     var radio = document.querySelector('input[name="category"][value="' + category + '"]');
     if (radio) radio.checked = true;
+  }
+
+  function readyHint() {
+    return CREDENTIALS.required
+      ? '输入邮箱与站长分发的 6 位凭证后点击"查询"即可'
+      : '输入已加入接码白名单的邮箱后点击"查询"即可';
+  }
+
+  function applyCredentialsMode() {
+    var required = !!CREDENTIALS.required;
+    document.body.dataset.credentialsRequired = required ? '1' : '0';
+    if (tokenEl) {
+      tokenEl.hidden = !required;
+      tokenEl.required = required;
+      if (!required) tokenEl.value = '';
+    }
+    inputEl.placeholder = required
+      ? '邮箱地址 · 例：name@outlook.com'
+      : '邮箱地址 · 无需凭证';
+    inputEl.setAttribute('aria-label', required ? '邮箱地址' : '邮箱地址（无需凭证）');
+    var brandSub = document.getElementById('brand-sub');
+    if (brandSub) {
+      brandSub.textContent = required
+        ? '输入邮箱 + 6 位凭证 · 一键提取 Cursor / ChatGPT 验证码与登录链接'
+        : '输入邮箱 · 一键提取 Cursor / ChatGPT 验证码与登录链接';
+    }
+    var hint = document.getElementById('search-hint');
+    if (hint) {
+      if (required) {
+        hint.innerHTML = '凭证由站长分发；忘记 / 失效 → 联系站长重新获取。'
+          + '也支持把分享串 <code>邮箱----凭证</code> 整段粘贴到任一框，会自动拆分。';
+      } else {
+        hint.textContent = '当前接码站已关闭凭证验证；只需输入已加入接码白名单的邮箱。';
+      }
+    }
+    var emptyTitle = resultEl.querySelector('.empty-title');
+    if (emptyTitle && emptyTitle.textContent === '准备就绪') {
+      renderEmpty('准备就绪', readyHint());
+    }
   }
 
   /* ── Cloudflare Turnstile（可选）─ 服务端 /api/config 决定是否启用 ── */
@@ -134,6 +174,10 @@
           TURNSTILE.enabled = true;
           TURNSTILE.sitekey = String(cfg.turnstile.sitekey || '');
           if (TURNSTILE.sitekey) renderTurnstile();
+        }
+        if (cfg.credentials && typeof cfg.credentials.required === 'boolean') {
+          CREDENTIALS.required = cfg.credentials.required;
+          applyCredentialsMode();
         }
         var v = String(cfg.version || '').trim();
         var tag = document.getElementById('app-version');
@@ -578,12 +622,12 @@
       inputEl.focus();
       return;
     }
-    if (!token) {
+    if (CREDENTIALS.required && !token) {
       renderError('请填写凭证', '请输入站长分发的 6 位邮箱凭证');
       if (tokenEl) tokenEl.focus();
       return;
     }
-    if (token.length !== 6) {
+    if (CREDENTIALS.required && token.length !== 6) {
       renderError('凭证长度不对', '凭证应为站长分发的 6 位字符串');
       if (tokenEl) tokenEl.focus();
       return;
@@ -612,7 +656,7 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               email: input,
-              access_token: token,
+              access_token: CREDENTIALS.required ? token : undefined,
               category: category,
               cf_token: cfToken || undefined,
               force_refresh: true,
@@ -688,7 +732,7 @@
     }
   });
 
-  renderEmpty('准备就绪', '输入邮箱与站长分发的 6 位凭证后点击"查询"即可');
+  renderEmpty('准备就绪', readyHint());
   renderRecent();
 
   bootstrapConfig();

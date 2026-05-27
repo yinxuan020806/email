@@ -37,8 +37,16 @@ from core.server_config import detect_server, get_imap_smtp
 logger = logging.getLogger(__name__)
 
 
+# 接码站是否要求邮箱凭证。默认 "1" 保持升级前的安全行为。
+CODE_RECEIVER_REQUIRE_TOKEN_KEY = "code_receiver_require_token"
+
 # 允许写入的 settings key 白名单
-ALLOWED_SETTING_KEYS = {"theme", "language", "font_size"}
+ALLOWED_SETTING_KEYS = {
+    "theme",
+    "language",
+    "font_size",
+    CODE_RECEIVER_REQUIRE_TOKEN_KEY,
+}
 
 # 允许排序的字段白名单
 SORTABLE_COLUMNS = {
@@ -1738,32 +1746,29 @@ class DatabaseManager:
         email: str,
         category: str,
         access_token: Optional[str] = None,
+        require_access_token: bool = True,
     ) -> Optional[Account]:
         """前台：按"接码站长用户名 + 邮箱地址 + 分类 + 凭证"取一个公开账号。
 
-        命中规则（前 3 项必须**同时**满足，第 4 项至少一种为真）：
+        命中规则：
         1. 邮箱属于 ``owner_username``、``is_public = 1``
-        2. ``access_token`` 与该分类 DB 中加密存储的凭证**常量时间比较**相等
-           （由调用方在 db_proxy / app 层负责 ``hmac.compare_digest``；
-           本函数返回 ``Account`` 后再校验，DB 查询本身不做 token 匹配，
-           避免把 token 直接拼进 SQL/索引引起额外侧信道）
-        3. 分类匹配（与旧版一致）：
+        2. 分类匹配（与旧版一致）：
             - ``allowed_categories = '*'``                显式允许所有分类
             - ``allowed_categories LIKE '%<category>%'`` 显式包含该分类
             - ``allowed_categories`` 为空 + ``group_name`` 含分类关键字
+        3. ``require_access_token=True`` 时，``access_token`` 还必须与该分类 DB
+           中加密存储的凭证**常量时间比较**相等。``False`` 时仅跳过这一层
+           接码凭证校验，不绕过 owner / is_public / 分类限制。
 
         命中后返回带解密的 Account；未命中返回 ``None``。
         token 校验失败时也返回 ``None``（让外层把它当 ``auth_failed`` 计入限流）。
-
-        ``access_token`` 兼容旧调用方：传 ``None`` 时**直接拒绝**，
-        以前的"只输入邮箱即可"路径已彻底关闭。调用方传 ``None`` 一定是
-        bug（旧代码没改），返回 None 让接码端走 not_authorized 分支报错。
         """
         if not (owner_username and email and category):
             return None
         # 拒绝"无 token"的查询 — 这是接码业务的关键安全收紧：
-        # 任何调用方不传 token 都按"未授权"处理，绝不退化到老行为。
-        if not access_token:
+        # 默认任何调用方不传 token 都按"未授权"处理。只有站长显式关闭
+        # code_receiver_require_token 时，接码前台才传 require_access_token=False。
+        if require_access_token and not access_token:
             return None
 
         cat = category.strip().lower()
@@ -1781,7 +1786,7 @@ class DatabaseManager:
             WHERE u.username = ?
               AND LOWER(a.email) = LOWER(?)
               AND a.is_public = 1
-              AND COALESCE(a.{token_col}, '') != ''
+              {"AND COALESCE(a." + token_col + ", '') != ''" if require_access_token else ""}
               AND (
                   a.allowed_categories = '*'
                   OR (',' || COALESCE(a.allowed_categories, '') || ',') LIKE ?
@@ -1805,6 +1810,8 @@ class DatabaseManager:
             return None
 
         acc = self._row_to_account(row)
+        if not require_access_token:
+            return acc
         # token 校验放在 Python 层用 hmac.compare_digest 做常量时间比较——
         # 不放进 SQL 是为了：
         # 1. 避免 token 字符串出现在 SQLite 查询日志 / EXPLAIN 计划里
