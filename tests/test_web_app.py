@@ -481,8 +481,8 @@ def test_send_email_rejects_crlf_injection(client):
 def test_account_email_normalized_lowercase_on_import(client):
     """import 同一邮箱不同大小写应会被按同一账号处理。
 
-    预期：同名不同 case 的第二次 import，在 ``skip_duplicate=True`` 下被
-    skipped；同时返回列表里只看到一个小写化后的账号。
+    预期：同名不同 case 的第二次 import，在 ``skip_duplicate=True`` 下按邮箱
+    更新旧账号；同时返回列表里只看到一个小写化后的账号。
     """
     r = client.post("/api/accounts/import", json={
         "text": "User@Example.com----pwd1",
@@ -497,12 +497,62 @@ def test_account_email_normalized_lowercase_on_import(client):
         "group": "默认分组", "skip_duplicate": True,
     })
     assert r.status_code == 200
-    assert r.json()["skipped"] == 1
-    assert r.json()["success"] == 0
+    assert r.json()["updated"] == 1
+    assert r.json()["success"] == 1
 
     accs = client.get("/api/accounts").json()
     assert len(accs) == 1
     assert accs[0]["email"] == "user@example.com"
+    assert accs[0]["password"] == "pwd2"
+
+
+def test_import_replaces_same_email_credentials(client):
+    """同邮箱再次导入时，用最新密码 / OAuth 凭据覆盖旧账号。"""
+    r1 = client.post("/api/accounts/import", json={
+        "text": "dup@outlook.com----oldpwd----old-client----old-rt----OldGroup",
+        "group": "默认分组", "skip_duplicate": True,
+    })
+    assert r1.status_code == 200
+    assert r1.json()["created"] == 1
+
+    r2 = client.post("/api/accounts/import", json={
+        "text": "DUP@OUTLOOK.COM----newpwd----new-client----new-rt----NewGroup",
+        "group": "默认分组", "skip_duplicate": True,
+    })
+    assert r2.status_code == 200
+    assert r2.json()["updated"] == 1
+
+    accs = client.get("/api/accounts").json()
+    assert len(accs) == 1
+    acc = accs[0]
+    assert acc["email"] == "dup@outlook.com"
+    assert acc["password"] == "newpwd"
+    assert acc["group"] == "NewGroup"
+    assert acc["client_id"] == "new-client"
+    assert acc["type"] == "OAuth2"
+    full = client.get(f"/api/accounts/{acc['id']}").json()
+    assert full["refresh_token"] == "new-rt"
+
+
+def test_manual_update_account_credentials(client):
+    client.post("/api/accounts/import", json={
+        "text": "manual@outlook.com----oldpwd",
+        "group": "默认分组", "skip_duplicate": True,
+    })
+    acc = client.get("/api/accounts").json()[0]
+
+    r = client.put(f"/api/accounts/{acc['id']}/credentials", json={
+        "password": "newpwd",
+        "client_id": "cid-1",
+        "refresh_token": "rt-1",
+    })
+    assert r.status_code == 200
+
+    full = client.get(f"/api/accounts/{acc['id']}").json()
+    assert full["password"] == "newpwd"
+    assert full["client_id"] == "cid-1"
+    assert full["refresh_token"] == "rt-1"
+    assert full["type"] == "OAuth2"
 
 
 # ── cookie set / clear 属性对齐 ──

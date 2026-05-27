@@ -138,7 +138,8 @@ email----password----client_id----refresh_token----组名
 email----password----client_id----refresh_token$$--------组名
 
 · 行末附带组名时该账号自动归入指定分组（不存在则自动创建）
-· 多账号可用换行或 $$ 分隔</pre>
+· 多账号可用换行或 $$ 分隔
+· 勾选去重时，同邮箱会用本次导入的密码 / OAuth 凭据覆盖旧账号</pre>
     </details>
     <div class="form-group"><textarea id="importText" rows="8" spellcheck="false" autocomplete="off" placeholder="example@outlook.com----password123----组名"></textarea></div>
     <div class="form-row">
@@ -147,7 +148,7 @@ email----password----client_id----refresh_token$$--------组名
         <select id="importGroup"></select>
       </div>
       <div class="form-group" style="display:flex;align-items:flex-end;padding-bottom:0">
-        <label class="form-check"><input type="checkbox" id="importDedup" checked> <span data-i18n="modal_import_dedup">跳过已存在（去重）</span></label>
+        <label class="form-check"><input type="checkbox" id="importDedup" checked> <span data-i18n="modal_import_dedup">同邮箱覆盖旧账号（去重）</span></label>
       </div>
     </div>
   </div>
@@ -155,6 +156,47 @@ email----password----client_id----refresh_token$$--------组名
     <button class="btn btn-o" id="btnImportClipboard" data-i18n="btn_clipboard">从剪贴板</button>
     <button class="btn btn-o" data-close="importModal" data-i18n="btn_cancel">取消</button>
     <button class="btn btn-p" id="btnDoImport" data-i18n="btn_import">导入</button>
+  </div>
+</div></div>
+
+<!-- Edit mailbox credentials -->
+<div class="modal-bg" id="credentialsModal"><div class="modal" style="width:560px">
+  <div class="modal-h"><h3 data-i18n="modal_credentials_title">编辑邮箱凭据</h3><button class="modal-close" data-close="credentialsModal">×</button></div>
+  <div class="modal-body">
+    <input id="credAccountId" type="hidden">
+    <div class="form-group">
+      <label data-i18n="d_email">邮箱</label>
+      <input id="credEmail" type="text" readonly>
+    </div>
+    <div class="form-group">
+      <label data-i18n="d_password">密码</label>
+      <input id="credPassword" type="text" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="form-group">
+      <label data-i18n="d_client_id">Client ID</label>
+      <input id="credClientId" type="text" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="form-group">
+      <label data-i18n="d_refresh_token">Refresh Token</label>
+      <textarea id="credRefreshToken" rows="5" spellcheck="false" autocomplete="off"></textarea>
+    </div>
+    <div id="credCodeTokenGroup" style="display:none">
+      <div class="form-row">
+        <div class="form-group">
+          <label data-i18n="credentials_cursor_token">Cursor 接码凭证</label>
+          <input id="credTokenCursor" type="text" maxlength="32" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="form-group">
+          <label data-i18n="credentials_openai_token">GPT 接码凭证</label>
+          <input id="credTokenOpenai" type="text" maxlength="32" autocomplete="off" spellcheck="false">
+        </div>
+      </div>
+    </div>
+    <div id="credErr" style="font-size:12px;color:var(--danger);min-height:16px"></div>
+  </div>
+  <div class="modal-foot">
+    <button class="btn btn-o" data-close="credentialsModal" data-i18n="btn_cancel">取消</button>
+    <button class="btn btn-p" id="btnSaveCredentials" data-i18n="btn_save">保存</button>
   </div>
 </div></div>
 

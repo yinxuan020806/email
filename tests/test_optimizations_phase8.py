@@ -419,7 +419,7 @@ def test_dashboard_endpoint_uses_aggregated_path(client):
 
 
 def test_import_uses_efficient_email_lookup(client):
-    """``import_accounts`` 必须走 ``get_existing_emails`` 而**不是** ``get_all_accounts``。
+    """``import_accounts`` 必须走 ``get_existing_email_ids`` 而**不是** ``get_all_accounts``。
 
     类似 O8：旧实现解密整张表只为读 email 字段做去重，本测试钉住新路径。
     """
@@ -429,7 +429,7 @@ def test_import_uses_efficient_email_lookup(client):
         "text": "first@g.com----p", "group": "默认分组", "skip_duplicate": False,
     })
 
-    real_get_emails = web_app.db.get_existing_emails
+    real_get_emails = web_app.db.get_existing_email_ids
     real_get_all = web_app.db.get_all_accounts
     emails_calls: list = []
     all_calls: list = []
@@ -442,7 +442,7 @@ def test_import_uses_efficient_email_lookup(client):
         all_calls.append((a, kw))
         return real_get_all(*a, **kw)
 
-    with patch.object(web_app.db, "get_existing_emails", side_effect=spy_emails), \
+    with patch.object(web_app.db, "get_existing_email_ids", side_effect=spy_emails), \
          patch.object(web_app.db, "get_all_accounts", side_effect=spy_all):
         r = client.post("/api/accounts/import", json={
             "text": "second@g.com----p\nthird@g.com----p",
@@ -451,7 +451,7 @@ def test_import_uses_efficient_email_lookup(client):
         })
     assert r.status_code == 200
     assert r.json()["success"] == 2
-    assert emails_calls, "import 去重应调用 get_existing_emails"
+    assert emails_calls, "import 去重应调用 get_existing_email_ids"
     assert not all_calls, (
         "import **不应**调用 get_all_accounts（会触发整张表 Fernet 解密）"
     )
@@ -461,14 +461,14 @@ def test_import_skip_duplicate_false_does_not_query_emails(client):
     """``skip_duplicate=False`` 时连去重查询都不需要发起。"""
     import web_app
 
-    real_get_emails = web_app.db.get_existing_emails
+    real_get_emails = web_app.db.get_existing_email_ids
     calls: list = []
 
     def spy(*a, **kw):
         calls.append((a, kw))
         return real_get_emails(*a, **kw)
 
-    with patch.object(web_app.db, "get_existing_emails", side_effect=spy):
+    with patch.object(web_app.db, "get_existing_email_ids", side_effect=spy):
         r = client.post("/api/accounts/import", json={
             "text": "noskip@g.com----p",
             "group": "默认分组",

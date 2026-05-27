@@ -259,6 +259,38 @@ def test_rotate_single_token_blocked_for_non_owner(normal_client):
     assert r.status_code == 403
 
 
+# ── /api/accounts/{id}/access-tokens ───────────────────────────────
+
+
+def test_manual_update_access_tokens(owner_client):
+    """站长可以手动指定 Cursor/GPT 接码凭证。"""
+    aid = _import_one_account(owner_client, "manual-token@outlook.com", group="cursor+gpt")
+    owner_client.post(
+        "/api/accounts/set-public",
+        json={"ids": [aid], "is_public": True, "allowed_categories": ["cursor", "openai"]},
+    )
+
+    r = owner_client.put(
+        f"/api/accounts/{aid}/access-tokens",
+        json={"access_tokens": {"cursor": "Cabc23", "openai": "Gdef45"}},
+    )
+    assert r.status_code == 200, r.text
+
+    row = owner_client.get(f"/api/accounts/{aid}").json()
+    assert row["access_tokens"]["cursor"] == "Cabc23"
+    assert row["access_tokens"]["openai"] == "Gdef45"
+
+
+def test_manual_update_access_token_rejects_wrong_prefix(owner_client):
+    aid = _import_one_account(owner_client, "bad-token@outlook.com", group="cursor")
+    r = owner_client.put(
+        f"/api/accounts/{aid}/access-tokens",
+        json={"access_tokens": {"cursor": "Gabc23"}},
+    )
+    assert r.status_code == 400
+    assert "必须以 C 开头" in r.text
+
+
 # ── /api/accounts/rotate-tokens-bulk ────────────────────────────────
 
 

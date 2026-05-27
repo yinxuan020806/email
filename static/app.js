@@ -612,6 +612,16 @@ function tokenEntriesForAccount(account) {
   );
 }
 
+function tokenMapForAccount(account) {
+  const out = { cursor: '', openai: '' };
+  for (const entry of tokenEntriesForAccount(account || {})) {
+    if (entry.category === 'cursor' || entry.category === 'openai') {
+      out[entry.category] = entry.token;
+    }
+  }
+  return out;
+}
+
 function tokenLinesFromResponse(tokens) {
   const lines = [];
   for (const [id, value] of Object.entries(tokens || {})) {
@@ -831,6 +841,10 @@ function showRowMoreMenu(anchorBtn, account) {
   items.push({
     icon: '📋', label: t('op_detail'),
     onclick: () => showDetail(account.id),
+  });
+  items.push({
+    icon: '✎', label: t('op_edit_credentials'),
+    onclick: () => showCredentialsModal(account),
   });
   items.push({
     icon: '🆔', label: t('op_copy_email'),
@@ -1407,6 +1421,65 @@ async function editRemark(id, oldVal) {
   toast(t('toast_remark_saved'), 'success');
 }
 
+async function showCredentialsModal(account) {
+  try {
+    const a = await api.get(`/api/accounts/${account.id}`);
+    $('credAccountId').value = a.id;
+    $('credEmail').value = a.email || '';
+    $('credPassword').value = a.password || '';
+    $('credClientId').value = a.client_id || '';
+    $('credRefreshToken').value = a.refresh_token || '';
+    const tokenGroup = $('credCodeTokenGroup');
+    if (tokenGroup) {
+      tokenGroup.style.display = S.user && S.user.is_owner ? '' : 'none';
+      const tokens = tokenMapForAccount(a);
+      $('credTokenCursor').value = tokens.cursor || '';
+      $('credTokenOpenai').value = tokens.openai || '';
+    }
+    $('credErr').textContent = '';
+    openModal('credentialsModal');
+    setTimeout(() => {
+      try { $('credPassword').focus(); } catch (_) {}
+    }, 50);
+  } catch (e) {
+    toast(t('toast_load_fail') + (e?.message || ''), 'error');
+  }
+}
+
+async function saveCredentials() {
+  const id = Number($('credAccountId').value || 0);
+  if (!id) return;
+  const body = {
+    password: $('credPassword').value,
+    client_id: $('credClientId').value.trim() || null,
+    refresh_token: $('credRefreshToken').value.trim() || null,
+  };
+  const hasClient = !!body.client_id;
+  const hasRefresh = !!body.refresh_token;
+  const errEl = $('credErr');
+  errEl.textContent = '';
+  if (hasClient !== hasRefresh) {
+    errEl.textContent = t('credentials_oauth_pair_required');
+    return;
+  }
+  try {
+    if (S.user && S.user.is_owner && $('credCodeTokenGroup').style.display !== 'none') {
+      await api.put(`/api/accounts/${id}/access-tokens`, {
+        access_tokens: {
+          cursor: $('credTokenCursor').value.trim(),
+          openai: $('credTokenOpenai').value.trim(),
+        },
+      });
+    }
+    await api.put(`/api/accounts/${id}/credentials`, body);
+    closeModal('credentialsModal');
+    await loadAccounts();
+    toast(t('toast_credentials_saved'), 'success');
+  } catch (e) {
+    errEl.textContent = e?.message || t('toast_load_fail');
+  }
+}
+
 async function deleteSingle(id) {
   if (!confirm(t('confirm_del_one'))) return;
   await api.post('/api/accounts/delete', { ids: [id] });
@@ -1489,6 +1562,9 @@ async function doImport() {
   try {
     const r = await api.post('/api/accounts/import', { text, group, skip_duplicate: dedup });
     let msg = `OK: ${r.success} | FAIL: ${r.fail}`;
+    if (typeof r.created === 'number' || typeof r.updated === 'number') {
+      msg += ` | NEW: ${r.created || 0} | UPDATE: ${r.updated || 0}`;
+    }
     if (r.skipped) msg += ` | SKIP: ${r.skipped}`;
     if (r.groups_created && r.groups_created.length) {
       msg += ` | ${t('toast_groups_created', { n: r.groups_created.length })}: ${r.groups_created.join(', ')}`;
@@ -3432,6 +3508,7 @@ $('btnUnsetPublic').addEventListener('click', () => batchSetPublic(false));
 $('btnDelete').addEventListener('click', deleteSelected);
 $('btnImportClipboard').addEventListener('click', importFromClipboard);
 $('btnDoImport').addEventListener('click', doImport);
+$('btnSaveCredentials').addEventListener('click', saveCredentials);
 $('btnRefreshEmails').addEventListener('click', () => {
   // UI 兜底：点击瞬间禁用 1.5s，与 EMAIL_LIST_MIN_INTERVAL_MS 对齐。
   // 即使浏览器扩展 / 用户疯狂点击，DOM 层也只能每 1.5s 触发一次 loadEmails。

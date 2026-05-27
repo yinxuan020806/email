@@ -79,9 +79,14 @@
         'email----password----client_id----refresh_token----组名\n' +
         'email----password----client_id----refresh_token$$--------组名\n\n' +
         '· 行末附带组名时该账号自动归入指定分组（不存在则自动创建）\n' +
-        '· 多账号可用换行或 $$ 分隔',
+        '· 多账号可用换行或 $$ 分隔\n' +
+        '· 勾选去重时，同邮箱会用本次导入的密码 / OAuth 凭据覆盖旧账号',
       modal_import_group: '默认分组（仅对未指定组名的账号生效）',
-      modal_import_dedup: '跳过已存在（去重）',
+      modal_import_dedup: '同邮箱覆盖旧账号（去重）',
+      modal_credentials_title: '编辑邮箱凭据',
+      credentials_oauth_pair_required: 'Client ID 与 Refresh Token 要么都填写，要么都留空',
+      credentials_cursor_token: 'Cursor 接码凭证',
+      credentials_openai_token: 'GPT 接码凭证',
       modal_export_title: '导出账号',
       modal_export_warn: '⚠ 导出文件包含所有账号的明文密码与 refresh_token，请妥善保管。',
       modal_export_range: '导出范围',
@@ -294,6 +299,7 @@
       op_copy_full_aria: '复制完整导入串',
       op_more: '更多操作',
       op_detail: '账号详情',
+      op_edit_credentials: '编辑邮箱凭据',
       op_copy_email: '复制邮箱',
       op_copy_pwd: '复制密码',
       op_remark_edit: '编辑备注',
@@ -313,6 +319,7 @@
       toast_del_ok: '已删除',
       toast_del_fail: '删除失败',
       toast_remark_saved: '备注已保存',
+      toast_credentials_saved: '邮箱凭据已保存',
       toast_export_started: '导出成功',
       toast_export_failed: '导出失败：',
       toast_groups_created: '新建 {n} 个分组',
@@ -412,9 +419,14 @@
         'email----password----client_id----refresh_token----<group>\n' +
         'email----password----client_id----refresh_token$$--------<group>\n\n' +
         '· Trailing group name puts the account in that group (created if missing)\n' +
-        '· Multiple accounts can be split by newline or $$',
+        '· Multiple accounts can be split by newline or $$\n' +
+        '· When dedupe is enabled, same-email rows replace the old password / OAuth credentials',
       modal_import_group: 'Default group (only used if a row has no group)',
-      modal_import_dedup: 'Skip duplicates',
+      modal_import_dedup: 'Replace same-email accounts',
+      modal_credentials_title: 'Edit Mailbox Credentials',
+      credentials_oauth_pair_required: 'Client ID and Refresh Token must both be filled, or both empty',
+      credentials_cursor_token: 'Cursor lookup token',
+      credentials_openai_token: 'GPT lookup token',
       modal_export_title: 'Export Accounts',
       modal_export_warn: '⚠ Export contains plaintext passwords and refresh tokens. Keep it secure.',
       modal_export_range: 'Range',
@@ -627,6 +639,7 @@
       op_copy_full_aria: 'Copy full import line',
       op_more: 'More actions',
       op_detail: 'Account detail',
+      op_edit_credentials: 'Edit credentials',
       op_copy_email: 'Copy email',
       op_copy_pwd: 'Copy password',
       op_remark_edit: 'Edit remark',
@@ -646,6 +659,7 @@
       toast_del_ok: 'Deleted',
       toast_del_fail: 'Delete failed',
       toast_remark_saved: 'Saved',
+      toast_credentials_saved: 'Mailbox credentials saved',
       toast_export_started: 'Export OK',
       toast_export_failed: 'Export failed: ',
       toast_groups_created: '{n} new groups created',

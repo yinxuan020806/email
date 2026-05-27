@@ -24,9 +24,12 @@ from typing import Iterator, List, Optional
 
 from core.models import Account
 from core.security import (
+    ACCESS_TOKEN_ALPHABET,
+    ACCESS_TOKEN_LENGTH,
     SecretBox,
     SecretBoxDecryptError,
     generate_access_token,
+    normalize_access_token,
 )
 from core.server_config import detect_server, get_imap_smtp
 
@@ -885,6 +888,106 @@ class DatabaseManager:
         except sqlite3.IntegrityError:
             return False, "邮箱已存在"
 
+    def upsert_account_by_email(
+        self,
+        owner_id: int,
+        email: str,
+        password: str,
+        group: str = "默认分组",
+        imap_server: Optional[str] = None,
+        imap_port: int = 993,
+        client_id: Optional[str] = None,
+        refresh_token: Optional[str] = None,
+    ) -> tuple[bool, str, bool]:
+        """按邮箱新增或替换账号凭据。
+
+        返回 ``(ok, message, created)``；``created=False`` 表示命中同邮箱旧账号
+        并已用本次导入的密码 / OAuth 凭据覆盖。账号的备注、接码白名单与接码
+        access_token 保留，避免导入新邮箱凭据时误废已分发的接码链接。
+        """
+        email = (email or "").strip().lower()
+        if not email or "@" not in email:
+            return False, "邮箱格式不合法", False
+
+        box = SecretBox.instance()
+        if not imap_server:
+            imap_server, smtp_server = get_imap_smtp(email)
+        else:
+            profile = detect_server(email)
+            if profile and profile.smtp_host:
+                smtp_server = profile.smtp_host
+            elif imap_server.lower().startswith("imap."):
+                smtp_server = "smtp." + imap_server[len("imap."):]
+            else:
+                smtp_server = imap_server.replace("imap", "smtp", 1)
+
+        account_type = "OAuth2" if client_id and refresh_token else "普通"
+        group = (group or "默认分组").strip() or "默认分组"
+        enc_password = box.encrypt(password) or ""
+        enc_refresh_token = box.encrypt(refresh_token)
+
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO groups (owner_id, name) VALUES (?, ?)",
+                (owner_id, group),
+            )
+            cur = conn.execute(
+                "SELECT id FROM accounts WHERE owner_id = ? AND email = ?",
+                (owner_id, email),
+            )
+            row = cur.fetchone()
+            if row:
+                conn.execute(
+                    """
+                    UPDATE accounts
+                    SET password = ?, group_name = ?, imap_server = ?,
+                        imap_port = ?, smtp_server = ?, client_id = ?,
+                        refresh_token = ?, account_type = ?,
+                        status = '未检测', last_check = NULL
+                    WHERE id = ? AND owner_id = ?
+                    """,
+                    (
+                        enc_password,
+                        group,
+                        imap_server,
+                        imap_port,
+                        smtp_server,
+                        client_id,
+                        enc_refresh_token,
+                        account_type,
+                        row[0],
+                        owner_id,
+                    ),
+                )
+                self._bump_account_rev_in_conn(conn, owner_id)
+                return True, "已更新同邮箱账号", False
+
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO accounts (
+                        owner_id, email, password, group_name, imap_server, imap_port,
+                        smtp_server, client_id, refresh_token, account_type
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        owner_id,
+                        email,
+                        enc_password,
+                        group,
+                        imap_server,
+                        imap_port,
+                        smtp_server,
+                        client_id,
+                        enc_refresh_token,
+                        account_type,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                return False, "邮箱已存在", False
+            self._bump_account_rev_in_conn(conn, owner_id)
+            return True, "添加成功", True
+
     _ACCOUNT_COLUMN_NAMES = (
         "id", "email", "password", "group_name", "status", "account_type",
         "imap_server", "imap_port", "smtp_server", "smtp_port",
@@ -1055,6 +1158,43 @@ class DatabaseManager:
                 self._bump_account_rev_in_conn(conn, owner_id)
             return ok
 
+    def update_account_credentials(
+        self,
+        owner_id: int,
+        account_id: int,
+        password: str,
+        client_id: Optional[str] = None,
+        refresh_token: Optional[str] = None,
+    ) -> bool:
+        """手动更新账号登录密码与 OAuth 凭据。"""
+        box = SecretBox.instance()
+        clean_client_id = (client_id or "").strip() or None
+        clean_refresh_token = (refresh_token or "").strip() or None
+        account_type = (
+            "OAuth2" if clean_client_id and clean_refresh_token else "普通"
+        )
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE accounts
+                SET password = ?, client_id = ?, refresh_token = ?,
+                    account_type = ?, status = '未检测', last_check = NULL
+                WHERE id = ? AND owner_id = ?
+                """,
+                (
+                    box.encrypt(password or "") or "",
+                    clean_client_id,
+                    box.encrypt(clean_refresh_token),
+                    account_type,
+                    account_id,
+                    owner_id,
+                ),
+            )
+            ok = cur.rowcount > 0
+            if ok:
+                self._bump_account_rev_in_conn(conn, owner_id)
+            return ok
+
     def update_account_status(
         self, owner_id: int, account_id: int, status: str
     ) -> bool:
@@ -1165,6 +1305,15 @@ class DatabaseManager:
                 (owner_id,),
             )
             return {row[0] for row in cur.fetchall() if row[0]}
+
+    def get_existing_email_ids(self, owner_id: int) -> dict[str, int]:
+        """返回当前用户账号 email → account_id 映射，不解密任何敏感字段。"""
+        with self._connect() as conn:
+            cur = conn.execute(
+                "SELECT LOWER(email), id FROM accounts WHERE owner_id = ?",
+                (owner_id,),
+            )
+            return {row[0]: int(row[1]) for row in cur.fetchall() if row[0]}
 
     def get_dashboard_stats(self, owner_id: int) -> dict:
         """仪表盘数据：纯 SQL 聚合，不解密任何密文。
@@ -1426,8 +1575,8 @@ class DatabaseManager:
     #   - 想撤销下游访问 → 旋转该邮箱的凭证，老链接立即失效
     #   - 真实邮箱密码 / refresh_token 全程不动，无需重新跑改密 / 重授权
     #
-    # 这里只暴露"旋转"语义（生成新随机值并覆盖），**不**暴露"用户指定值"
-    # ——避免站长贪图好记把多个邮箱设成同一个弱凭证导致跨账号串号风险。
+    # 默认暴露"旋转"语义（生成新随机值并覆盖）。手动指定值只给管理端站长
+    # 使用，并在 update_account_access_tokens 中强制分类前缀、长度和字符集。
 
     def rotate_access_token(
         self,
@@ -1535,6 +1684,53 @@ class DatabaseManager:
                     result[int(aid)] = per_account
             self._bump_account_rev_in_conn(conn, owner_id)
         return result
+
+    def update_account_access_tokens(
+        self,
+        owner_id: int,
+        account_id: int,
+        access_tokens: dict[str, str],
+    ) -> tuple[bool, str]:
+        """手动更新单个账号的接码凭证（Cursor/GPT 分类 token）。"""
+        cleaned: dict[str, str] = {}
+        for raw_category, raw_token in (access_tokens or {}).items():
+            category = (raw_category or "").strip().lower()
+            column = _token_column_for_category(category)
+            if not column:
+                return False, "不支持的凭证分类"
+            token = normalize_access_token(raw_token)
+            if token:
+                prefix = CODE_ACCESS_TOKEN_PREFIXES[category]
+                if len(token) != ACCESS_TOKEN_LENGTH:
+                    return False, f"{category} 凭证必须是 {ACCESS_TOKEN_LENGTH} 位"
+                if not token.startswith(prefix):
+                    return False, f"{category} 凭证必须以 {prefix} 开头"
+                if any(ch not in ACCESS_TOKEN_ALPHABET for ch in token):
+                    return False, f"{category} 凭证包含非法字符"
+            cleaned[category] = token
+
+        if not cleaned:
+            return False, "未提供凭证"
+
+        box = SecretBox.instance()
+        assignments: list[str] = []
+        values: list[Optional[str]] = []
+        for category, token in cleaned.items():
+            column = CODE_ACCESS_TOKEN_COLUMNS[category]
+            assignments.append(f"{column} = ?")
+            values.append(box.encrypt(token) or "")
+
+        with self._connect() as conn:
+            cur = conn.execute(
+                f"UPDATE accounts SET {', '.join(assignments)} "
+                "WHERE id = ? AND owner_id = ?",
+                (*values, account_id, owner_id),
+            )
+            ok = cur.rowcount > 0
+            if ok:
+                self._bump_account_rev_in_conn(conn, owner_id)
+                return True, "更新成功"
+            return False, "Account not found"
 
     def get_public_account_for_lookup(
         self,

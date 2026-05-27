@@ -479,6 +479,8 @@ class ImportRequest(BaseModel):
     # 撑爆 worker 内存，特别是注册开放且 body 解析也走 worker 的部署。
     text: str = Field(min_length=1, max_length=2 * 1024 * 1024)
     group: str = "默认分组"
+    # 历史字段名叫 skip_duplicate；前端现在把它作为"按邮箱去重并覆盖旧凭据"
+    # 的开关继续传入，保留字段名避免破坏旧客户端。
     skip_duplicate: bool = True
 
     @field_validator("group")
@@ -546,6 +548,24 @@ class GroupUpdate(BaseModel):
 
 class RemarkUpdate(BaseModel):
     remark: str = Field(default="", max_length=500)
+
+
+class AccountCredentialsUpdate(BaseModel):
+    password: str = Field(default="", max_length=1024)
+    client_id: Optional[str] = Field(default=None, max_length=512)
+    refresh_token: Optional[str] = Field(default=None, max_length=8192)
+
+    @field_validator("client_id", "refresh_token")
+    @classmethod
+    def _trim_optional(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+
+class AccountAccessTokensUpdate(BaseModel):
+    access_tokens: dict[str, str] = Field(default_factory=dict)
 
 
 # 单次发信最大收件人数（防止把工具变成 spam relay）。
@@ -1323,47 +1343,63 @@ def import_accounts(
     if not accounts:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "未识别到有效账号")
 
-    existing: set[str] = set()
+    existing: dict[str, int] = {}
     if req.skip_duplicate:
         # 旧实现走 ``get_all_accounts``，会把整张账号表（含 N 个 Fernet
         # 密文 password / refresh_token）全部解密一次只为读 email 字段；
         # N=10000 时是 ~2 万次 Fernet 操作，几乎是 import 接口的全部 CPU。
-        # ``get_existing_emails`` 只 ``SELECT LOWER(email)``，O(N) 但常数极小。
-        existing = db.get_existing_emails(user["id"])
+        # ``get_existing_email_ids`` 只读 email + id，不解密任何敏感字段。
+        existing = db.get_existing_email_ids(user["id"])
 
-    success = fail = skipped = 0
+    created = updated = fail = skipped = 0
     groups_created: set[str] = set()
     for data in accounts:
         email = data["email"]
-        if req.skip_duplicate and email.lower() in existing:
-            skipped += 1
-            continue
         # 单条账号自带的 group 优先级 > 表单选的全局 group
         target_group = (data.get("group") or req.group or "默认分组").strip() or "默认分组"
         if target_group != "默认分组":
             groups_created.add(target_group)
-        ok, _msg = db.add_account(
-            user["id"],
-            email,
-            data["password"],
-            target_group,
-            client_id=data.get("client_id"),
-            refresh_token=data.get("refresh_token"),
-        )
+        email_key = email.lower()
+        already_known = email_key in existing
+        if req.skip_duplicate:
+            ok, _msg, was_created = db.upsert_account_by_email(
+                user["id"],
+                email,
+                data["password"],
+                target_group,
+                client_id=data.get("client_id"),
+                refresh_token=data.get("refresh_token"),
+            )
+        else:
+            ok, _msg = db.add_account(
+                user["id"],
+                email,
+                data["password"],
+                target_group,
+                client_id=data.get("client_id"),
+                refresh_token=data.get("refresh_token"),
+            )
+            was_created = True
         if ok:
-            success += 1
-            existing.add(email.lower())
+            if req.skip_duplicate and (already_known or not was_created):
+                updated += 1
+            else:
+                created += 1
+            existing[email_key] = existing.get(email_key, 0) or -1
         else:
             fail += 1
+    success = created + updated
     db.log_audit(
         "import_accounts", user_id=user["id"], username=user["username"],
         ip=_client_ip(request), user_agent=request.headers.get("user-agent", ""),
         target=req.group,
-        detail=f"success={success},fail={fail},skipped={skipped},"
+        detail=f"success={success},created={created},updated={updated},"
+               f"fail={fail},skipped={skipped},"
                f"groups={','.join(sorted(groups_created))[:200]}",
     )
     return {
         "success": success, "fail": fail, "skipped": skipped,
+        "created": created, "updated": updated,
         "groups_created": sorted(groups_created),
     }
 
@@ -1710,6 +1746,71 @@ def update_account_remark(
         "update_account_remark", user_id=user["id"], username=user["username"],
         ip=_client_ip(request), user_agent=request.headers.get("user-agent", ""),
         target=str(account_id), detail=f"len={len(req.remark)}",
+    )
+    return {"ok": True}
+
+
+@app.put("/api/accounts/{account_id}/credentials")
+def update_account_credentials(
+    account_id: int,
+    req: AccountCredentialsUpdate,
+    request: Request,
+    user: dict = CurrentUser,
+) -> dict:
+    if not db.update_account_credentials(
+        user["id"],
+        account_id,
+        req.password,
+        client_id=req.client_id,
+        refresh_token=req.refresh_token,
+    ):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Account not found")
+    try:
+        _email_list_cache_invalidate(account_id)
+    except NameError:
+        pass
+    db.log_audit(
+        "update_account_credentials",
+        user_id=user["id"],
+        username=user["username"],
+        ip=_client_ip(request),
+        user_agent=request.headers.get("user-agent", ""),
+        target=str(account_id),
+        detail=(
+            f"password_len={len(req.password or '')},"
+            f"oauth={int(bool(req.client_id and req.refresh_token))}"
+        ),
+    )
+    return {"ok": True}
+
+
+@app.put("/api/accounts/{account_id}/access-tokens")
+def update_account_access_tokens(
+    account_id: int,
+    req: AccountAccessTokensUpdate,
+    request: Request,
+    user: dict = CurrentUser,
+) -> dict:
+    _require_code_owner(user)
+    ok, msg = db.update_account_access_tokens(
+        user["id"], account_id, req.access_tokens
+    )
+    if not ok:
+        status_code = (
+            status.HTTP_404_NOT_FOUND
+            if msg == "Account not found"
+            else status.HTTP_400_BAD_REQUEST
+        )
+        raise HTTPException(status_code, msg)
+    cats = ",".join(sorted(req.access_tokens.keys()))[:80]
+    db.log_audit(
+        "update_account_access_tokens",
+        user_id=user["id"],
+        username=user["username"],
+        ip=_client_ip(request),
+        user_agent=request.headers.get("user-agent", ""),
+        target=str(account_id),
+        detail=f"categories={cats}",
     )
     return {"ok": True}
 
