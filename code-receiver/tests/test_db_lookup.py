@@ -7,9 +7,8 @@
 - ``allowed_categories=''`` + ``group_name='cursor'``  自动推断（与管理端实际数据一致）
 - ``allowed_categories=''`` + ``group_name='默认分组'``  推断不出 → 拒绝（防误公开）
 
-v8 起 ``get_public_account_for_lookup`` 必须带 ``access_token`` 参数；
-``set_account_public(is_public=True)`` 会顺手返回自动生成的凭证明文，所有用例
-都改为先解包凭证、再用凭证发起查询。
+v9 起 ``get_public_account_for_lookup`` 必须带分类独立的 ``access_token`` 参数；
+Cursor 凭证以 C 开头，GPT/OpenAI 凭证以 G 开头。
 """
 
 from __future__ import annotations
@@ -53,14 +52,21 @@ def _create_owner_with_account(
     return user_id, acc.id
 
 
-def _make_public(db, uid: int, acc_id: int, cats=None) -> str:
-    """加入接码白名单并返回自动生成的凭证明文。"""
-    ok, token = db.set_account_public(
+def _make_public_tokens(db, uid: int, acc_id: int, cats=None) -> dict[str, str]:
+    """加入接码白名单并返回自动生成的分类凭证明文。"""
+    ok, tokens = db.set_account_public(
         uid, acc_id, is_public=True, allowed_categories=cats,
     )
     assert ok is True
-    assert token, "首次 is_public=True 必须自动生成凭证"
+    return tokens
+
+
+def _make_public(db, uid: int, acc_id: int, cats=None, category: str = "cursor") -> str:
+    tokens = _make_public_tokens(db, uid, acc_id, cats=cats)
+    token = tokens.get(category)
+    assert token, f"首次 is_public=True 必须自动生成 {category} 凭证"
     assert len(token) == 6
+    assert token[0] == ("C" if category == "cursor" else "G")
     return token
 
 
@@ -108,14 +114,19 @@ def test_lookup_via_group_name_cursor_plus_gpt(fresh_db):
     uid, acc_id = _create_owner_with_account(
         db, "xiaoxuan", "b@outlook.com", group="cursor+gpt",
     )
-    token = _make_public(db, uid, acc_id)
+    tokens = _make_public_tokens(db, uid, acc_id)
+    cursor_token = tokens["cursor"]
+    openai_token = tokens["openai"]
 
     assert db.get_public_account_for_lookup(
-        "xiaoxuan", "b@outlook.com", "cursor", access_token=token,
+        "xiaoxuan", "b@outlook.com", "cursor", access_token=cursor_token,
     ) is not None
     assert db.get_public_account_for_lookup(
-        "xiaoxuan", "b@outlook.com", "openai", access_token=token,
+        "xiaoxuan", "b@outlook.com", "openai", access_token=openai_token,
     ) is not None
+    assert db.get_public_account_for_lookup(
+        "xiaoxuan", "b@outlook.com", "cursor", access_token=openai_token,
+    ) is None
 
 
 def test_lookup_default_group_blocks_when_no_explicit(fresh_db):
@@ -123,13 +134,14 @@ def test_lookup_default_group_blocks_when_no_explicit(fresh_db):
     → 全部拒绝（防止默认分组被误公开）。"""
     db = fresh_db
     uid, acc_id = _create_owner_with_account(db, "xiaoxuan", "c@outlook.com")
-    token = _make_public(db, uid, acc_id)
+    tokens = _make_public_tokens(db, uid, acc_id)
+    assert tokens == {}
 
     assert db.get_public_account_for_lookup(
-        "xiaoxuan", "c@outlook.com", "cursor", access_token=token,
+        "xiaoxuan", "c@outlook.com", "cursor", access_token="CXXXXX",
     ) is None
     assert db.get_public_account_for_lookup(
-        "xiaoxuan", "c@outlook.com", "openai", access_token=token,
+        "xiaoxuan", "c@outlook.com", "openai", access_token="GXXXXX",
     ) is None
 
 
@@ -147,17 +159,31 @@ def test_lookup_allowed_categories_explicit_overrides(fresh_db):
     ) is None
 
 
+def test_lookup_allowed_categories_openai_only(fresh_db):
+    """显式 allowed_categories='openai' → 仅 GPT/OpenAI 命中，凭证以 G 开头。"""
+    db = fresh_db
+    uid, acc_id = _create_owner_with_account(db, "xiaoxuan", "gpt@outlook.com")
+    token = _make_public(db, uid, acc_id, cats=["openai"], category="openai")
+
+    assert db.get_public_account_for_lookup(
+        "xiaoxuan", "gpt@outlook.com", "openai", access_token=token,
+    ) is not None
+    assert db.get_public_account_for_lookup(
+        "xiaoxuan", "gpt@outlook.com", "cursor", access_token=token,
+    ) is None
+
+
 def test_lookup_wildcard_allows_all(fresh_db):
     """allowed_categories='*' → 任何分类都命中。"""
     db = fresh_db
     uid, acc_id = _create_owner_with_account(db, "xiaoxuan", "e@outlook.com")
-    token = _make_public(db, uid, acc_id, cats=["*"])
+    tokens = _make_public_tokens(db, uid, acc_id, cats=["*"])
 
     assert db.get_public_account_for_lookup(
-        "xiaoxuan", "e@outlook.com", "cursor", access_token=token,
+        "xiaoxuan", "e@outlook.com", "cursor", access_token=tokens["cursor"],
     ) is not None
     assert db.get_public_account_for_lookup(
-        "xiaoxuan", "e@outlook.com", "openai", access_token=token,
+        "xiaoxuan", "e@outlook.com", "openai", access_token=tokens["openai"],
     ) is not None
 
 
@@ -216,10 +242,12 @@ def test_rotate_token_invalidates_old(fresh_db):
     uid, acc_id = _create_owner_with_account(db, "xiaoxuan", "i@outlook.com", group="cursor")
     old_token = _make_public(db, uid, acc_id)
 
-    new_token = db.rotate_access_token(uid, acc_id)
-    assert new_token is not None
+    new_tokens = db.rotate_access_token(uid, acc_id)
+    assert new_tokens is not None
+    new_token = new_tokens["cursor"]
     assert new_token != old_token
     assert len(new_token) == 6
+    assert new_token.startswith("C")
 
     assert db.get_public_account_for_lookup(
         "xiaoxuan", "i@outlook.com", "cursor", access_token=old_token,
@@ -237,7 +265,7 @@ def test_set_public_does_not_overwrite_existing_token(fresh_db):
     # 第二次再加入 — 不应生成新 token
     ok, token2 = db.set_account_public(uid, acc_id, is_public=True, allowed_categories=None)
     assert ok is True
-    assert token2 is None  # 没有"新"凭证生成
+    assert token2 == {}  # 没有"新"凭证生成
     assert db.get_public_account_for_lookup(
         "xiaoxuan", "j@outlook.com", "cursor", access_token=token1,
     ) is not None

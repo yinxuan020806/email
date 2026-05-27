@@ -34,10 +34,11 @@ class Account:
     last_check: Optional[str] = None
     has_aws_code: int = 0
     remark: Optional[str] = None
-    # 接码业务的"邮箱凭证"：6 位无歧义字符的强密码（默认空表示未生成）。
-    # 仅在 is_public=1 时才有意义——加入接码白名单时自动生成；
-    # 站长可以在管理端单个或批量旋转，老凭证立即失效，无需碰真实邮箱密码。
+    # 接码业务的历史"邮箱凭证"字段（v8）。v9 起 Cursor / GPT 分拆成
+    # access_token_cursor / access_token_openai；保留本字段只为旧数据兼容。
     access_token: str = ''
+    access_token_cursor: str = ''
+    access_token_openai: str = ''
 
     # ── 字段顺序，用于 __getitem__ 兼容桥 ──
     _FIELD_ORDER = (
@@ -45,6 +46,7 @@ class Account:
         'imap_server', 'imap_port', 'smtp_server', 'smtp_port',
         'client_id', 'refresh_token', 'created_at', 'last_check',
         'has_aws_code', 'remark', 'access_token',
+        'access_token_cursor', 'access_token_openai',
     )
 
     def to_dict(self) -> dict:
@@ -63,13 +65,15 @@ class Account:
         """从 DB 原始 tuple 构建 Account。
 
         集中处理所有 len(acc)>N 的防御逻辑，替代散落在 10+ 处的重复代码。
-        ``access_token`` 是 v8 引入的字段，旧调用方传 16 列 tuple 时
+        ``access_token`` 是 v8 引入的字段；v9 又新增按分类拆分的
+        ``access_token_cursor`` / ``access_token_openai``。旧调用方传 16/17
+        列 tuple 时
         自动填空字符串（向后兼容）。
         """
         if row is None:
             raise ValueError("Cannot create Account from None row")
         target = len(cls._FIELD_ORDER)
-        # 填充到当前字段数（v8 起为 17），缺失列用 None
+        # 填充到当前字段数（v9 起为 19），缺失列用 None
         padded = tuple(row) + (None,) * max(0, target - len(row))
         return cls(
             id=padded[0],
@@ -89,6 +93,8 @@ class Account:
             has_aws_code=padded[14] if padded[14] is not None else 0,
             remark=padded[15],
             access_token=padded[16] or '',
+            access_token_cursor=padded[17] or '',
+            access_token_openai=padded[18] or '',
         )
 
     # ── 临时兼容桥（步骤6中删除）──────────────────────────
@@ -100,7 +106,7 @@ class Account:
 
     def __len__(self) -> int:
         """支持 len(acc) > N 守卫。
-        v8 起字段数从 16 增至 17（新增 access_token）。
+        v9 起字段数从 17 增至 19（新增分类 access_token）。
         """
         return len(self._FIELD_ORDER)
 

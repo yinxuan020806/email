@@ -8,6 +8,7 @@
   var btn = document.getElementById('submit-btn');
   var resultEl = document.getElementById('result');
   var themeBtn = document.getElementById('theme-toggle');
+  var LOOKUP_POLL_DELAYS_MS = [1000, 1500, 2000, 3000, 5000, 7000, 10000];
 
   /* ── 粘贴拆分：用户把整段「邮箱----凭证」粘到任一框时自动切开 ── */
   // 触发场景：站长在管理端复制 "name@x.com----Ab3xK9" 让用户一次粘。
@@ -28,6 +29,7 @@
   function applyEmailTokenSplit(parts) {
     inputEl.value = parts.email;
     if (tokenEl) tokenEl.value = parts.token.slice(0, 6);
+    applyCategoryFromToken(parts.token);
     // 拆分后焦点回到 submit，方便直接回车
     if (parts.token && parts.token.length >= 6) {
       btn.focus();
@@ -46,12 +48,31 @@
   }
   inputEl.addEventListener('paste', handlePaste);
   if (tokenEl) tokenEl.addEventListener('paste', handlePaste);
+  if (tokenEl) {
+    tokenEl.addEventListener('input', function () {
+      applyCategoryFromToken(tokenEl.value || '');
+    });
+  }
   // 在邮箱框输入时即时拆（用户连续敲）：仅当能拆出 token 才动 tokenEl
   inputEl.addEventListener('input', function () {
     if (inputEl.value.indexOf('----') < 0) return;
     var parts = splitEmailToken(inputEl.value);
     if (parts) applyEmailTokenSplit(parts);
   });
+
+  function categoryFromToken(token) {
+    var first = String(token || '').trim().charAt(0);
+    if (first === 'C') return 'cursor';
+    if (first === 'G') return 'openai';
+    return '';
+  }
+
+  function applyCategoryFromToken(token) {
+    var category = categoryFromToken(token);
+    if (!category) return;
+    var radio = document.querySelector('input[name="category"][value="' + category + '"]');
+    if (radio) radio.checked = true;
+  }
 
   /* ── Cloudflare Turnstile（可选）─ 服务端 /api/config 决定是否启用 ── */
   var TURNSTILE = { enabled: false, sitekey: '', widgetId: null };
@@ -526,6 +547,12 @@
     else btn.classList.remove('is-loading');
   }
 
+  function sleep(ms) {
+    return new Promise(function (resolve) {
+      window.setTimeout(resolve, ms);
+    });
+  }
+
   form.addEventListener('submit', async function (e) {
     e.preventDefault();
     var input = (inputEl.value || '').trim();
@@ -573,75 +600,92 @@
     setLoading(true);
     renderLoading();
 
-    var resp;
     try {
-      resp = await fetch('/api/lookup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email: input,
-          access_token: token,
-          category: category,
-          cf_token: cfToken || undefined,
-        }),
-        credentials: 'omit',
-      });
-    } catch (err) {
-      setLoading(false);
-      renderError('网络异常', String(err && err.message ? err.message : err));
-      resetTurnstileToken();
-      return;
-    }
-    setLoading(false);
-    // Turnstile token 是一次性的，无论成功失败都重置以备下一次
-    resetTurnstileToken();
+      var attempt = 0;
+      var pollDelays = TURNSTILE.enabled ? [] : LOOKUP_POLL_DELAYS_MS;
 
-    var body = {};
-    try {
-      body = await resp.json();
-    } catch (_) {
-      renderError('返回格式异常', 'HTTP ' + resp.status);
-      return;
-    }
+      while (true) {
+        var resp;
+        try {
+          resp = await fetch('/api/lookup', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              email: input,
+              access_token: token,
+              category: category,
+              cf_token: cfToken || undefined,
+              force_refresh: true,
+            }),
+            credentials: 'omit',
+          });
+        } catch (err) {
+          renderError('网络异常', String(err && err.message ? err.message : err));
+          return;
+        }
 
-    if (!resp.ok) {
-      var rawMsg =
-        (body && (body.error || body.detail || body.message)) ||
-        '请求失败 (HTTP ' + resp.status + ')';
-      var hint = '';
-      if (resp.status === 404) {
-        hint = '请确认：邮箱拼写无误 · 站长已在管理端把它"加入接码"';
-      } else if (resp.status === 401) {
-        // 401 现在涵盖两种：缺凭证 / 凭证错。后端 detail 已经分别说明。
-        hint = '若已正确填写凭证，多半是站长旋转过 — 请联系站长重新获取';
-      } else if (resp.status === 502) {
-        hint = '邮箱服务器暂时不可用，几秒后再试一次';
-      } else if (resp.status === 429) {
-        hint = body && body.retry_after ? formatRetryAfter(body.retry_after) : '请稍候再试';
-      } else if (resp.status === 403) {
-        hint = '人机校验未通过，刷新页面后重新校验';
-      } else if (resp.status === 422 || resp.status === 400) {
-        hint = '';
-      } else {
-        var retryAfter = body && body.retry_after;
-        hint = retryAfter ? formatRetryAfter(retryAfter) : '';
+        var body = {};
+        try {
+          body = await resp.json();
+        } catch (_) {
+          renderError('返回格式异常', 'HTTP ' + resp.status);
+          return;
+        }
+
+        if (!resp.ok) {
+          var rawMsg =
+            (body && (body.error || body.detail || body.message)) ||
+            '请求失败 (HTTP ' + resp.status + ')';
+          var hint = '';
+          if (resp.status === 404) {
+            hint = '请确认：邮箱拼写无误 · 站长已在管理端把它"加入接码"';
+          } else if (resp.status === 401) {
+            // 401 现在涵盖两种：缺凭证 / 凭证错。后端 detail 已经分别说明。
+            hint = '若已正确填写凭证，多半是站长旋转过 — 请联系站长重新获取';
+          } else if (resp.status === 502) {
+            hint = '邮箱服务器暂时不可用，几秒后再试一次';
+          } else if (resp.status === 429) {
+            hint = body && body.retry_after ? formatRetryAfter(body.retry_after) : '请稍候再试';
+          } else if (resp.status === 403) {
+            hint = '人机校验未通过，刷新页面后重新校验';
+          } else if (resp.status === 422 || resp.status === 400) {
+            hint = '';
+          } else {
+            var retryAfter = body && body.retry_after;
+            hint = retryAfter ? formatRetryAfter(retryAfter) : '';
+          }
+          renderError(rawMsg, hint);
+          return;
+        }
+
+        if (body && body.found === false) {
+          if (attempt < pollDelays.length) {
+            renderEmpty(
+              body.reason || '暂无匹配邮件',
+              '邮件还在路上，正在自动刷新'
+            );
+            await sleep(pollDelays[attempt]);
+            attempt += 1;
+            continue;
+          }
+          renderEmpty(body.reason || '暂无匹配邮件', '若邮件还在路上，请稍后再试');
+          return;
+        }
+
+        if (!body || (!body.code && !body.link)) {
+          renderEmpty('未提取到验证码', '邮箱已到货，但未匹配到该分类的内容');
+          return;
+        }
+
+        pushRecent(input);
+        renderResult(body);
+        return;
       }
-      renderError(rawMsg, hint);
-      return;
+    } finally {
+      setLoading(false);
+      // Turnstile token 是一次性的，无论成功失败都重置以备下一次
+      resetTurnstileToken();
     }
-
-    if (body && body.found === false) {
-      renderEmpty(body.reason || '暂无匹配邮件', '若邮件还在路上，请稍后再试');
-      return;
-    }
-
-    if (!body || (!body.code && !body.link)) {
-      renderEmpty('未提取到验证码', '邮箱已到货，但未匹配到该分类的内容');
-      return;
-    }
-
-    pushRecent(input);
-    renderResult(body);
   });
 
   renderEmpty('准备就绪', '输入邮箱与站长分发的 6 位凭证后点击"查询"即可');

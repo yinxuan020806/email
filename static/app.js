@@ -22,6 +22,7 @@ const S = {
   counts: { total: 0, byGroup: {} },
   // 已加入接码白名单的账号 id 集合（仅站长会被填充非空）
   publicIds: new Set(),
+  publicCategories: {},
 };
 
 // ───────── SPA 路由 ─────────
@@ -353,6 +354,7 @@ async function logout() {
   S.groups = [];
   S.selected.clear();
   S.publicIds.clear();
+  S.publicCategories = {};
   S.ready = false;
   applyOwnerVisibility();
   showAuthModal('login');
@@ -558,14 +560,83 @@ async function loadAccounts() {
 async function loadPublicIds() {
   if (!S.user || !S.user.is_owner) {
     S.publicIds = new Set();
+    S.publicCategories = {};
     return;
   }
   try {
     const r = await api.get('/api/accounts/public-ids');
     S.publicIds = new Set(r.ids || []);
+    S.publicCategories = r.categories || {};
   } catch {
     /* 网络失败时保持上次的集合，避免 UI 上忽闪忽现 */
   }
+}
+
+function tokenCategoryLabel(category) {
+  if (category === 'cursor') return 'Cursor';
+  if (category === 'openai') return 'GPT';
+  return '';
+}
+
+function publicCategoryLabel(raw) {
+  const v = String(raw || '').trim().toLowerCase();
+  if (v === '*') return 'Cursor/GPT';
+  if (!v) return '';
+  const parts = v.split(',')
+    .map((x) => x.trim())
+    .filter((x) => x === 'cursor' || x === 'openai');
+  return parts.map(tokenCategoryLabel).filter(Boolean).join('/');
+}
+
+function normalizeTokenEntries(value) {
+  if (!value) return [];
+  if (typeof value === 'string') {
+    return value ? [{ category: '', token: value }] : [];
+  }
+  if (typeof value !== 'object') return [];
+  return ['cursor', 'openai']
+    .map((category) => ({ category, token: String(value[category] || '').trim() }))
+    .filter((x) => x.token);
+}
+
+function tokenEntriesForAccount(account) {
+  const entries = normalizeTokenEntries(account.access_tokens);
+  if (entries.length) return entries;
+  return normalizeTokenEntries({
+    cursor: account.access_token_cursor || '',
+    openai: account.access_token_openai || '',
+  }).concat(
+    (!account.access_token_cursor && !account.access_token_openai && account.access_token)
+      ? [{ category: '', token: account.access_token }]
+      : [],
+  );
+}
+
+function tokenLinesFromResponse(tokens) {
+  const lines = [];
+  for (const [id, value] of Object.entries(tokens || {})) {
+    const acc = S.accounts.find((x) => String(x.id) === String(id));
+    const email = acc ? acc.email : '#' + id;
+    for (const entry of normalizeTokenEntries(value)) {
+      lines.push(`${email}----${entry.token}`);
+    }
+  }
+  return lines;
+}
+
+function choosePublicCategories() {
+  const raw = prompt(t('prompt_public_categories'), '3');
+  if (raw === null) return null;
+  const v = String(raw || '').trim().toLowerCase();
+  if (!v || v === '3' || v === 'both' || v === 'all' || v === '全部') {
+    return ['cursor', 'openai'];
+  }
+  if (v === '1' || v === 'c' || v === 'cursor') return ['cursor'];
+  if (v === '2' || v === 'g' || v === 'gpt' || v === 'openai' || v === 'chatgpt') {
+    return ['openai'];
+  }
+  toast(t('toast_public_categories_invalid'), 'warning');
+  return null;
 }
 
 function filterAccounts() {
@@ -666,10 +737,13 @@ function buildAccountRow(a, index, isOwner) {
   // 接码列（仅站长可见，与表头 .col-public 一一对应）
   if (isOwner) {
     const isPub = S.publicIds.has(a.id);
+    const catLabel = isPub ? publicCategoryLabel(S.publicCategories[a.id]) : '';
     const badge = el(
       'span',
       { class: isPub ? 'public-badge' : 'private-badge' },
-      isPub ? t('public_yes') : t('public_no'),
+      isPub && catLabel ? `${t('public_yes')}·${catLabel}` : (
+        isPub ? t('public_yes') : t('public_no')
+      ),
     );
     tr.appendChild(el('td', { class: 'col-public' }, badge));
 
@@ -836,10 +910,13 @@ function closeRowMoreMenu() {
 // 单条加入 / 移出接码（复用 batchSetPublic 的后端，传单个 id）
 async function toggleSinglePublic(account, isPublic) {
   if (!S.user || !S.user.is_owner) return;
+  const allowedCategories = isPublic ? choosePublicCategories() : null;
+  if (isPublic && !allowedCategories) return;
   try {
     const r = await api.post('/api/accounts/set-public', {
       ids: [account.id],
       is_public: !!isPublic,
+      allowed_categories: allowedCategories || undefined,
     });
     toast(t(isPublic ? 'toast_set_public_ok' : 'toast_unset_public_ok',
             { n: 1 }), 'success');
@@ -847,10 +924,7 @@ async function toggleSinglePublic(account, isPublic) {
     await loadAccounts();
     // 后端为新公开账号自动生成 token；返回里有就弹一个让站长马上看到/复制
     if (r && r.tokens && Object.keys(r.tokens).length > 0) {
-      const lines = Object.entries(r.tokens).map(([id, tok]) => {
-        const acc = S.accounts.find((x) => String(x.id) === String(id));
-        return `${acc ? acc.email : '#' + id}----${tok}`;
-      });
+      const lines = tokenLinesFromResponse(r.tokens);
       showTokenModal(lines, { fresh: true });
     }
   } catch (e) {
@@ -869,17 +943,23 @@ async function toggleSinglePublic(account, isPublic) {
 
 function buildTokenCell(account) {
   const wrap = el('span', { class: 'token-cell' });
-  const tok = account.access_token || '';
-  if (!tok) {
+  const entries = tokenEntriesForAccount(account);
+  if (!entries.length) {
     wrap.appendChild(el('span', { class: 'token-empty' }, t('token_empty')));
   } else {
-    wrap.appendChild(el('span', { class: 'token-text', title: tok }, tok));
-    wrap.appendChild(el('button', {
-      type: 'button',
-      title: t('token_copy_hint'),
-      'aria-label': t('token_copy_hint'),
-      onclick: () => copyText(`${account.email}----${tok}`, 'toast_token_copied'),
-    }, '📋'));
+    for (const entry of entries) {
+      const label = tokenCategoryLabel(entry.category);
+      const item = el('span', { class: 'token-entry' });
+      if (label) item.appendChild(el('span', { class: 'token-label' }, label));
+      item.appendChild(el('span', { class: 'token-text', title: entry.token }, entry.token));
+      item.appendChild(el('button', {
+        type: 'button',
+        title: t('token_copy_hint'),
+        'aria-label': t('token_copy_hint'),
+        onclick: () => copyText(`${account.email}----${entry.token}`, 'toast_token_copied'),
+      }, '📋'));
+      wrap.appendChild(item);
+    }
   }
   wrap.appendChild(el('button', {
     type: 'button',
@@ -895,14 +975,15 @@ async function rotateSingleToken(account) {
   if (!confirm(t('confirm_rotate_single', { email: account.email }))) return;
   try {
     const r = await api.post(`/api/accounts/${account.id}/rotate-token`, {});
-    if (!r || !r.access_token) {
+    const entries = normalizeTokenEntries(r && (r.access_tokens || r.access_token));
+    if (!entries.length) {
       toast(t('toast_load_fail'), 'error');
       return;
     }
     toast(t('toast_token_rotated', { email: account.email }), 'success');
     // 刷新列表让新 token 显示出来；同时弹出一个含分享串的弹窗便于站长复制
     await loadAccounts();
-    showTokenModal([`${account.email}----${r.access_token}`], { fresh: true });
+    showTokenModal(entries.map((entry) => `${account.email}----${entry.token}`), { fresh: true });
   } catch (e) {
     toast(t('toast_load_fail') + (e?.message || ''), 'error');
   }
@@ -928,10 +1009,7 @@ async function batchRotateTokens() {
     }
     toast(t('toast_rotate_ok', { n: count }), 'success');
     await loadAccounts();
-    const lines = Object.entries(tokens).map(([id, tok]) => {
-      const acc = S.accounts.find((x) => String(x.id) === String(id));
-      return `${acc ? acc.email : '#' + id}----${tok}`;
-    });
+    const lines = tokenLinesFromResponse(tokens);
     showTokenModal(lines, { fresh: true });
   } catch (e) {
     toast(t('toast_load_fail') + (e?.message || ''), 'error');
@@ -1358,10 +1436,13 @@ async function batchSetPublic(isPublic) {
   if (!ids.length) { toast(t('toast_select_acc'), 'warning'); return; }
   const confirmKey = isPublic ? 'confirm_set_public_n' : 'confirm_unset_public_n';
   if (!confirm(t(confirmKey, { n: ids.length }))) return;
+  const allowedCategories = isPublic ? choosePublicCategories() : null;
+  if (isPublic && !allowedCategories) return;
   try {
     const r = await api.post('/api/accounts/set-public', {
       ids,
       is_public: !!isPublic,
+      allowed_categories: allowedCategories || undefined,
     });
     const okKey = isPublic ? 'toast_set_public_ok' : 'toast_unset_public_ok';
     toast(t(okKey, { n: r.updated || 0 }), 'success');
@@ -1371,10 +1452,7 @@ async function batchSetPublic(isPublic) {
     else renderAccounts();
     // 后端有新生成的 token 时弹一个含分享串的窗口
     if (isPublic && r.tokens && Object.keys(r.tokens).length > 0) {
-      const lines = Object.entries(r.tokens).map(([id, tok]) => {
-        const acc = S.accounts.find((x) => String(x.id) === String(id));
-        return `${acc ? acc.email : '#' + id}----${tok}`;
-      });
+      const lines = tokenLinesFromResponse(r.tokens);
       showTokenModal(lines, { fresh: true });
     }
   } catch (e) {

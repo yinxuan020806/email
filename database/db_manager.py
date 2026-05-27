@@ -49,13 +49,25 @@ SORTABLE_COLUMNS = {
     "last_check",
 }
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # 审计日志保留天数（超过自动清理）
 AUDIT_RETENTION_DAYS = 90
 
 # 接码业务允许的分类标签白名单（写入 extractor_rules.category 时校验）
 ALLOWED_CODE_CATEGORIES = {"cursor", "openai", "anthropic", "google", "github", "generic"}
+
+# 当前接码前台只开放 Cursor / GPT(OpenAI) 两类。两类可以分别开通、分别轮换，
+# 凭证明文用首字母区分，方便站长和下游用户肉眼确认用途。
+CODE_ACCESS_TOKEN_CATEGORIES = ("cursor", "openai")
+CODE_ACCESS_TOKEN_PREFIXES = {
+    "cursor": "C",
+    "openai": "G",
+}
+CODE_ACCESS_TOKEN_COLUMNS = {
+    "cursor": "access_token_cursor",
+    "openai": "access_token_openai",
+}
 
 # 接码查询日志保留天数
 QUERY_LOG_RETENTION_DAYS = 30
@@ -75,6 +87,47 @@ GROUP_KEYWORDS_BY_CATEGORY: dict[str, tuple[str, ...]] = {
     "google": ("google", "gmail-only"),
     "github": ("github",),
 }
+
+
+def _normalize_allowed_categories(
+    allowed_categories: Optional[List[str]],
+) -> str:
+    if not allowed_categories:
+        return ""
+    normalized = [
+        c.strip().lower() for c in allowed_categories if c and c.strip()
+    ]
+    if "*" in normalized:
+        return "*"
+    valid = [c for c in normalized if c in ALLOWED_CODE_CATEGORIES]
+    return ",".join(sorted(set(valid)))
+
+
+def _token_categories_for_scope(cats_str: str, group_name: str = "") -> list[str]:
+    """把账号开放范围折算成需要的 Cursor/GPT 凭证类别。"""
+    cats = (cats_str or "").strip().lower()
+    if cats == "*":
+        return list(CODE_ACCESS_TOKEN_CATEGORIES)
+    if cats:
+        explicit = {c for c in cats.split(",") if c}
+        return [c for c in CODE_ACCESS_TOKEN_CATEGORIES if c in explicit]
+
+    group = (group_name or "").lower()
+    result: list[str] = []
+    for category in CODE_ACCESS_TOKEN_CATEGORIES:
+        keywords = GROUP_KEYWORDS_BY_CATEGORY.get(category, (category,))
+        if any(kw.lower() in group for kw in keywords):
+            result.append(category)
+    return result
+
+
+def _token_column_for_category(category: str) -> Optional[str]:
+    return CODE_ACCESS_TOKEN_COLUMNS.get((category or "").strip().lower())
+
+
+def _generate_category_access_token(category: str) -> str:
+    prefix = CODE_ACCESS_TOKEN_PREFIXES[category]
+    return generate_access_token(prefix=prefix)
 
 
 def get_app_dir() -> str:
@@ -263,6 +316,8 @@ class DatabaseManager:
                     allowed_categories TEXT DEFAULT '',
                     query_count INTEGER DEFAULT 0,
                     access_token TEXT DEFAULT '',
+                    access_token_cursor TEXT DEFAULT '',
+                    access_token_openai TEXT DEFAULT '',
                     UNIQUE (owner_id, email)
                 )
                 """
@@ -339,6 +394,9 @@ class DatabaseManager:
                 ("query_count", "INTEGER DEFAULT 0"),
                 # v7 → v8：接码邮箱凭证（6 位强密码，SecretBox 加密存储）
                 ("access_token", "TEXT DEFAULT ''"),
+                # v8 → v9：Cursor / GPT 分拆凭证；总长仍 6 位，首字母固定 C/G
+                ("access_token_cursor", "TEXT DEFAULT ''"),
+                ("access_token_openai", "TEXT DEFAULT ''"),
             ):
                 col_name, col_type = col_def
                 if col_name not in existing_cols:
@@ -487,6 +545,49 @@ class DatabaseManager:
                         "请到管理端【📡 接码白名单】列查看新凭证并把"
                         "『邮箱----凭证』重新分发给下游用户。",
                         migrated,
+                    )
+
+            # ── v8 → v9 一次性数据迁移：Cursor / GPT 独立凭证 ──
+            # v8 只有一条 access_token，导致同一个邮箱只要开了接码，Cursor 与
+            # GPT/OpenAI 会共用凭证。v9 拆成两条：Cursor 以 C 开头，GPT/OpenAI
+            # 以 G 开头；按账号当前 allowed_categories / group_name 生成需要的
+            # 那几条，不覆盖已有分类凭证。
+            if current_version < 9:
+                box = SecretBox.instance()
+                rows = cur.execute(
+                    "SELECT id, COALESCE(group_name, ''), "
+                    "       COALESCE(allowed_categories, ''), "
+                    "       COALESCE(access_token_cursor, ''), "
+                    "       COALESCE(access_token_openai, '') "
+                    "FROM accounts WHERE is_public = 1"
+                ).fetchall()
+                migrated_by_category = {"cursor": 0, "openai": 0}
+                for aid, group_name, cats_str, cursor_cipher, openai_cipher in rows:
+                    existing = {
+                        "cursor": cursor_cipher,
+                        "openai": openai_cipher,
+                    }
+                    for category in _token_categories_for_scope(cats_str, group_name):
+                        if existing.get(category):
+                            continue
+                        token = _generate_category_access_token(category)
+                        cipher = box.encrypt(token) or ""
+                        col = CODE_ACCESS_TOKEN_COLUMNS[category]
+                        cur.execute(
+                            f"UPDATE accounts SET {col} = ? WHERE id = ?",
+                            (cipher, aid),
+                        )
+                        existing[category] = cipher
+                        migrated_by_category[category] += 1
+                migrated = sum(migrated_by_category.values())
+                if migrated:
+                    logger.warning(
+                        "v8→v9 数据迁移：已为公开接码账号生成分类凭证 "
+                        "cursor=%d, openai=%d。Cursor 凭证以 C 开头，"
+                        "GPT/OpenAI 凭证以 G 开头；旧 access_token 不再用于"
+                        "接码前台校验。",
+                        migrated_by_category["cursor"],
+                        migrated_by_category["openai"],
                     )
 
             # 任意一次升级跑了数据迁移（accounts 实际被 UPDATE 过），都把所有
@@ -789,6 +890,7 @@ class DatabaseManager:
         "imap_server", "imap_port", "smtp_server", "smtp_port",
         "client_id", "refresh_token", "created_at", "last_check",
         "has_aws_code", "remark", "access_token",
+        "access_token_cursor", "access_token_openai",
     )
 
     def _select_account_columns(self, alias: str = "") -> str:
@@ -1253,7 +1355,7 @@ class DatabaseManager:
         account_id: int,
         is_public: bool,
         allowed_categories: Optional[List[str]] = None,
-    ) -> tuple[bool, Optional[str]]:
+    ) -> tuple[bool, dict[str, str]]:
         """管理端：把某个账号对前台公开 / 取消公开。
 
         ``allowed_categories`` 取值约定：
@@ -1264,28 +1366,17 @@ class DatabaseManager:
           分支配合；这是"加入接码白名单"按钮的默认语义）
         - 其他：按 ``ALLOWED_CODE_CATEGORIES`` 过滤后逗号拼接
 
-        返回 ``(ok, generated_token)``：
+        返回 ``(ok, generated_tokens)``：
         - ``ok``：UPDATE 是否命中（账号存在且属于该 owner）
-        - ``generated_token``：仅当 ``is_public=True`` **且**该账号原先尚未
-          生成过 access_token 时，自动生成一个 6 位明文凭证并返回（明文，
-          DB 里存的是 SecretBox 加密版本）；其它情况返回 ``None``。
-          已有凭证的账号**不会**被悄悄改 token——避免站长把"加入接码"误当
+        - ``generated_tokens``：仅当 ``is_public=True`` 且当前开放分类缺少
+          对应凭证时返回 ``{"cursor": "Cxxxxx", "openai": "Gxxxxx"}`` 这类
+          明文映射。已有分类凭证不会被覆盖，避免站长把"加入接码"误当
           "旋转凭证"用，意外把分发出去的链接全部失效。
         """
-        cats_str = ""
-        if allowed_categories:
-            normalized = [
-                c.strip().lower() for c in allowed_categories if c and c.strip()
-            ]
-            if "*" in normalized:
-                cats_str = "*"
-            else:
-                valid = [c for c in normalized if c in ALLOWED_CODE_CATEGORIES]
-                cats_str = ",".join(sorted(set(valid)))
-
-        generated_token: Optional[str] = None
+        cats_str = _normalize_allowed_categories(allowed_categories)
+        generated_tokens: dict[str, str] = {}
         with self._connect() as conn:
-            # 先做 UPDATE。is_public=True 时若 access_token 还是空，
+            # 先做 UPDATE。is_public=True 时若分类 token 还是空，
             # 顺手生成一个 → 让"加入接码"按钮一次到位（直接拿到凭证可分发），
             # 不需要再单独点"生成凭证"。
             cur = conn.execute(
@@ -1295,24 +1386,38 @@ class DatabaseManager:
             )
             ok = cur.rowcount > 0
             if ok and is_public:
-                # 读出当前 access_token（密文），空才补 — 不动已有的
+                # 读出当前分类 token（密文），空才补 — 不动已有的。
                 row = conn.execute(
-                    "SELECT COALESCE(access_token, '') FROM accounts "
+                    "SELECT COALESCE(group_name, ''), "
+                    "       COALESCE(access_token_cursor, ''), "
+                    "       COALESCE(access_token_openai, '') "
+                    "FROM accounts "
                     "WHERE id = ? AND owner_id = ?",
                     (account_id, owner_id),
                 ).fetchone()
-                if row and not row[0]:
-                    token = generate_access_token()
-                    cipher = SecretBox.instance().encrypt(token) or ""
-                    conn.execute(
-                        "UPDATE accounts SET access_token = ? "
-                        "WHERE id = ? AND owner_id = ?",
-                        (cipher, account_id, owner_id),
-                    )
-                    generated_token = token
+                if row:
+                    group_name, cursor_cipher, openai_cipher = row
+                    existing = {
+                        "cursor": cursor_cipher,
+                        "openai": openai_cipher,
+                    }
+                    box = SecretBox.instance()
+                    for category in _token_categories_for_scope(cats_str, group_name):
+                        if existing.get(category):
+                            continue
+                        token = _generate_category_access_token(category)
+                        cipher = box.encrypt(token) or ""
+                        col = CODE_ACCESS_TOKEN_COLUMNS[category]
+                        conn.execute(
+                            f"UPDATE accounts SET {col} = ? "
+                            "WHERE id = ? AND owner_id = ?",
+                            (cipher, account_id, owner_id),
+                        )
+                        existing[category] = cipher
+                        generated_tokens[category] = token
             if ok:
                 self._bump_account_rev_in_conn(conn, owner_id)
-        return ok, generated_token
+        return ok, generated_tokens
 
     # ── 接码邮箱凭证（access_token）旋转 ─────────────────────────────
     #
@@ -1325,35 +1430,58 @@ class DatabaseManager:
     # ——避免站长贪图好记把多个邮箱设成同一个弱凭证导致跨账号串号风险。
 
     def rotate_access_token(
-        self, owner_id: int, account_id: int
-    ) -> Optional[str]:
-        """旋转单个账号的接码凭证，返回新凭证明文（DB 存加密版本）。
+        self,
+        owner_id: int,
+        account_id: int,
+        category: Optional[str] = None,
+    ) -> Optional[dict[str, str]]:
+        """旋转单个账号的接码凭证，返回新凭证明文映射（DB 存加密版本）。
 
         - 账号不存在 / owner 不匹配 → 返回 ``None``
         - 命中即生成并写回；调用方拿到明文展示给站长用于复制分发
         - **不**校验 ``is_public``：站长可以"预热"——先生成凭证留着、
           等真要开放再点加入接码（开放时 set_account_public 不会覆盖已有凭证）
         """
-        token = generate_access_token()
-        cipher = SecretBox.instance().encrypt(token) or ""
+        requested = (category or "").strip().lower()
+        if requested and requested not in CODE_ACCESS_TOKEN_CATEGORIES:
+            return None
+        result: dict[str, str] = {}
+        box = SecretBox.instance()
         with self._connect() as conn:
-            cur = conn.execute(
-                "UPDATE accounts SET access_token = ? "
-                "WHERE id = ? AND owner_id = ?",
-                (cipher, account_id, owner_id),
-            )
-            if cur.rowcount == 0:
+            row = conn.execute(
+                "SELECT COALESCE(group_name, ''), COALESCE(allowed_categories, ''), "
+                "       is_public "
+                "FROM accounts WHERE id = ? AND owner_id = ?",
+                (account_id, owner_id),
+            ).fetchone()
+            if not row:
                 return None
+            group_name, cats_str, is_public = row
+            categories = [requested] if requested else _token_categories_for_scope(
+                cats_str if is_public else "", group_name if is_public else "",
+            )
+            if not categories:
+                categories = list(CODE_ACCESS_TOKEN_CATEGORIES)
+            for cat in categories:
+                token = _generate_category_access_token(cat)
+                cipher = box.encrypt(token) or ""
+                col = CODE_ACCESS_TOKEN_COLUMNS[cat]
+                conn.execute(
+                    f"UPDATE accounts SET {col} = ? "
+                    "WHERE id = ? AND owner_id = ?",
+                    (cipher, account_id, owner_id),
+                )
+                result[cat] = token
             self._bump_account_rev_in_conn(conn, owner_id)
-        return token
+        return result
 
     def rotate_access_tokens_bulk(
         self,
         owner_id: int,
         account_ids: Optional[List[int]] = None,
         only_public: bool = False,
-    ) -> dict[int, str]:
-        """批量旋转，返回 ``{id: new_token_plain, ...}`` 字典。
+    ) -> dict[int, dict[str, str]]:
+        """批量旋转，返回 ``{id: {category: new_token_plain}}`` 字典。
 
         - ``account_ids=None`` 表示"所有属于该 owner 的账号"
           （配合 ``only_public=True`` 可缩小到"所有 is_public=1"）
@@ -1362,10 +1490,14 @@ class DatabaseManager:
         - 仅旋转该 owner 名下的账号；越权 id 静默忽略，不会出现在返回字典
         - 单事务执行：要么全成要么全回滚，避免半成功状态下分发到错的凭证
         """
-        result: dict[int, str] = {}
+        result: dict[int, dict[str, str]] = {}
         box = SecretBox.instance()
         with self._connect() as conn:
-            sql = "SELECT id FROM accounts WHERE owner_id = ?"
+            sql = (
+                "SELECT id, COALESCE(group_name, ''), "
+                "       COALESCE(allowed_categories, ''), is_public "
+                "FROM accounts WHERE owner_id = ?"
+            )
             params: list = [owner_id]
             if only_public:
                 sql += " AND is_public = 1"
@@ -1379,15 +1511,28 @@ class DatabaseManager:
             rows = conn.execute(sql, params).fetchall()
             if not rows:
                 return {}
-            for (aid,) in rows:
-                token = generate_access_token()
-                cipher = box.encrypt(token) or ""
-                conn.execute(
-                    "UPDATE accounts SET access_token = ? "
-                    "WHERE id = ? AND owner_id = ?",
-                    (cipher, aid, owner_id),
+            for aid, group_name, cats_str, is_public in rows:
+                categories = _token_categories_for_scope(
+                    cats_str if is_public else "",
+                    group_name if is_public else "",
                 )
-                result[int(aid)] = token
+                if not categories and not only_public:
+                    categories = list(CODE_ACCESS_TOKEN_CATEGORIES)
+                if not categories:
+                    continue
+                per_account: dict[str, str] = {}
+                for category in categories:
+                    token = _generate_category_access_token(category)
+                    cipher = box.encrypt(token) or ""
+                    col = CODE_ACCESS_TOKEN_COLUMNS[category]
+                    conn.execute(
+                        f"UPDATE accounts SET {col} = ? "
+                        "WHERE id = ? AND owner_id = ?",
+                        (cipher, aid, owner_id),
+                    )
+                    per_account[category] = token
+                if per_account:
+                    result[int(aid)] = per_account
             self._bump_account_rev_in_conn(conn, owner_id)
         return result
 
@@ -1402,7 +1547,7 @@ class DatabaseManager:
 
         命中规则（前 3 项必须**同时**满足，第 4 项至少一种为真）：
         1. 邮箱属于 ``owner_username``、``is_public = 1``
-        2. ``access_token`` 与 DB 中加密存储的凭证**常量时间比较**相等
+        2. ``access_token`` 与该分类 DB 中加密存储的凭证**常量时间比较**相等
            （由调用方在 db_proxy / app 层负责 ``hmac.compare_digest``；
            本函数返回 ``Account`` 后再校验，DB 查询本身不做 token 匹配，
            避免把 token 直接拼进 SQL/索引引起额外侧信道）
@@ -1426,6 +1571,9 @@ class DatabaseManager:
             return None
 
         cat = category.strip().lower()
+        token_col = _token_column_for_category(cat)
+        if not token_col:
+            return None
         keywords = GROUP_KEYWORDS_BY_CATEGORY.get(cat, (cat,))
 
         cols = self._select_account_columns(alias="a")
@@ -1437,7 +1585,7 @@ class DatabaseManager:
             WHERE u.username = ?
               AND LOWER(a.email) = LOWER(?)
               AND a.is_public = 1
-              AND COALESCE(a.access_token, '') != ''
+              AND COALESCE(a.{token_col}, '') != ''
               AND (
                   a.allowed_categories = '*'
                   OR (',' || COALESCE(a.allowed_categories, '') || ',') LIKE ?
@@ -1468,7 +1616,8 @@ class DatabaseManager:
         #    短 token 多维一个索引
         # 3. 常量时间比较的语义只有应用层能保证；SQL = 比较是早 mismatch 短路的
         from core.security import token_equals  # noqa: WPS433 — 延迟导入避免循环
-        if not token_equals(access_token, acc.access_token):
+        stored_token = getattr(acc, token_col, "")
+        if not token_equals(access_token, stored_token):
             return None
         return acc
 
@@ -1707,15 +1856,21 @@ class DatabaseManager:
         # access_token 与 password / refresh_token 同套加密机制；解密失败
         # 同样降级为空串（前台查询会因为 stored_token='' 命中"未启用接码"分支
         # 拒绝该次请求，比让整条 Account 加载崩掉更安全）。
-        try:
-            acc.access_token = box.decrypt(acc.access_token) or ""
-        except SecretBoxDecryptError:
-            logger.error(
-                "account.access_token 解密失败 acc.id=%s，本次回退为空字符串；"
-                "该账号将无法被前台接码访问，请到管理端旋转一个新凭证。",
-                acc.id,
-            )
-            acc.access_token = ""
+        for attr in (
+            "access_token",
+            "access_token_cursor",
+            "access_token_openai",
+        ):
+            try:
+                setattr(acc, attr, box.decrypt(getattr(acc, attr)) or "")
+            except SecretBoxDecryptError:
+                logger.error(
+                    "account.%s 解密失败 acc.id=%s，本次回退为空字符串；"
+                    "该分类凭证将无法被前台接码访问，请到管理端旋转一个新凭证。",
+                    attr,
+                    acc.id,
+                )
+                setattr(acc, attr, "")
         return acc
 
     @staticmethod

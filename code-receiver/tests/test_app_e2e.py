@@ -309,6 +309,126 @@ def test_lookup_success_path_openai_link(app_module, client):
     assert body["link"].startswith("https://auth.openai.com/log-in/identifier")
 
 
+def test_lookup_no_match_result_is_not_cached(app_module, client, monkeypatch):
+    """未匹配到验证码的收件箱快照不能缓存。
+
+    用户通常会在发码后立刻点查询；如果第一轮邮件还没到，第二轮必须重新打
+    上游邮箱，而不是继续吃旧的"未匹配"结果。
+    """
+    monkeypatch.setattr(app_module._limiter, "ip_per_min", 1000)
+    monkeypatch.setattr(app_module._limiter, "ip_per_hour", 1000)
+    monkeypatch.setattr(app_module._limiter, "email_per_hour", 1000)
+    app_module._inbox_cache.clear()
+
+    fake_batches = [
+        [
+            {
+                "sender": "newsletter@example.com",
+                "from": "newsletter@example.com",
+                "subject": "Not a code",
+                "body": "hello",
+                "preview": "hello",
+                "date": "2026-05-05T12:00:00",
+            }
+        ],
+        [
+            {
+                "sender": "no-reply@cursor.sh",
+                "from": "no-reply@cursor.sh",
+                "subject": "Your Cursor verification code",
+                "body": "Your Cursor verification code is 135790.",
+                "preview": "Your Cursor verification code is 135790.",
+                "date": "2026-05-05T12:00:05",
+            }
+        ],
+    ]
+    calls = {"n": 0}
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def fetch_emails(self, *a, **kw):
+            idx = min(calls["n"], len(fake_batches) - 1)
+            calls["n"] += 1
+            return fake_batches[idx], "ok"
+
+        def disconnect(self):
+            pass
+
+    token = "Qr7xP2"
+    fake_account = _make_fake_account("nocache@outlook.com", token=token)
+    lookup_fn = _make_token_aware_lookup(fake_account, token)
+
+    with patch.object(app_module, "EmailClient", FakeClient), \
+         patch.object(app_module._db, "lookup_public_account", side_effect=lookup_fn), \
+         patch.object(app_module._db, "incr_query_count", return_value=True):
+        r1 = client.post(
+            "/api/lookup",
+            json={"input": f"nocache@outlook.com----{token}", "category": "cursor"},
+        )
+        r2 = client.post(
+            "/api/lookup",
+            json={"input": f"nocache@outlook.com----{token}", "category": "cursor"},
+        )
+
+    assert r1.status_code == 200, r1.text
+    assert r1.json().get("found") is False
+    assert r2.status_code == 200, r2.text
+    assert r2.json().get("code") == "135790"
+    assert calls["n"] == 2
+
+
+def test_lookup_force_refresh_bypasses_positive_cache(app_module, client, monkeypatch):
+    """force_refresh=True 必须绕过正向缓存，供前端自动轮询拿最新邮件。"""
+    monkeypatch.setattr(app_module._limiter, "ip_per_min", 1000)
+    monkeypatch.setattr(app_module._limiter, "ip_per_hour", 1000)
+    monkeypatch.setattr(app_module._limiter, "email_per_hour", 1000)
+    app_module._inbox_cache.clear()
+
+    codes = ["111111", "222222"]
+    calls = {"n": 0}
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def fetch_emails(self, *a, **kw):
+            code = codes[min(calls["n"], len(codes) - 1)]
+            calls["n"] += 1
+            return [
+                {
+                    "sender": "no-reply@cursor.sh",
+                    "from": "no-reply@cursor.sh",
+                    "subject": "Your Cursor verification code",
+                    "body": f"Your Cursor verification code is {code}.",
+                    "preview": f"Your Cursor verification code is {code}.",
+                    "date": "2026-05-05T12:00:00",
+                }
+            ], "ok"
+
+        def disconnect(self):
+            pass
+
+    token = "Rt8zM3"
+    fake_account = _make_fake_account("force-refresh@outlook.com", token=token)
+    lookup_fn = _make_token_aware_lookup(fake_account, token)
+
+    with patch.object(app_module, "EmailClient", FakeClient), \
+         patch.object(app_module._db, "lookup_public_account", side_effect=lookup_fn), \
+         patch.object(app_module._db, "incr_query_count", return_value=True):
+        payload = {"input": f"force-refresh@outlook.com----{token}", "category": "cursor"}
+        r1 = client.post("/api/lookup", json=payload)
+        r2 = client.post("/api/lookup", json=payload)
+        r3 = client.post("/api/lookup", json={**payload, "force_refresh": True})
+
+    assert r1.status_code == r2.status_code == r3.status_code == 200
+    assert r1.json().get("code") == "111111"
+    assert r2.json().get("code") == "111111"
+    assert r3.json().get("code") == "222222"
+    assert calls["n"] == 2
+
+
 def test_security_headers_on_api(client):
     """API 路由也应带 5 项安全头。"""
     r = client.post(
@@ -497,6 +617,18 @@ def test_app_js_has_friendly_retry_after_formatter(client):
     assert "+ 's 后再试'" not in body, (
         "禁止旧版 `+ 's 后再试'` 字面量；必须用 formatRetryAfter"
     )
+
+
+def test_app_js_auto_polls_lookup_and_force_refreshes(client):
+    """未找到验证码时前端应自动短轮询，并始终让后端绕过缓存拿最新邮件。"""
+    r = client.get("/static/app.js")
+    assert r.status_code == 200
+    body = r.text
+    assert "LOOKUP_POLL_DELAYS_MS" in body
+    assert "await sleep(pollDelays[attempt])" in body
+    assert "force_refresh: true" in body
+    assert "邮件还在路上，正在自动刷新" in body
+    assert "TURNSTILE.enabled ? [] : LOOKUP_POLL_DELAYS_MS" in body
 
 
 def test_app_css_cyber_does_not_double_blur(client):

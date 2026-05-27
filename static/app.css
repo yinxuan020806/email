@@ -491,13 +491,21 @@ body{font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif;background
 
 /* 接码凭证列样式 */
 .token-cell{
-  display:inline-flex;align-items:center;gap:6px;
+  display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;
   font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+.token-entry{
+  display:inline-flex;align-items:center;gap:4px;white-space:nowrap;
+}
+.token-label{
+  padding:2px 5px;border-radius:4px;
+  background:var(--hover);color:var(--text2);font-size:10px;
+  font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
 }
 .token-text{
   padding:2px 8px;border-radius:4px;
   background:rgba(6,182,212,.12);color:var(--cyber-cyan,#06b6d4);
-  font-size:12px;letter-spacing:1.5px;
+  font-size:12px;letter-spacing:0;
   border:1px solid rgba(6,182,212,.25);
   user-select:all;
 }

@@ -163,8 +163,8 @@ def fresh_db(tmp_path, monkeypatch):
 def test_lookup_email_case_insensitive(fresh_db):
     """账号以 ``User@Outlook.COM`` 入库，前台用 ``user@outlook.com`` 查询也应命中。
 
-    v8 起 ``get_public_account_for_lookup`` 必须带 ``access_token``，
-    由 ``set_account_public(is_public=True)`` 返回的自动生成凭证传入。
+    v9 起 ``get_public_account_for_lookup`` 必须带分类独立的 ``access_token``，
+    由 ``set_account_public(is_public=True)`` 返回的 cursor 凭证传入。
     """
     db = fresh_db
     uid = db.create_user("xiaoxuan", "fake-pbkdf2")
@@ -174,11 +174,13 @@ def test_lookup_email_case_insensitive(fresh_db):
     )
     assert ok is True
     acc_id = db.get_account_by_email(uid, "User@Outlook.COM").id
-    ok, token = db.set_account_public(
+    ok, tokens = db.set_account_public(
         uid, acc_id, is_public=True, allowed_categories=None,
     )
     assert ok is True
+    token = tokens["cursor"]
     assert token and len(token) == 6
+    assert token.startswith("C")
 
     # 不同大小写形态都能命中（前提是 token 正确）
     for variant in (

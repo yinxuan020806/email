@@ -2,9 +2,9 @@
 """接码邮箱凭证（access_token）相关的 HTTP 与 DB 行为测试。
 
 覆盖：
-- /api/accounts/set-public          自动生成 token + 返回 tokens 映射
-- /api/accounts/{id}                站长 / 非站长返回 access_token 字段差异
-- /api/accounts                     列表里 access_token 仅站长可见
+- /api/accounts/set-public          自动生成 Cursor/GPT 分类 token + 返回 tokens 映射
+- /api/accounts/{id}                站长 / 非站长返回 access_tokens 字段差异
+- /api/accounts                     列表里 access_tokens 仅站长可见
 - /api/accounts/{id}/rotate-token   单个旋转（仅站长）
 - /api/accounts/rotate-tokens-bulk  批量旋转（仅站长）
 - DB.rotate_access_tokens_bulk(only_public=True) 严格仅旋转 is_public=1
@@ -101,7 +101,7 @@ def _import_one_account(c, email: str = "user1@outlook.com", group: str = "curso
 
 
 def test_set_public_auto_generates_and_returns_token(owner_client):
-    """加入接码白名单时若账号尚无 token，自动生成并通过 ``tokens`` 字段回包。"""
+    """加入接码白名单时若账号尚无 token，自动生成分类凭证并回包。"""
     aid = _import_one_account(owner_client)
     r = owner_client.post(
         "/api/accounts/set-public",
@@ -112,8 +112,12 @@ def test_set_public_auto_generates_and_returns_token(owner_client):
     assert body["updated"] == 1
     tokens = body.get("tokens") or {}
     assert str(aid) in tokens
-    new_token = tokens[str(aid)]
-    assert len(new_token) == 6
+    new_tokens = tokens[str(aid)]
+    assert set(new_tokens) == {"cursor", "openai"}
+    assert new_tokens["cursor"].startswith("C")
+    assert new_tokens["openai"].startswith("G")
+    assert len(new_tokens["cursor"]) == 6
+    assert len(new_tokens["openai"]) == 6
     # 再次调用：已有 token 不应再生成 — tokens 字段应为空
     r2 = owner_client.post(
         "/api/accounts/set-public",
@@ -121,6 +125,44 @@ def test_set_public_auto_generates_and_returns_token(owner_client):
     )
     assert r2.status_code == 200
     assert (r2.json().get("tokens") or {}) == {}
+
+
+def test_set_public_can_enable_single_category(owner_client):
+    """可以只开放 Cursor 或只开放 GPT，且只生成对应前缀凭证。"""
+    cursor_id = _import_one_account(owner_client, "cursor-only@outlook.com")
+    gpt_id = _import_one_account(owner_client, "gpt-only@outlook.com")
+
+    r1 = owner_client.post(
+        "/api/accounts/set-public",
+        json={
+            "ids": [cursor_id],
+            "is_public": True,
+            "allowed_categories": ["cursor"],
+        },
+    )
+    assert r1.status_code == 200, r1.text
+    cursor_tokens = r1.json()["tokens"][str(cursor_id)]
+    assert set(cursor_tokens) == {"cursor"}
+    assert cursor_tokens["cursor"].startswith("C")
+
+    r2 = owner_client.post(
+        "/api/accounts/set-public",
+        json={
+            "ids": [gpt_id],
+            "is_public": True,
+            "allowed_categories": ["openai"],
+        },
+    )
+    assert r2.status_code == 200, r2.text
+    gpt_tokens = r2.json()["tokens"][str(gpt_id)]
+    assert set(gpt_tokens) == {"openai"}
+    assert gpt_tokens["openai"].startswith("G")
+
+    r3 = owner_client.get("/api/accounts/public-ids")
+    assert r3.status_code == 200
+    categories = r3.json()["categories"]
+    assert categories[str(cursor_id)] == "cursor"
+    assert categories[str(gpt_id)] == "openai"
 
 
 def test_set_public_blocked_for_non_owner(normal_client):
@@ -146,7 +188,9 @@ def test_account_list_includes_access_token_for_owner(owner_client):
     assert r.status_code == 200, r.text
     rows = r.json()
     row = next(x for x in rows if int(x["id"]) == aid)
-    assert "access_token" in row, "站长身份下 /api/accounts 必须返回 access_token 字段"
+    assert "access_tokens" in row, "站长身份下 /api/accounts 必须返回 access_tokens 字段"
+    assert row["access_tokens"]["cursor"].startswith("C")
+    assert row["access_tokens"]["openai"].startswith("G")
     assert len(row["access_token"]) == 6
 
 
@@ -160,6 +204,7 @@ def test_account_list_omits_access_token_for_non_owner(normal_client):
     assert "access_token" not in row, (
         "非站长用户名下的 /api/accounts 响应**绝不应**含 access_token 字段"
     )
+    assert "access_tokens" not in row
 
 
 def test_account_detail_includes_access_token_for_owner(owner_client):
@@ -171,6 +216,9 @@ def test_account_detail_includes_access_token_for_owner(owner_client):
     r = owner_client.get(f"/api/accounts/{aid}")
     assert r.status_code == 200, r.text
     body = r.json()
+    assert body.get("access_tokens")
+    assert body["access_tokens"]["cursor"].startswith("C")
+    assert body["access_tokens"]["openai"].startswith("G")
     assert body.get("access_token") and len(body["access_token"]) == 6
 
 
@@ -183,19 +231,21 @@ def test_rotate_single_token(owner_client):
         "/api/accounts/set-public",
         json={"ids": [aid], "is_public": True},
     )
-    old_token = (r1.json().get("tokens") or {}).get(str(aid))
-    assert old_token
+    old_tokens = (r1.json().get("tokens") or {}).get(str(aid))
+    assert old_tokens
 
     r2 = owner_client.post(f"/api/accounts/{aid}/rotate-token", json={})
     assert r2.status_code == 200, r2.text
-    new_token = r2.json().get("access_token")
-    assert new_token and len(new_token) == 6
-    assert new_token != old_token
+    new_tokens = r2.json().get("access_tokens") or {}
+    assert set(new_tokens) == {"cursor", "openai"}
+    assert new_tokens["cursor"].startswith("C")
+    assert new_tokens["openai"].startswith("G")
+    assert new_tokens != old_tokens
 
     # 列表里读到的也是新 token
     r3 = owner_client.get("/api/accounts")
     row = next(x for x in r3.json() if int(x["id"]) == aid)
-    assert row["access_token"] == new_token
+    assert row["access_tokens"] == new_tokens
 
 
 def test_rotate_single_token_404_for_unknown_id(owner_client):
@@ -262,14 +312,14 @@ def test_rotate_tokens_bulk_blocked_for_non_owner(normal_client):
     assert r.status_code == 403
 
 
-# ── DB 层 v8 自动迁移：v7 老库升级时给所有 is_public=1 自动生成 token ──
+# ── DB 层 v9 自动迁移：老库升级时给公开账号自动生成分类 token ──
 
 
-def test_v8_migration_auto_generates_token_for_public_accounts(tmp_path, monkeypatch):
-    """v7 → v8 升级时：所有 is_public=1 且 access_token='' 的账号都被自动赋值。
+def test_v9_migration_auto_generates_category_token_for_public_accounts(tmp_path, monkeypatch):
+    """v7 → v9 升级时：公开账号会按分类自动生成 C/G 前缀凭证。
 
     模拟方式：手工建一个 v7 状态的 DB（user_version=7、accounts.access_token=''），
-    再用 v8 的 DatabaseManager 打开，触发 _init_database 内的迁移逻辑。
+    再用当前 DatabaseManager 打开，触发 _init_database 内的迁移逻辑。
     """
     import sqlite3
 
@@ -281,7 +331,7 @@ def test_v8_migration_auto_generates_token_for_public_accounts(tmp_path, monkeyp
 
     db_path = str(tmp_path / "emails.db")
 
-    # 1) 先用当前实现建库（schema v8 已经包含 access_token 列）
+    # 1) 先用当前实现建库（schema 已经包含分类 access_token 列）
     db = DatabaseManager(db_path=db_path)
     box = SecretBox.instance()
     uid = db.create_user("owner", "fake-pbkdf2")
@@ -302,7 +352,7 @@ def test_v8_migration_auto_generates_token_for_public_accounts(tmp_path, monkeyp
         conn.execute("PRAGMA user_version = 7")
         conn.commit()
 
-    # 3) 重新 import DatabaseManager 触发 _init_database 跑 v7→v8 迁移
+    # 3) 重新 import DatabaseManager 触发 _init_database 跑 v7→v9 迁移
     _reset_globals()
     monkeypatch.setenv("EMAIL_DATA_DIR", str(tmp_path))
     from database.db_manager import DatabaseManager as _DM
@@ -310,10 +360,11 @@ def test_v8_migration_auto_generates_token_for_public_accounts(tmp_path, monkeyp
 
     acc = db2.get_account(uid, acc_id)
     assert acc is not None
-    assert acc.access_token, "v8 迁移必须自动给 is_public=1 的账号生成 token"
-    assert len(acc.access_token) == 6
+    assert acc.access_token_cursor, "v9 迁移必须自动给 cursor 账号生成 C 开头 token"
+    assert acc.access_token_cursor.startswith("C")
+    assert len(acc.access_token_cursor) == 6
     # 与该 token 配套的 lookup 应能成功
     found = db2.get_public_account_for_lookup(
-        "owner", "leg@outlook.com", "cursor", access_token=acc.access_token,
+        "owner", "leg@outlook.com", "cursor", access_token=acc.access_token_cursor,
     )
     assert found is not None

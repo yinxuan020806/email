@@ -231,16 +231,29 @@ ACCESS_TOKEN_ALPHABET = (
 ACCESS_TOKEN_LENGTH = 6
 
 
-def generate_access_token(length: int = ACCESS_TOKEN_LENGTH) -> str:
+def generate_access_token(
+    length: int = ACCESS_TOKEN_LENGTH,
+    prefix: str = "",
+) -> str:
     """生成一个 ``length`` 位的接码邮箱凭证（默认 6 位）。
 
     - 使用 ``secrets`` 模块 → 走 OS CSPRNG，密码学安全
     - 字符集 54 个，避开易混淆字符
+    - ``prefix`` 非空时会固定作为开头，并计入总长度
     - 调用方负责把返回值加密存库（``SecretBox.encrypt``）
     """
     if length < 4:
         raise ValueError("access_token 长度不得小于 4 位（熵不足）")
-    return "".join(secrets.choice(ACCESS_TOKEN_ALPHABET) for _ in range(length))
+    prefix = (prefix or "").strip()
+    if prefix:
+        if len(prefix) >= length:
+            raise ValueError("access_token 前缀长度必须小于总长度")
+        if any(ch not in ACCESS_TOKEN_ALPHABET for ch in prefix):
+            raise ValueError("access_token 前缀包含非法字符")
+    return prefix + "".join(
+        secrets.choice(ACCESS_TOKEN_ALPHABET)
+        for _ in range(length - len(prefix))
+    )
 
 
 def normalize_access_token(value: Optional[str]) -> str:

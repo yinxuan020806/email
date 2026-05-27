@@ -278,6 +278,8 @@ class LookupRequest(BaseModel):
     category: str = Field(min_length=1, max_length=32)
     # Cloudflare Turnstile 人机校验 token；仅在 TURNSTILE_ENABLED=True 时强制要求。
     cf_token: Optional[str] = Field(default=None, max_length=4096)
+    # 前端自动轮询时必须绕过短缓存，避免上一轮"还没到"或旧验证码拖慢新邮件可见性。
+    force_refresh: bool = False
 
     @field_validator("category")
     @classmethod
@@ -366,15 +368,17 @@ def _is_auth_failure(text: str) -> bool:
 
 
 # ── IMAP 收件箱结果短期缓存 ────────────────────────────────────
-# 同一邮箱在数十秒内反复查询时，与其每次都重新建立 IMAP / Graph 连接 +
-# 拉 20 封邮件（每次 1-3 秒），不如把上一次的 (mails, msg) 缓存 30 秒。
-# - 命中：单次响应从 ~2s 降到 ~50ms，明显改善"等不及反复点查询"体验
-# - 失效：30s 后过期，必拉新；若用户拿到验证码后还想继续刷新，等 30s
+# 只缓存"已经命中验证码 / magic link"的收件箱快照，且 TTL 很短。
+# 旧逻辑会把"暂无邮件 / 未匹配"也缓存 30 秒：用户太早点一次查询后，即使
+# 验证邮件 2 秒后到达，接下来半分钟仍可能读到旧快照，体感就是"接码很慢"。
+# - 命中：短时间重复查看从 ~2s 降到 ~50ms
+# - 未命中：不缓存，前端自动轮询每次都能看到最新收件箱
+# - 强刷：force_refresh=True 时绕过缓存，适合自动轮询和用户主动刷新
 # - 隔离：以 (email_lower, owner_id, account_id) 为 key，不会跨账号串
 # - 容量限制：最多 200 个 key，超过自动驱逐最老的（小服务足矣）
 import threading  # noqa: E402
 
-_INBOX_CACHE_TTL_SEC = 30.0
+_INBOX_CACHE_TTL_SEC = float(os.getenv("CRX_INBOX_CACHE_TTL_SEC", "8"))
 _INBOX_CACHE_MAX = 200
 _inbox_cache: dict[str, tuple[float, list[dict], str]] = {}
 _inbox_cache_lock = threading.Lock()
@@ -693,11 +697,13 @@ def lookup(req: LookupRequest, request: Request) -> JSONResponse:
             )
 
         # 4) 拉邮件（IMAP 已强制 socket timeout，避免恶意服务器吊死 worker）
-        # 4a) 优先查 30s 进程内缓存：用户连续刷新同一邮箱时不必每次都重连 IMAP
+        # 4a) 优先查短期正向缓存；自动轮询 / 主动刷新通过 force_refresh 绕过。
         cache_key = _inbox_cache_key(account.email, account.id or 0)
-        cached = _inbox_cache_get(cache_key)
+        cache_hit = False
+        cached = None if req.force_refresh else _inbox_cache_get(cache_key)
         if cached is not None:
             mails, msg = cached
+            cache_hit = True
             logger.info(
                 "inbox cache HIT cat=%s acc=%d (saved one IMAP/Graph round-trip)",
                 req.category, account.id or 0,
@@ -706,8 +712,6 @@ def lookup(req: LookupRequest, request: Request) -> JSONResponse:
             client = _build_client(account)
             try:
                 mails, msg = client.fetch_emails(folder="inbox", limit=20, with_body=True)
-                # 拉取成功才写缓存；异常时直接 raise，不污染缓存
-                _inbox_cache_set(cache_key, mails, msg)
             except Exception as exc:
                 err_text = f"{type(exc).__name__}: {exc}"
                 is_auth = _is_auth_failure(err_text)
@@ -766,6 +770,10 @@ def lookup(req: LookupRequest, request: Request) -> JSONResponse:
 
         matched_rule_id = result.matched_rule_id
         success = True
+
+        # 只缓存正向命中，避免"未到货"缓存拖慢下一轮真实验证码。
+        if not cache_hit:
+            _inbox_cache_set(cache_key, mails, msg)
 
         # 6) 命中公开账号 → 自增 query_count（用于站长统计 & 反滥用基线）
         try:
