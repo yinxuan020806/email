@@ -732,7 +732,7 @@ function buildAccountRow(a, index, isOwner) {
   const cb = el('input', { type: 'checkbox' });
   cb.checked = S.selected.has(a.id);
   cb.addEventListener('change', () => toggleSel(a.id, cb.checked));
-  tr.appendChild(el('td', {}, cb));
+  tr.appendChild(el('td', { class: 'sel-cell' }, cb));
   tr.appendChild(el('td', {}, String(index + 1)));
 
   // 邮箱单击复制邮箱、双击复制 邮箱----密码；查看详情走操作列的"详情"按钮
@@ -1347,6 +1347,93 @@ function toggleSel(id, checked) {
   // 单行级更新：只动这一行的 class/checkbox，不重建表格
   applySelToRow(findAccountRow(id), checked);
   syncSelAllCheckbox();
+}
+
+let accountSelectionDrag = null;
+let suppressAccountSelectionClick = false;
+
+function accountIdFromRow(tr) {
+  if (!tr || !tr.dataset) return null;
+  const raw = tr.dataset.id;
+  if (raw == null || raw === '') return null;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) ? n : raw;
+}
+
+function accountSelectionRowFromTarget(target) {
+  const row = target && target.closest ? target.closest('#accBody tr[data-id]') : null;
+  return row && $('accBody') && $('accBody').contains(row) ? row : null;
+}
+
+function accountSelectionHandleFromTarget(target) {
+  const handle = target && target.closest ? target.closest('td.sel-cell') : null;
+  return handle && $('accBody') && $('accBody').contains(handle) ? handle : null;
+}
+
+function applyAccountSelectionDragToRow(row) {
+  if (!accountSelectionDrag || !row) return;
+  const id = accountIdFromRow(row);
+  if (id == null) return;
+  const key = String(id);
+  if (accountSelectionDrag.seen.has(key)) return;
+  accountSelectionDrag.seen.add(key);
+  toggleSel(id, accountSelectionDrag.checked);
+}
+
+function startAccountSelectionDrag(e) {
+  if (e.button != null && e.button !== 0) return;
+  if (!accountSelectionHandleFromTarget(e.target)) return;
+
+  const row = accountSelectionRowFromTarget(e.target);
+  const id = accountIdFromRow(row);
+  if (id == null) return;
+
+  e.preventDefault();
+  suppressAccountSelectionClick = true;
+
+  accountSelectionDrag = {
+    checked: !S.selected.has(id),
+    pointerId: e.pointerId,
+    seen: new Set(),
+  };
+  document.body.classList.add('account-selection-dragging');
+
+  const cb = row.querySelector('input[type="checkbox"]');
+  if (cb && cb.focus) {
+    try { cb.focus({ preventScroll: true }); } catch (_) { cb.focus(); }
+  }
+  applyAccountSelectionDragToRow(row);
+
+  document.addEventListener('pointermove', continueAccountSelectionDrag, { passive: false });
+  document.addEventListener('pointerup', stopAccountSelectionDrag, true);
+  document.addEventListener('pointercancel', stopAccountSelectionDrag, true);
+}
+
+function continueAccountSelectionDrag(e) {
+  if (!accountSelectionDrag) return;
+  if (e.pointerId !== accountSelectionDrag.pointerId) return;
+  e.preventDefault();
+  const target = document.elementFromPoint(e.clientX, e.clientY);
+  applyAccountSelectionDragToRow(accountSelectionRowFromTarget(target));
+}
+
+function stopAccountSelectionDrag(e) {
+  if (!accountSelectionDrag) return;
+  if (e && e.pointerId !== accountSelectionDrag.pointerId) return;
+  accountSelectionDrag = null;
+  document.body.classList.remove('account-selection-dragging');
+  document.removeEventListener('pointermove', continueAccountSelectionDrag);
+  document.removeEventListener('pointerup', stopAccountSelectionDrag, true);
+  document.removeEventListener('pointercancel', stopAccountSelectionDrag, true);
+  setTimeout(() => { suppressAccountSelectionClick = false; }, 250);
+}
+
+function swallowAccountSelectionClick(e) {
+  if (!suppressAccountSelectionClick) return;
+  if (!accountSelectionHandleFromTarget(e.target)) return;
+  e.preventDefault();
+  e.stopPropagation();
+  suppressAccountSelectionClick = false;
 }
 
 /**
@@ -3533,6 +3620,8 @@ $('langBtn').addEventListener('click', toggleLang);
 $('addGroupBtn').addEventListener('click', addGroup);
 $('searchInp').addEventListener('input', filterAccountsDebounced);
 $('selAll').addEventListener('change', (e) => toggleSelAll(e.target.checked));
+$('accBody').addEventListener('pointerdown', startAccountSelectionDrag);
+$('accBody').addEventListener('click', swallowAccountSelectionClick, true);
 $('btnImport').addEventListener('click', showImportModal);
 $('btnExport').addEventListener('click', showExportModal);
 $('btnDoExport').addEventListener('click', doExport);

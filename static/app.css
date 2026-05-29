@@ -105,6 +105,8 @@ body{font-family:'Segoe UI','Microsoft YaHei UI',system-ui,sans-serif;background
 .tbl td{padding:10px 14px;border-bottom:1px solid var(--hover);font-size:13px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tbl tr:hover td{background:var(--hover)}
 .tbl tr.selected td{background:var(--sel)}
+.tbl td.sel-cell,.tbl td.sel-cell input[type="checkbox"]{cursor:crosshair;user-select:none;touch-action:none}
+.account-selection-dragging,.account-selection-dragging .tbl{cursor:crosshair;user-select:none}
 .tbl input[type="checkbox"]{width:16px;height:16px;cursor:pointer;accent-color:var(--accent)}
 .badge{display:inline-block;padding:3px 10px;border-radius:6px;font-size:11px;font-weight:500}
 .badge-ok{background:#e8f5e9;color:#2e7d32}

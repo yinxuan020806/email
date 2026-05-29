@@ -326,6 +326,16 @@ def test_app_js_has_copy_full_button_and_helper(client):
     assert "payload.ids" in body, "doExport 在 scope=selected 时未传 ids"
 
 
+def test_app_js_has_account_drag_selection(client):
+    """账号表格支持从复选框列按住滑过多行连续选中/取消。"""
+    js = client.get("/static/app.js").text
+    css = client.get("/static/app.css").text
+    assert "sel-cell" in js, "账号行复选框列缺少拖选命中区域"
+    assert "startAccountSelectionDrag" in js, "缺少账号表格拖选入口"
+    assert "elementFromPoint" in js, "拖选应按指针位置命中经过的行"
+    assert "account-selection-dragging" in css, "拖选时缺少防文本选中的样式"
+
+
 def test_i18n_includes_new_keys(client):
     body = client.get("/static/i18n.js").text
     for key in (
