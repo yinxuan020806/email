@@ -65,6 +65,7 @@
     var first = String(token || '').trim().charAt(0);
     if (first === 'C') return 'cursor';
     if (first === 'G') return 'openai';
+    if (first === 'H') return 'higgsfield';
     return '';
   }
 

@@ -8,6 +8,7 @@ from typing import Callable, Dict, List, Optional
 
 from extractors.base import Extractor
 from extractors import cursor as _cursor
+from extractors import higgsfield as _higgsfield
 from extractors import openai_chatgpt as _openai
 
 
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 _BUILTIN: Dict[str, Callable[[], List[Extractor]]] = {
     "cursor": _cursor.default_rules,
     "openai": _openai.default_rules,
+    "higgsfield": _higgsfield.default_rules,
 }
 
 

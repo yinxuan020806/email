@@ -602,16 +602,17 @@ async function loadPublicIds() {
 function tokenCategoryLabel(category) {
   if (category === 'cursor') return 'Cursor';
   if (category === 'openai') return 'GPT';
+  if (category === 'higgsfield') return 'Higgsfield';
   return '';
 }
 
 function publicCategoryLabel(raw) {
   const v = String(raw || '').trim().toLowerCase();
-  if (v === '*') return 'Cursor/GPT';
+  if (v === '*') return 'Cursor/GPT/Higgsfield';
   if (!v) return '';
   const parts = v.split(',')
     .map((x) => x.trim())
-    .filter((x) => x === 'cursor' || x === 'openai');
+    .filter((x) => x === 'cursor' || x === 'openai' || x === 'higgsfield');
   return parts.map(tokenCategoryLabel).filter(Boolean).join('/');
 }
 
@@ -621,7 +622,7 @@ function normalizeTokenEntries(value) {
     return value ? [{ category: '', token: value }] : [];
   }
   if (typeof value !== 'object') return [];
-  return ['cursor', 'openai']
+  return ['cursor', 'openai', 'higgsfield']
     .map((category) => ({ category, token: String(value[category] || '').trim() }))
     .filter((x) => x.token);
 }
@@ -632,17 +633,20 @@ function tokenEntriesForAccount(account) {
   return normalizeTokenEntries({
     cursor: account.access_token_cursor || '',
     openai: account.access_token_openai || '',
+    higgsfield: account.access_token_higgsfield || '',
   }).concat(
-    (!account.access_token_cursor && !account.access_token_openai && account.access_token)
+    (!account.access_token_cursor && !account.access_token_openai
+      && !account.access_token_higgsfield && account.access_token)
       ? [{ category: '', token: account.access_token }]
       : [],
   );
 }
 
 function tokenMapForAccount(account) {
-  const out = { cursor: '', openai: '' };
+  const out = { cursor: '', openai: '', higgsfield: '' };
   for (const entry of tokenEntriesForAccount(account || {})) {
-    if (entry.category === 'cursor' || entry.category === 'openai') {
+    if (entry.category === 'cursor' || entry.category === 'openai'
+      || entry.category === 'higgsfield') {
       out[entry.category] = entry.token;
     }
   }
@@ -674,12 +678,13 @@ function choosePublicCategories() {
   if (raw === null) return null;
   const v = String(raw || '').trim().toLowerCase();
   if (!v || v === '3' || v === 'both' || v === 'all' || v === '全部') {
-    return ['cursor', 'openai'];
+    return ['cursor', 'openai', 'higgsfield'];
   }
   if (v === '1' || v === 'c' || v === 'cursor') return ['cursor'];
   if (v === '2' || v === 'g' || v === 'gpt' || v === 'openai' || v === 'chatgpt') {
     return ['openai'];
   }
+  if (v === '4' || v === 'h' || v === 'higgsfield') return ['higgsfield'];
   toast(t('toast_public_categories_invalid'), 'warning');
   return null;
 }
@@ -1575,6 +1580,7 @@ async function showCredentialsModal(account) {
       const tokens = tokenMapForAccount(a);
       $('credTokenCursor').value = tokens.cursor || '';
       $('credTokenOpenai').value = tokens.openai || '';
+      $('credTokenHiggsfield').value = tokens.higgsfield || '';
     }
     $('credErr').textContent = '';
     openModal('credentialsModal');
@@ -1608,6 +1614,7 @@ async function saveCredentials() {
         access_tokens: {
           cursor: $('credTokenCursor').value.trim(),
           openai: $('credTokenOpenai').value.trim(),
+          higgsfield: $('credTokenHiggsfield').value.trim(),
         },
       });
     }

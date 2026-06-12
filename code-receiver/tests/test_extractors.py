@@ -311,6 +311,78 @@ def test_cursor_new_subdomain_notifications():
     assert result.code == "384910"
 
 
+# ── Higgsfield ────────────────────────────────────────────────────
+
+
+def test_higgsfield_extract_code_from_body():
+    mails = [
+        make_mail(
+            sender="Higgsfield.AI <noreply@higgsfield.ai>",
+            subject="183762 is your verification code",
+            body=(
+                "Verification code\n"
+                "Enter the following verification code when prompted:\n\n"
+                "183762\n\n"
+                "To protect your account, do not share this code."
+            ),
+        )
+    ]
+    extractors = get_extractors("higgsfield")
+    result = first_match(extractors, mails)
+    assert result is not None
+    assert result.code == "183762"
+
+
+def test_higgsfield_extract_code_from_subject():
+    mails = [
+        make_mail(
+            sender="noreply@higgsfield.ai",
+            subject="183762 is your verification code",
+            body="If you didn't request this, you can safely ignore this email.",
+        )
+    ]
+    extractors = get_extractors("higgsfield")
+    result = first_match(extractors, mails)
+    assert result is not None
+    assert result.code == "183762"
+
+
+def test_higgsfield_extract_code_from_html_body():
+    html_body = """<!DOCTYPE html><html><body>
+      <h1>Verification code</h1>
+      <p>Enter the following verification code when prompted:</p>
+      <div style="font-size:32px;font-weight:bold">183762</div>
+      <p>To protect your account, do not share this code.</p>
+    </body></html>"""
+    mails = [
+        {
+            "sender": "Higgsfield.AI",
+            "sender_email": "noreply@higgsfield.ai",
+            "subject": "183762 is your verification code",
+            "body": html_body,
+            "preview": html_body[:200],
+            "date": "2026-06-12T03:13:00",
+        }
+    ]
+    extractors = get_extractors("higgsfield")
+    result = first_match(extractors, mails)
+    assert result is not None
+    assert result.code == "183762"
+
+
+def test_higgsfield_ignores_unrelated_sender():
+    mails = [
+        make_mail(
+            sender="random@example.com",
+            subject="Your code is 123456",
+            body="Code: 123456",
+        )
+    ]
+    extractors = get_extractors("higgsfield")
+    result = first_match(extractors, mails)
+    assert result is None
+
+
 def test_safelinks_unwrap_passthrough():
     """非 SafeLinks 原样返回。"""
     raw = "https://example.com/x?y=1"

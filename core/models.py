@@ -39,6 +39,7 @@ class Account:
     access_token: str = ''
     access_token_cursor: str = ''
     access_token_openai: str = ''
+    access_token_higgsfield: str = ''
 
     # ── 字段顺序，用于 __getitem__ 兼容桥 ──
     _FIELD_ORDER = (
@@ -46,7 +47,7 @@ class Account:
         'imap_server', 'imap_port', 'smtp_server', 'smtp_port',
         'client_id', 'refresh_token', 'created_at', 'last_check',
         'has_aws_code', 'remark', 'access_token',
-        'access_token_cursor', 'access_token_openai',
+        'access_token_cursor', 'access_token_openai', 'access_token_higgsfield',
     )
 
     def to_dict(self) -> dict:
@@ -95,6 +96,7 @@ class Account:
             access_token=padded[16] or '',
             access_token_cursor=padded[17] or '',
             access_token_openai=padded[18] or '',
+            access_token_higgsfield=padded[19] or '',
         )
 
     # ── 临时兼容桥（步骤6中删除）──────────────────────────
@@ -106,7 +108,7 @@ class Account:
 
     def __len__(self) -> int:
         """支持 len(acc) > N 守卫。
-        v9 起字段数从 17 增至 19（新增分类 access_token）。
+        v10 起字段数从 19 增至 20（新增 higgsfield access_token）。
         """
         return len(self._FIELD_ORDER)
 

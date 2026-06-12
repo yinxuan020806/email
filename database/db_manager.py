@@ -60,24 +60,28 @@ SORTABLE_COLUMNS = {
     "last_check",
 }
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # 审计日志保留天数（超过自动清理）
 AUDIT_RETENTION_DAYS = 90
 
 # 接码业务允许的分类标签白名单（写入 extractor_rules.category 时校验）
-ALLOWED_CODE_CATEGORIES = {"cursor", "openai", "anthropic", "google", "github", "generic"}
+ALLOWED_CODE_CATEGORIES = {
+    "cursor", "openai", "higgsfield", "anthropic", "google", "github", "generic",
+}
 
-# 当前接码前台只开放 Cursor / GPT(OpenAI) 两类。两类可以分别开通、分别轮换，
+# 当前接码前台开放的分类。各分类可分别开通、分别轮换；
 # 凭证明文用首字母区分，方便站长和下游用户肉眼确认用途。
-CODE_ACCESS_TOKEN_CATEGORIES = ("cursor", "openai")
+CODE_ACCESS_TOKEN_CATEGORIES = ("cursor", "openai", "higgsfield")
 CODE_ACCESS_TOKEN_PREFIXES = {
     "cursor": "C",
     "openai": "G",
+    "higgsfield": "H",
 }
 CODE_ACCESS_TOKEN_COLUMNS = {
     "cursor": "access_token_cursor",
     "openai": "access_token_openai",
+    "higgsfield": "access_token_higgsfield",
 }
 
 # 接码查询日志保留天数
@@ -94,6 +98,7 @@ QUERY_LOG_RETENTION_DAYS = 30
 GROUP_KEYWORDS_BY_CATEGORY: dict[str, tuple[str, ...]] = {
     "cursor": ("cursor",),
     "openai": ("gpt", "openai", "chatgpt"),
+    "higgsfield": ("higgsfield",),
     "anthropic": ("anthropic", "claude"),
     "google": ("google", "gmail-only"),
     "github": ("github",),
@@ -408,6 +413,7 @@ class DatabaseManager:
                 # v8 → v9：Cursor / GPT 分拆凭证；总长仍 6 位，首字母固定 C/G
                 ("access_token_cursor", "TEXT DEFAULT ''"),
                 ("access_token_openai", "TEXT DEFAULT ''"),
+                ("access_token_higgsfield", "TEXT DEFAULT ''"),
             ):
                 col_name, col_type = col_def
                 if col_name not in existing_cols:
@@ -579,6 +585,9 @@ class DatabaseManager:
                         "openai": openai_cipher,
                     }
                     for category in _token_categories_for_scope(cats_str, group_name):
+                        # v9 当时只拆 Cursor / GPT；Higgsfield 留给 v10 迁移。
+                        if category not in ("cursor", "openai"):
+                            continue
                         if existing.get(category):
                             continue
                         token = _generate_category_access_token(category)
@@ -599,6 +608,48 @@ class DatabaseManager:
                         "接码前台校验。",
                         migrated_by_category["cursor"],
                         migrated_by_category["openai"],
+                    )
+
+            # ── v9 → v10 一次性数据迁移：Higgsfield 独立凭证 ──
+            if current_version < 10:
+                box = SecretBox.instance()
+                token_cols = ", ".join(
+                    f"COALESCE({col}, '')" for col in CODE_ACCESS_TOKEN_COLUMNS.values()
+                )
+                rows = cur.execute(
+                    f"SELECT id, COALESCE(group_name, ''), "
+                    f"       COALESCE(allowed_categories, ''), {token_cols} "
+                    f"FROM accounts WHERE is_public = 1"
+                ).fetchall()
+                migrated_by_category = {c: 0 for c in CODE_ACCESS_TOKEN_CATEGORIES}
+                col_names = list(CODE_ACCESS_TOKEN_COLUMNS.keys())
+                for row in rows:
+                    aid = row[0]
+                    group_name = row[1]
+                    cats_str = row[2]
+                    existing = {
+                        col_names[i]: row[3 + i] for i in range(len(col_names))
+                    }
+                    for category in _token_categories_for_scope(cats_str, group_name):
+                        if existing.get(category):
+                            continue
+                        token = _generate_category_access_token(category)
+                        cipher = box.encrypt(token) or ""
+                        col = CODE_ACCESS_TOKEN_COLUMNS[category]
+                        cur.execute(
+                            f"UPDATE accounts SET {col} = ? WHERE id = ?",
+                            (cipher, aid),
+                        )
+                        existing[category] = cipher
+                        migrated_by_category[category] += 1
+                migrated = sum(migrated_by_category.values())
+                if migrated:
+                    logger.warning(
+                        "v9→v10 数据迁移：已为公开接码账号生成分类凭证 "
+                        "cursor=%d, openai=%d, higgsfield=%d。Higgsfield 凭证以 H 开头。",
+                        migrated_by_category["cursor"],
+                        migrated_by_category["openai"],
+                        migrated_by_category["higgsfield"],
                     )
 
             # 任意一次升级跑了数据迁移（accounts 实际被 UPDATE 过），都把所有
@@ -1001,7 +1052,7 @@ class DatabaseManager:
         "imap_server", "imap_port", "smtp_server", "smtp_port",
         "client_id", "refresh_token", "created_at", "last_check",
         "has_aws_code", "remark", "access_token",
-        "access_token_cursor", "access_token_openai",
+        "access_token_cursor", "access_token_openai", "access_token_higgsfield",
     )
 
     def _select_account_columns(self, alias: str = "") -> str:
@@ -1544,19 +1595,19 @@ class DatabaseManager:
             ok = cur.rowcount > 0
             if ok and is_public:
                 # 读出当前分类 token（密文），空才补 — 不动已有的。
+                token_cols = ", ".join(
+                    f"COALESCE({col}, '')" for col in CODE_ACCESS_TOKEN_COLUMNS.values()
+                )
                 row = conn.execute(
-                    "SELECT COALESCE(group_name, ''), "
-                    "       COALESCE(access_token_cursor, ''), "
-                    "       COALESCE(access_token_openai, '') "
-                    "FROM accounts "
-                    "WHERE id = ? AND owner_id = ?",
+                    f"SELECT COALESCE(group_name, ''), {token_cols} "
+                    f"FROM accounts WHERE id = ? AND owner_id = ?",
                     (account_id, owner_id),
                 ).fetchone()
                 if row:
-                    group_name, cursor_cipher, openai_cipher = row
+                    group_name = row[0]
+                    col_names = list(CODE_ACCESS_TOKEN_COLUMNS.keys())
                     existing = {
-                        "cursor": cursor_cipher,
-                        "openai": openai_cipher,
+                        col_names[i]: row[1 + i] for i in range(len(col_names))
                     }
                     box = SecretBox.instance()
                     for category in _token_categories_for_scope(cats_str, group_name):
@@ -2061,8 +2112,7 @@ class DatabaseManager:
         # 拒绝该次请求，比让整条 Account 加载崩掉更安全）。
         for attr in (
             "access_token",
-            "access_token_cursor",
-            "access_token_openai",
+            *CODE_ACCESS_TOKEN_COLUMNS.values(),
         ):
             try:
                 setattr(acc, attr, box.decrypt(getattr(acc, attr)) or "")
