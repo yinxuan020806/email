@@ -153,13 +153,15 @@ def test_set_public_auto_generates_and_returns_token(owner_client):
     tokens = body.get("tokens") or {}
     assert str(aid) in tokens
     new_tokens = tokens[str(aid)]
-    assert set(new_tokens) == {"cursor", "openai", "higgsfield"}
+    assert set(new_tokens) == {"cursor", "openai", "higgsfield", "hedra"}
     assert new_tokens["cursor"].startswith("C")
     assert new_tokens["openai"].startswith("G")
     assert new_tokens["higgsfield"].startswith("H")
+    assert new_tokens["hedra"].startswith("E")
     assert len(new_tokens["cursor"]) == 6
     assert len(new_tokens["openai"]) == 6
     assert len(new_tokens["higgsfield"]) == 6
+    assert len(new_tokens["hedra"]) == 6
     # 再次调用：已有 token 不应再生成 — tokens 字段应为空
     r2 = owner_client.post(
         "/api/accounts/set-public",
@@ -279,10 +281,11 @@ def test_rotate_single_token(owner_client):
     r2 = owner_client.post(f"/api/accounts/{aid}/rotate-token", json={})
     assert r2.status_code == 200, r2.text
     new_tokens = r2.json().get("access_tokens") or {}
-    assert set(new_tokens) == {"cursor", "openai", "higgsfield"}
+    assert set(new_tokens) == {"cursor", "openai", "higgsfield", "hedra"}
     assert new_tokens["cursor"].startswith("C")
     assert new_tokens["openai"].startswith("G")
     assert new_tokens["higgsfield"].startswith("H")
+    assert new_tokens["hedra"].startswith("E")
     assert new_tokens != old_tokens
 
     # 列表里读到的也是新 token

@@ -66,6 +66,7 @@
     if (first === 'C') return 'cursor';
     if (first === 'G') return 'openai';
     if (first === 'H') return 'higgsfield';
+    if (first === 'E') return 'hedra';
     return '';
   }
 
@@ -97,8 +98,8 @@
     var brandSub = document.getElementById('brand-sub');
     if (brandSub) {
       brandSub.textContent = required
-        ? '输入邮箱 + 6 位凭证 · 一键提取 Cursor / ChatGPT 验证码与登录链接'
-        : '输入邮箱 · 一键提取 Cursor / ChatGPT 验证码与登录链接';
+        ? '输入邮箱 + 6 位凭证 · 一键提取 Cursor / ChatGPT / Higgsfield / Hedra 验证码与登录链接'
+        : '输入邮箱 · 一键提取 Cursor / ChatGPT / Higgsfield / Hedra 验证码与登录链接';
     }
     var hint = document.getElementById('search-hint');
     if (hint) {

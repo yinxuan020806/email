@@ -770,15 +770,18 @@ def account_to_dict(
             "cursor": acc.access_token_cursor or "",
             "openai": acc.access_token_openai or "",
             "higgsfield": acc.access_token_higgsfield or "",
+            "hedra": acc.access_token_hedra or "",
         }
         base["access_tokens"] = access_tokens
         base["access_token_cursor"] = access_tokens["cursor"]
         base["access_token_openai"] = access_tokens["openai"]
         base["access_token_higgsfield"] = access_tokens["higgsfield"]
+        base["access_token_hedra"] = access_tokens["hedra"]
         base["access_token"] = (
             access_tokens["cursor"]
             or access_tokens["openai"]
             or access_tokens["higgsfield"]
+            or access_tokens["hedra"]
             or acc.access_token
             or ""
         )

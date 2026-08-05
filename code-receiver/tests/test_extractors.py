@@ -383,6 +383,59 @@ def test_higgsfield_ignores_unrelated_sender():
     assert result is None
 
 
+# ── Hedra (WorkOS AuthKit) ────────────────────────────────────────
+
+
+def test_hedra_extract_magic_auth_zh():
+    """中文 Magic Auth：access@workos-mail.com / 主题「登录 Hedra」。"""
+    mails = [
+        make_mail(
+            sender="Hedra <access@workos-mail.com>",
+            subject="登录 Hedra",
+            body=(
+                "您的一次性验证码是 287985。此验证码将在 10 分钟后过期。"
+                "如果您没有请求登录 Hedra，可以放心忽略此邮件。\n"
+                "由 WorkOS 代表 Hedra 发送的邮件。"
+            ),
+        )
+    ]
+    extractors = get_extractors("hedra")
+    result = first_match(extractors, mails)
+    assert result is not None
+    assert result.code == "287985"
+
+
+def test_hedra_extract_email_verification_en():
+    """英文邮箱验证：welcome@workos-mail.com。"""
+    mails = [
+        make_mail(
+            sender="Hedra <welcome@workos-mail.com>",
+            subject="Verify your email address",
+            body=(
+                "Your verification code is 134551. This code expires in 10 minutes. "
+                "If you didn't sign up for Hedra, you can safely ignore this email."
+            ),
+        )
+    ]
+    extractors = get_extractors("hedra")
+    result = first_match(extractors, mails)
+    assert result is not None
+    assert result.code == "134551"
+
+
+def test_hedra_ignores_unrelated_sender():
+    mails = [
+        make_mail(
+            sender="random@example.com",
+            subject="Your code is 123456",
+            body="Code: 123456",
+        )
+    ]
+    extractors = get_extractors("hedra")
+    result = first_match(extractors, mails)
+    assert result is None
+
+
 def test_safelinks_unwrap_passthrough():
     """非 SafeLinks 原样返回。"""
     raw = "https://example.com/x?y=1"

@@ -256,7 +256,7 @@ async def add_security_headers(request: Request, call_next):
 
 # 与前端 chip（cursor / chatgpt）严格对齐：扩展到 anthropic / google 等需要
 # 同时改前端，否则就是"前台做了空白名单也没人能触发"。保留小集合更安全。
-ALLOWED_CATEGORIES = frozenset({"cursor", "openai", "higgsfield"})
+ALLOWED_CATEGORIES = frozenset({"cursor", "openai", "higgsfield", "hedra"})
 
 
 class LookupRequest(BaseModel):
@@ -479,6 +479,7 @@ def healthz():
         bool(get_extractors("cursor"))
         and bool(get_extractors("openai"))
         and bool(get_extractors("higgsfield"))
+        and bool(get_extractors("hedra"))
     )
     if not db_ok or not rules_ok:
         if db_err:
