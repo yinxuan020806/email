@@ -19,6 +19,7 @@ import certifi
 import requests
 from requests.adapters import HTTPAdapter
 
+from core.ms_limiter import microsoft_slot
 from core.oauth2_helper import TOKEN_URL
 
 
@@ -189,6 +190,13 @@ class TokenManager:
         invalid_grant 误报），影响真正可用率。
         """
         key = self._cache_key()
+        # 锁顺序必须是 microsoft_slot → per-key refresh_lock，与
+        # GraphClient.fetch_emails（先占 slot 再 get/_refresh）一致，避免
+        # 「A 持 refresh_lock 等 slot、B 持 slot 等 refresh_lock」死锁。
+        with microsoft_slot():
+            return self._refresh_locked(key)
+
+    def _refresh_locked(self, key: tuple[str, str]) -> Tuple[Optional[str], str]:
         lock = _get_refresh_lock(key)
         with lock:
             # double-check：可能在排队等锁时另一线程已刷过

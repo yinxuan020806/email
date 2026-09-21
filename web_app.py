@@ -70,6 +70,11 @@ from core.auth import (  # noqa: E402
     verify_password,
 )
 from core.email_client import EmailClient  # noqa: E402
+from core.ms_limiter import (  # noqa: E402
+    THROTTLE_USER_MSG,
+    is_ms_throttle_msg,
+    microsoft_slot,
+)
 from core.helper_routes import (  # noqa: E402
     configure as configure_helper_routes,
     helper_router,
@@ -1885,6 +1890,12 @@ _EMAIL_LIST_CACHE_MAXSIZE = 1024
 _email_list_cache: "OrderedDict[tuple, tuple[float, list, str]]" = OrderedDict()
 _email_list_cache_lock = threading.Lock()
 
+# 用户连点不同邮箱时，旧请求在线程池里仍会打到 Graph。这里按 user_id 记
+# 一代号：进入微软 slot 后若已不是最新一代，直接跳过，避免「点了 5 个邮箱
+# = 5 路并发 refresh+Graph」把 Hotmail 出口 IP 限流打满。
+_email_fetch_gen: dict[int, int] = {}
+_email_fetch_gen_lock = threading.Lock()
+
 
 def _email_list_cache_get(key: tuple) -> Optional[tuple[list, str]]:
     now = time.time()
@@ -1921,6 +1932,18 @@ def _email_list_cache_invalidate(account_id: int) -> None:
             _email_list_cache.pop(k, None)
 
 
+def _bump_email_fetch_gen(user_id: int) -> int:
+    with _email_fetch_gen_lock:
+        n = _email_fetch_gen.get(user_id, 0) + 1
+        _email_fetch_gen[user_id] = n
+        return n
+
+
+def _is_latest_email_fetch(user_id: int, gen: int) -> bool:
+    with _email_fetch_gen_lock:
+        return _email_fetch_gen.get(user_id, 0) == gen
+
+
 @app.get("/api/accounts/{account_id}/emails")
 def get_emails(
     account_id: int,
@@ -1947,6 +1970,10 @@ def get_emails(
     """
     acc = get_account_or_404(user["id"], account_id)
 
+    # 先占代次：即便后面命中缓存、立刻返回，进行中的旧 Graph 请求进 slot
+    # 后也会看到自己已经过期，从而跳过上游。
+    fetch_gen = _bump_email_fetch_gen(user["id"])
+
     cache_key = (user["id"], account_id, folder, bool(with_body), int(limit))
     cached = _email_list_cache_get(cache_key)
     if cached is not None:
@@ -1959,9 +1986,12 @@ def get_emails(
 
     client = create_client(user["id"], acc)
     try:
-        # with_body 直接透传到 GraphClient.fetch_emails，让 Graph 服务端就不返回 body
-        # 比"先拉再丢"省了 ~MB 级的传输 + Graph 服务端处理
-        emails, msg = client.fetch_emails(folder=folder, limit=limit, with_body=with_body)
+        with microsoft_slot():
+            if not _is_latest_email_fetch(user["id"], fetch_gen):
+                return {"emails": [], "message": "", "superseded": True}
+            # with_body 直接透传到 GraphClient.fetch_emails，让 Graph 服务端就不返回 body
+            # 比"先拉再丢"省了 ~MB 级的传输 + Graph 服务端处理
+            emails, msg = client.fetch_emails(folder=folder, limit=limit, with_body=with_body)
     finally:
         client.disconnect()
 
@@ -1973,12 +2003,13 @@ def get_emails(
     if not emails and msg and not _is_email_list_ok(msg):
         retry_after = _maybe_extract_retry_after(msg)
         headers = {"Retry-After": str(retry_after)} if retry_after else None
-        # 429 直接透传给前端（保留语义），其它（503 / OAuth / 网络）走 502
-        # —— 502 是 Bad Gateway，准确表达"我们这边在帮你 proxy 上游、但上游
-        # 没能给我们正确响应"的语义。
+        # 429 / 503 / ApplicationThrottled 走 429，让前端显示「微软限流」
+        # 而不是被 parseError 的 502 分支误报成「反代/网关错误」。
+        # 其余（OAuth / 网络 / 5xx 非限流）仍是 502 Bad Gateway。
+        throttle = is_ms_throttle_msg(msg)
         upstream_status = (
             status.HTTP_429_TOO_MANY_REQUESTS
-            if "429" in msg
+            if throttle or "429" in msg
             else status.HTTP_502_BAD_GATEWAY
         )
         # 防御纵深：底层 GraphClient 已经做了一层 _summarize_upstream_error，把
@@ -1986,6 +2017,12 @@ def get_emails(
         # 标签字符兜底剥离，确保即便底层将来再回退到原始 ``resp.text``，前端
         # 也不会展示 ``<!DOCTYPE html>`` 这类原文。
         safe_msg = _safe_upstream_msg(msg)
+        if throttle:
+            # 用户看到的主句先讲清楚「不是邮箱坏了」，细节挂在后面方便排障。
+            detail = THROTTLE_USER_MSG
+            if safe_msg and safe_msg not in detail:
+                detail = f"{detail}（{safe_msg}）"
+            raise HTTPException(upstream_status, detail, headers=headers)
         raise HTTPException(upstream_status, safe_msg, headers=headers)
 
     for e in emails:
@@ -2016,13 +2053,12 @@ def _is_email_list_ok(msg: str) -> bool:
 def _maybe_extract_retry_after(msg: str) -> Optional[int]:
     """从上游错误 msg 里粗略提取 Retry-After 秒数。
 
-    目前只识别 "429" 关键字 → 给一个保守默认 5s（让前端节流再叠加一次后端
-    建议，避免用户连续撞墙）。Graph 层已经先尝试过 Retry-After 自动重试，
-    所以这里能接到的 429 是连续重试后仍然失败的硬限流。
+    Graph 层已经先尝试过 Retry-After 自动重试，所以这里能接到的限流是
+    连续重试后仍然失败的硬限流。给前端一个保守值，避免用户连点撞墙。
     """
     if not msg:
         return None
-    if "429" in msg:
+    if is_ms_throttle_msg(msg):
         return 5
     return None
 

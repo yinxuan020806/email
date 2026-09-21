@@ -10,8 +10,15 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
+
+# 邮件列表会走 Microsoft 全局限流。测试里把间隔打成 0、并发放大，避免
+# 每个 fetch_emails 额外 sleep 0.2s 把套件拖慢。必须在 import core.ms_limiter
+# 之前写好环境变量（semaphore 首次使用时读取 MAX）。
+os.environ.setdefault("MS_MIN_INTERVAL_SEC", "0")
+os.environ.setdefault("MS_MAX_CONCURRENT", "32")
 
 import pytest
 

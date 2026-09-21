@@ -139,3 +139,79 @@ def test_oauth_path_disabled_for_spoofed_outlook_subdomain():
     assert c._token_manager is None     # noqa: SLF001
     assert c._graph is None             # noqa: SLF001
     assert c._imap.token_manager is None  # noqa: SLF001
+
+
+def test_fetch_emails_falls_back_to_imap_on_graph_throttle():
+    """Graph 503/限流且 token 有 IMAP scope 时，应回退 XOAUTH2 IMAP。"""
+    from unittest.mock import MagicMock
+
+    c = EmailClient(
+        "user@hotmail.com", "",
+        client_id="cid", refresh_token="rt",
+    )
+    c._token_manager._access_token = "fake"  # noqa: SLF001
+    c._token_manager._expires_at = 9_999_999_999  # noqa: SLF001
+    c._token_manager.scopes = [  # noqa: SLF001
+        "https://outlook.office.com/IMAP.AccessAsUser.All",
+    ]
+    c._graph.fetch_emails = MagicMock(  # noqa: SLF001
+        return_value=([], "API 错误 503: 微软接口限流或暂时繁忙"),
+    )
+    imap_list = [{
+        "uid": "1", "subject": "Hi", "sender": "a",
+        "sender_email": "a@b.c", "date": None, "body": "",
+        "body_type": "text", "preview": "", "is_read": True,
+        "has_attachments": False,
+    }]
+    c._imap.fetch_emails = MagicMock(return_value=(imap_list, "获取成功"))  # noqa: SLF001
+
+    emails, msg = c.fetch_emails("inbox", 20)
+    assert msg == "获取成功"
+    assert emails[0]["uid"] == "1"
+    c._imap.fetch_emails.assert_called_once()
+
+
+def test_fetch_emails_no_imap_fallback_on_oauth_error():
+    """OAuth 失败时 IMAP 同样拿不到 token，不能再打一次。"""
+    from unittest.mock import MagicMock
+
+    c = EmailClient(
+        "user@hotmail.com", "",
+        client_id="cid", refresh_token="rt",
+    )
+    c._token_manager._access_token = "fake"  # noqa: SLF001
+    c._token_manager._expires_at = 9_999_999_999  # noqa: SLF001
+    c._token_manager.scopes = [  # noqa: SLF001
+        "https://outlook.office.com/IMAP.AccessAsUser.All",
+    ]
+    c._graph.fetch_emails = MagicMock(  # noqa: SLF001
+        return_value=([], "OAuth2 错误: invalid_grant"),
+    )
+    c._imap.fetch_emails = MagicMock()  # noqa: SLF001
+
+    emails, msg = c.fetch_emails()
+    assert emails == []
+    assert "OAuth2" in msg
+    c._imap.fetch_emails.assert_not_called()
+
+
+def test_fetch_emails_no_imap_fallback_without_imap_scope():
+    """token 没有 IMAP scope 时不要回退，避免无意义的 LOGIN 失败。"""
+    from unittest.mock import MagicMock
+
+    c = EmailClient(
+        "user@hotmail.com", "",
+        client_id="cid", refresh_token="rt",
+    )
+    c._token_manager._access_token = "fake"  # noqa: SLF001
+    c._token_manager._expires_at = 9_999_999_999  # noqa: SLF001
+    c._token_manager.scopes = ["Mail.Read"]  # noqa: SLF001
+    c._graph.fetch_emails = MagicMock(  # noqa: SLF001
+        return_value=([], "API 错误 503"),
+    )
+    c._imap.fetch_emails = MagicMock()  # noqa: SLF001
+
+    emails, msg = c.fetch_emails()
+    assert emails == []
+    assert "503" in msg
+    c._imap.fetch_emails.assert_not_called()

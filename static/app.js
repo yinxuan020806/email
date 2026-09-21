@@ -95,14 +95,27 @@ async function request(url, options = {}) {
     opts.headers['Content-Type'] = 'application/json';
     if (typeof opts.body !== 'string') opts.body = JSON.stringify(opts.body);
   }
-  // 给短请求接 AbortController；SSE 流（``api.stream``）显式跳过
+  // 给短请求接 AbortController；SSE 流（``api.stream``）显式跳过。
+  // 若调用方已传入 signal（切邮箱取消上一请求），与超时 abort 合成一路。
   let timeoutId = null;
-  if (!noTimeout && !opts.signal) {
-    const ac = new AbortController();
-    opts.signal = ac.signal;
+  if (!noTimeout) {
+    const timeoutAc = new AbortController();
     const ms = (typeof timeoutMs === 'number' && timeoutMs > 0)
       ? timeoutMs : DEFAULT_REQUEST_TIMEOUT_MS;
-    timeoutId = setTimeout(() => ac.abort(), ms);
+    timeoutId = setTimeout(() => timeoutAc.abort(), ms);
+    const userSignal = opts.signal;
+    if (userSignal) {
+      const composed = new AbortController();
+      const abortComposed = () => { try { composed.abort(); } catch { /* already */ } };
+      if (userSignal.aborted || timeoutAc.signal.aborted) abortComposed();
+      else {
+        userSignal.addEventListener('abort', abortComposed, { once: true });
+        timeoutAc.signal.addEventListener('abort', abortComposed, { once: true });
+      }
+      opts.signal = composed.signal;
+    } else {
+      opts.signal = timeoutAc.signal;
+    }
   }
   let r;
   try {
@@ -155,24 +168,28 @@ const _GATEWAY_ERROR_HINT = {
 
 // 解析后端错误 detail（JSON / 文本），便于在 toast 中展示。
 //
-// 关键改动：旧实现拿不到 JSON 就 ``await r.text()`` 全文返回，而 Cloudflare
-// 524/502 等会返一整页 HTML（~5KB），结果是 UI 卡片里堆一整坨
-// ``<!DOCTYPE html>...`` 之类的字符。这里做三步处理：
-//   1) 如果是 ``_GATEWAY_ERROR_HINT`` 里登记的 5xx 状态码，直接返登记文案
-//   2) 否则尝试 JSON.parse；解出 detail/error 字段就回那一段
-//   3) 否则 text() 取首段不含 HTML 标签的内容；全是 HTML 就只显示状态码
+// 1) 优先 JSON detail（FastAPI 502 里经常是 Graph 限流/OAuth 原文）
+// 2) 否则若是登记过的网关状态码，用短文案（Cloudflare HTML 错误页）
+// 3) 否则 text() 取首段不含 HTML 标签的内容；全是 HTML 就只显示状态码
 async function parseError(r) {
-  const hint = _GATEWAY_ERROR_HINT[r.status];
-  if (hint) return hint;
+  // 先尝试 JSON。后端 FastAPI 的 502/429 带 ``{detail: "真实原因"}``；
+  // 旧逻辑一看到 502 就返回「反代/网关错误」，把 Graph 503 限流误报成
+  // 反代挂了。只有 body 不是 JSON（Cloudflare HTML 错误页）才用登记文案。
+  let jsonDetail = '';
   try {
     const j = await r.clone().json();
-    if (typeof j.detail === 'string') return j.detail;
-    if (Array.isArray(j.detail)) return j.detail.map((d) => d.msg).join('; ');
-    if (typeof j.error === 'string') return j.error;
-    return JSON.stringify(j);
+    if (typeof j.detail === 'string') jsonDetail = j.detail;
+    else if (Array.isArray(j.detail)) jsonDetail = j.detail.map((d) => d.msg).join('; ');
+    else if (typeof j.error === 'string') jsonDetail = j.error;
   } catch {
     /* not JSON, fall through */
   }
+  if (jsonDetail && !/^<!doctype|^<html/i.test(jsonDetail)) {
+    return jsonDetail;
+  }
+  const hint = _GATEWAY_ERROR_HINT[r.status];
+  if (hint) return hint;
+  if (jsonDetail) return jsonDetail;
   try {
     const txt = await r.text();
     const trimmed = (txt || '').trim();
@@ -1934,20 +1951,24 @@ S._emailListReqId = 0;
 // - 即使后端缓存被旁路 / 失效，1.5s 间隔也远低于 Microsoft per-mailbox 的
 //   滚动限速门槛
 S._emailListLastFetchTs = 0;
+S._emailListLastAccId = null;
+S._emailListAbort = null;
 const EMAIL_LIST_MIN_INTERVAL_MS = 1500;
 
 async function loadEmails() {
   if (!S.emailAccount) return;
   const folder = $('emailFolder').value;
   const list = $('emailList');
+  const myAccId = S.emailAccount.id;
 
-  // 前端节流：连点 / 抖动场景下只让最后一次落到后端，避免把上游 Graph
-  // 推到 429。仍然把请求计数 +1，让旧的 in-flight 请求落地后被丢弃。
+  // 前端节流只作用于「同一个邮箱连点刷新」。换账号必须立刻发请求，
+  // 否则用户点开下一个 Hotmail 还要再等 1.5s；并发由后端 slot +
+  // latest-wins 收住，前端负责 abort 掉过期的 in-flight。
   const now = Date.now();
   const sinceLast = now - S._emailListLastFetchTs;
-  if (sinceLast < EMAIL_LIST_MIN_INTERVAL_MS) {
+  const sameMailbox = S._emailListLastAccId === myAccId;
+  if (sameMailbox && sinceLast < EMAIL_LIST_MIN_INTERVAL_MS) {
     const myReqId = ++S._emailListReqId;
-    const myAccId = S.emailAccount.id;
     clearTimeout(S._emailListThrottleTimer);
     S._emailListThrottleTimer = setTimeout(() => {
       if (myReqId !== S._emailListReqId) return;
@@ -1957,16 +1978,26 @@ async function loadEmails() {
     return;
   }
   S._emailListLastFetchTs = now;
+  S._emailListLastAccId = myAccId;
+
+  if (S._emailListAbort) {
+    try { S._emailListAbort.abort(); } catch { /* already */ }
+  }
+  const ac = new AbortController();
+  S._emailListAbort = ac;
 
   clear(list);
   list.appendChild(el('div', { class: 'empty-state' }, t('email_loading')));
   const myReqId = ++S._emailListReqId;
-  const myAccId = S.emailAccount.id;
   try {
-    const r = await api.get(`/api/accounts/${myAccId}/emails?folder=${folder}`);
+    const r = await api.get(
+      `/api/accounts/${myAccId}/emails?folder=${folder}`,
+      { signal: ac.signal },
+    );
     // 后发先至防御：若期间用户切换了账号 / 切换了文件夹再刷新，丢弃本次结果
     if (myReqId !== S._emailListReqId) return;
     if (!S.emailAccount || S.emailAccount.id !== myAccId) return;
+    if (r && r.superseded) return;
     S.allEmails = r.emails || [];
     S.emails = [...S.allEmails];
     S.currentEmail = null;
@@ -1988,6 +2019,7 @@ async function loadEmails() {
     // 封后再预拉下一封（见 selectEmail），单次刷新只发 1 个 API 请求。
   } catch (err) {
     if (myReqId !== S._emailListReqId) return;
+    if (err && err.name === 'AbortError') return;
     clear(list);
     const detail = _sanitizeUpstreamMsg((err && err.message) || '');
     list.appendChild(el('div', {

@@ -18,6 +18,7 @@ import certifi
 import requests
 
 from core.folder_map import graph_folder_for
+from core.ms_limiter import microsoft_slot
 from core.oauth_token import SESSION, TokenManager
 
 
@@ -118,6 +119,11 @@ class GraphClient:
                 summary = f"{err_code}: {err_msg}".strip(": ").strip()
                 # 截短 + 强制 ASCII-safe（避免 HTML 字符出现）
                 summary = summary[:120]
+                if code in (429, 503, 504):
+                    return (
+                        f"API 错误 {code}: 微软接口限流或暂时繁忙（{summary}）。"
+                        "短时间打开太多邮箱会触发，请稍后再试。"
+                    )
                 if code in (401, 403):
                     return f"账号 OAuth 凭据失效或权限不足（HTTP {code}）：{summary}。请到 OAuth 页面重新授权该账号。"
                 return f"API 错误 {code}: {summary}"
@@ -130,6 +136,11 @@ class GraphClient:
                     f"账号 OAuth 凭据失效（HTTP {code}，上游返回登录页）。"
                     "该账号的 refresh_token 已过期或被吊销，请到 OAuth 页面重新授权。"
                 )
+            if code in (429, 503, 504):
+                return (
+                    f"API 错误 {code}: 微软接口限流或暂时繁忙（上游返回了 HTML 错误页）。"
+                    "短时间打开太多邮箱会触发，请稍后再试。"
+                )
             return f"API 错误 {code}: 上游返回了 HTML 错误页（可能在维护或被风控），请稍后重试。"
 
         # 3) 401/403 + 非 HTML：给统一友好文案
@@ -140,6 +151,11 @@ class GraphClient:
             )
 
         # 4) 兜底：只透传状态码，不再带上游 body
+        if code in (429, 503, 504):
+            return (
+                f"API 错误 {code}: 微软接口限流或暂时繁忙。"
+                "短时间打开太多邮箱会触发，请稍后再试。"
+            )
         return f"API 错误 {code}"
 
     # ── Public API ──────────────────────────────────────────
@@ -166,6 +182,12 @@ class GraphClient:
         不会返回 body，传输从 ~MB 级降到 ~KB 级，列表加载快得多。
         点击具体邮件时由 :meth:`get_email_body` 按需拉完整正文。
         """
+        with microsoft_slot():
+            return self._fetch_emails_locked(folder, limit, with_body)
+
+    def _fetch_emails_locked(
+        self, folder: str, limit: int, with_body: bool,
+    ) -> Tuple[list[dict], str]:
         headers = self._headers()
         if headers is None:
             tok, msg = self.tm.get()
@@ -285,6 +307,12 @@ class GraphClient:
         ``internet_message_id`` 是 RFC 5322 的全局唯一 Message-Id（含尖括号），
         用于在 Graph 拿不到 body 时用 IMAP search 反查。
         """
+        with microsoft_slot():
+            return self._get_email_body_locked(email_id)
+
+    def _get_email_body_locked(
+        self, email_id: str
+    ) -> Tuple[Optional[str], str, str, str]:
         headers = self._headers()
         if headers is None:
             tok, msg = self.tm.get()

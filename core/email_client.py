@@ -20,6 +20,7 @@ from typing import Callable, Optional, Tuple
 
 from core.graph_client import GraphClient
 from core.imap_client import IMAPClient
+from core.ms_limiter import is_ms_throttle_msg, microsoft_slot
 from core.oauth_token import TokenManager
 
 
@@ -167,12 +168,42 @@ class EmailClient:
             # Graph 失败再试 IMAP（XOAUTH2）
         return self._imap.check_status()
 
+    def _has_imap_scope(self) -> bool:
+        if self._token_manager is None:
+            return False
+        return self._token_manager.has_scope("IMAP")
+
     def fetch_emails(
         self, folder: str = "inbox", limit: int = 50, with_body: bool = False,
     ) -> Tuple[list[dict], str]:
-        """拉取邮件列表；``with_body=False`` 时不带正文（更快）。"""
+        """拉取邮件列表；``with_body=False`` 时不带正文（更快）。
+
+        Graph 被微软限流/503 时，若 token 有 IMAP scope 则回退 XOAUTH2 IMAP。
+        这是「连看几个 Hotmail 之后列表 502、邮箱本身没坏」的主要自愈路径：
+        Graph 应用级配额打满后 IMAP 往往还能读。
+        """
+        with microsoft_slot():
+            return self._fetch_emails_inner(folder, limit, with_body)
+
+    def _fetch_emails_inner(
+        self, folder: str, limit: int, with_body: bool,
+    ) -> Tuple[list[dict], str]:
         if self._graph is not None:
-            return self._graph.fetch_emails(folder, limit, with_body=with_body)
+            emails, msg = self._graph.fetch_emails(folder, limit, with_body=with_body)
+            ok_empty = (msg or "").strip() in {"获取成功", "Token 有效"}
+            if emails or ok_empty:
+                return emails, msg
+            if is_ms_throttle_msg(msg) and self._has_imap_scope():
+                logger.warning(
+                    "Graph 拉取失败（%s），回退 IMAP XOAUTH2 acc=%s",
+                    (msg or "")[:120], self.email_addr,
+                )
+                imap_emails, imap_msg = self._imap.fetch_emails(folder, limit)
+                if imap_emails or (imap_msg or "").strip() in {"获取成功", "Token 有效"}:
+                    return imap_emails, imap_msg
+                logger.warning("IMAP 回退也失败: %s", (imap_msg or "")[:120])
+                # 仍返回 Graph 原文，让前端走限流提示；IMAP 失败细节留在日志
+            return emails, msg
         # IMAP 暂时不支持 with_body 区分（需要改成 BODY.PEEK[HEADER]，工程量大）
         return self._imap.fetch_emails(folder, limit)
 

@@ -74,16 +74,30 @@ def test_emails_graph_429_propagates_as_429(client):
     assert r.headers.get("Retry-After")
 
 
-def test_emails_graph_502_propagates_as_502(client):
-    """非 429 的上游软失败（503/504/网络错误/OAuth 错误）走 502 Bad Gateway。"""
+def test_emails_graph_503_propagates_as_429(client):
+    """Graph 503 是微软限流/繁忙，必须走 429，避免前端 502 分支显示成反代挂了。"""
     aid = _import_acc(client)
     upstream_msg = "API 错误: 503 - service unavailable"
     with patch(
         "core.email_client.EmailClient.fetch_emails", return_value=([], upstream_msg),
     ):
         r = client.get(f"/api/accounts/{aid}/emails?folder=inbox")
+    assert r.status_code == 429
+    detail = r.json().get("detail", "")
+    assert "微软接口限流" in detail
+    assert r.headers.get("Retry-After")
+
+
+def test_emails_graph_500_propagates_as_502(client):
+    """非限流的上游 5xx 仍走 502 Bad Gateway。"""
+    aid = _import_acc(client)
+    upstream_msg = "API 错误: 500 - internal"
+    with patch(
+        "core.email_client.EmailClient.fetch_emails", return_value=([], upstream_msg),
+    ):
+        r = client.get(f"/api/accounts/{aid}/emails?folder=inbox")
     assert r.status_code == 502
-    assert "503" in r.json().get("detail", "")
+    assert "500" in r.json().get("detail", "")
 
 
 def test_emails_oauth_error_propagates_as_502(client):
@@ -657,3 +671,31 @@ def test_fetch_email_body_returns_short_body_when_imap_also_fails():
     body, body_type, msg = client.fetch_email_body("graph-id", "inbox")
     # 至少把 Graph 拿到的短 body 返回，而不是 None（避免前端永远显示 loading）
     assert body == "short"
+
+
+def test_email_fetch_gen_latest_wins():
+    """连点不同邮箱时，旧代次必须被判定为过期。"""
+    import web_app
+
+    web_app._email_fetch_gen.clear()
+    g1 = web_app._bump_email_fetch_gen(42)
+    g2 = web_app._bump_email_fetch_gen(42)
+    assert web_app._is_latest_email_fetch(42, g1) is False
+    assert web_app._is_latest_email_fetch(42, g2) is True
+    # 不同用户互不影响
+    g_other = web_app._bump_email_fetch_gen(7)
+    assert web_app._is_latest_email_fetch(42, g2) is True
+    assert web_app._is_latest_email_fetch(7, g_other) is True
+
+
+def test_is_ms_throttle_msg_distinguishes_oauth():
+    from core.ms_limiter import is_ms_throttle_msg
+
+    assert is_ms_throttle_msg("API 错误 503: ErrorServerBusy")
+    assert is_ms_throttle_msg("API 错误 429: ApplicationThrottled")
+    assert is_ms_throttle_msg("微软接口限流或暂时繁忙")
+    assert not is_ms_throttle_msg("OAuth2 错误: invalid_grant")
+    assert not is_ms_throttle_msg("网络错误")
+    assert not is_ms_throttle_msg("API 错误 500")
+    assert not is_ms_throttle_msg("")
+    assert not is_ms_throttle_msg("timeout 15030ms")
