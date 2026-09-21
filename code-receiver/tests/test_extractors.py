@@ -436,6 +436,78 @@ def test_hedra_ignores_unrelated_sender():
     assert result is None
 
 
+# ── freebeat.ai（notify.freebrio.com 邮箱 OTP）─────────────────────
+
+
+def test_freebeat_extract_code_from_body():
+    mails = [
+        make_mail(
+            sender="freebeat support <support@notify.freebrio.com>",
+            subject="800543 is your verification code",
+            body=(
+                "Let's make sure this is the right email address for you. "
+                "Please enter this verification code to continue using freebeat: "
+                "800543 Verification codes expire after two hours. "
+                "Thanks, Team freebeat"
+            ),
+        )
+    ]
+    extractors = get_extractors("freebeat")
+    result = first_match(extractors, mails)
+    assert result is not None
+    assert result.code == "800543"
+
+
+def test_freebeat_extract_code_from_subject():
+    mails = [
+        make_mail(
+            sender="support@notify.freebrio.com",
+            subject="800543 is your verification code",
+            body="If you didn't request this, you can safely ignore this email.",
+        )
+    ]
+    extractors = get_extractors("freebeat")
+    result = first_match(extractors, mails)
+    assert result is not None
+    assert result.code == "800543"
+
+
+def test_freebeat_extract_code_from_html_body():
+    html_body = """<!DOCTYPE html><html><body>
+      <h1>freebeat Verification Code</h1>
+      <p>Please enter this verification code to continue using freebeat:</p>
+      <span style="font-weight: bold; font-size: 25px;">800543</span>
+      <p>Verification codes expire after two hours.</p>
+    </body></html>"""
+    mails = [
+        {
+            "sender": "freebeat support",
+            "sender_email": "support@notify.freebrio.com",
+            "subject": "800543 is your verification code",
+            "body": html_body,
+            "preview": html_body[:200],
+            "date": "2026-09-21T13:43:37",
+        }
+    ]
+    extractors = get_extractors("freebeat")
+    result = first_match(extractors, mails)
+    assert result is not None
+    assert result.code == "800543"
+
+
+def test_freebeat_ignores_unrelated_sender():
+    mails = [
+        make_mail(
+            sender="random@example.com",
+            subject="Your code is 123456",
+            body="Code: 123456",
+        )
+    ]
+    extractors = get_extractors("freebeat")
+    result = first_match(extractors, mails)
+    assert result is None
+
+
 def test_safelinks_unwrap_passthrough():
     """非 SafeLinks 原样返回。"""
     raw = "https://example.com/x?y=1"

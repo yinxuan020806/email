@@ -345,8 +345,11 @@ def test_i18n_includes_new_keys(client):
         "modal_export_selected_n",
         "modal_export_selected_empty",
         "modal_export_selected_hint",
+        "credentials_freebeat_token",
+        "prompt_public_categories",
     ):
         assert key in body, f"i18n.js 缺少新 key: {key}"
+    assert "6 = 只开 freebeat" in body, "加入接码弹窗应列出 freebeat 选项 6"
 
 
 # ── 邮件正文按需拉取接口 ────────────────────────────────

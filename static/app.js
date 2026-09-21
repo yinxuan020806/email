@@ -604,16 +604,17 @@ function tokenCategoryLabel(category) {
   if (category === 'openai') return 'GPT';
   if (category === 'higgsfield') return 'Higgsfield';
   if (category === 'hedra') return 'Hedra';
+  if (category === 'freebeat') return 'freebeat';
   return '';
 }
 
 function publicCategoryLabel(raw) {
   const v = String(raw || '').trim().toLowerCase();
-  if (v === '*') return 'Cursor/GPT/Higgsfield/Hedra';
+  if (v === '*') return 'Cursor/GPT/Higgsfield/Hedra/freebeat';
   if (!v) return '';
   const parts = v.split(',')
     .map((x) => x.trim())
-    .filter((x) => x === 'cursor' || x === 'openai' || x === 'higgsfield' || x === 'hedra');
+    .filter((x) => x === 'cursor' || x === 'openai' || x === 'higgsfield' || x === 'hedra' || x === 'freebeat');
   return parts.map(tokenCategoryLabel).filter(Boolean).join('/');
 }
 
@@ -623,7 +624,7 @@ function normalizeTokenEntries(value) {
     return value ? [{ category: '', token: value }] : [];
   }
   if (typeof value !== 'object') return [];
-  return ['cursor', 'openai', 'higgsfield', 'hedra']
+  return ['cursor', 'openai', 'higgsfield', 'hedra', 'freebeat']
     .map((category) => ({ category, token: String(value[category] || '').trim() }))
     .filter((x) => x.token);
 }
@@ -636,9 +637,11 @@ function tokenEntriesForAccount(account) {
     openai: account.access_token_openai || '',
     higgsfield: account.access_token_higgsfield || '',
     hedra: account.access_token_hedra || '',
+    freebeat: account.access_token_freebeat || '',
   }).concat(
     (!account.access_token_cursor && !account.access_token_openai
       && !account.access_token_higgsfield && !account.access_token_hedra
+      && !account.access_token_freebeat
       && account.access_token)
       ? [{ category: '', token: account.access_token }]
       : [],
@@ -646,10 +649,11 @@ function tokenEntriesForAccount(account) {
 }
 
 function tokenMapForAccount(account) {
-  const out = { cursor: '', openai: '', higgsfield: '', hedra: '' };
+  const out = { cursor: '', openai: '', higgsfield: '', hedra: '', freebeat: '' };
   for (const entry of tokenEntriesForAccount(account || {})) {
     if (entry.category === 'cursor' || entry.category === 'openai'
-      || entry.category === 'higgsfield' || entry.category === 'hedra') {
+      || entry.category === 'higgsfield' || entry.category === 'hedra'
+      || entry.category === 'freebeat') {
       out[entry.category] = entry.token;
     }
   }
@@ -681,7 +685,7 @@ function choosePublicCategories() {
   if (raw === null) return null;
   const v = String(raw || '').trim().toLowerCase();
   if (!v || v === '3' || v === 'both' || v === 'all' || v === '全部') {
-    return ['cursor', 'openai', 'higgsfield', 'hedra'];
+    return ['cursor', 'openai', 'higgsfield', 'hedra', 'freebeat'];
   }
   if (v === '1' || v === 'c' || v === 'cursor') return ['cursor'];
   if (v === '2' || v === 'g' || v === 'gpt' || v === 'openai' || v === 'chatgpt') {
@@ -689,6 +693,7 @@ function choosePublicCategories() {
   }
   if (v === '4' || v === 'h' || v === 'higgsfield') return ['higgsfield'];
   if (v === '5' || v === 'e' || v === 'hedra') return ['hedra'];
+  if (v === '6' || v === 'f' || v === 'freebeat') return ['freebeat'];
   toast(t('toast_public_categories_invalid'), 'warning');
   return null;
 }
@@ -1586,6 +1591,7 @@ async function showCredentialsModal(account) {
       $('credTokenOpenai').value = tokens.openai || '';
       $('credTokenHiggsfield').value = tokens.higgsfield || '';
       $('credTokenHedra').value = tokens.hedra || '';
+      $('credTokenFreebeat').value = tokens.freebeat || '';
     }
     $('credErr').textContent = '';
     openModal('credentialsModal');
@@ -1621,6 +1627,7 @@ async function saveCredentials() {
           openai: $('credTokenOpenai').value.trim(),
           higgsfield: $('credTokenHiggsfield').value.trim(),
           hedra: $('credTokenHedra').value.trim(),
+          freebeat: $('credTokenFreebeat').value.trim(),
         },
       });
     }

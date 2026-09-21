@@ -67,6 +67,7 @@
     if (first === 'G') return 'openai';
     if (first === 'H') return 'higgsfield';
     if (first === 'E') return 'hedra';
+    if (first === 'F') return 'freebeat';
     return '';
   }
 

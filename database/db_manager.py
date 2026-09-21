@@ -60,32 +60,37 @@ SORTABLE_COLUMNS = {
     "last_check",
 }
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # 审计日志保留天数（超过自动清理）
 AUDIT_RETENTION_DAYS = 90
 
 # 接码业务允许的分类标签白名单（写入 extractor_rules.category 时校验）
 ALLOWED_CODE_CATEGORIES = {
-    "cursor", "openai", "higgsfield", "hedra",
+    "cursor", "openai", "higgsfield", "hedra", "freebeat",
     "anthropic", "google", "github", "generic",
 }
 
 # 当前接码前台开放的分类。各分类可分别开通、分别轮换；
 # 凭证明文用首字母区分，方便站长和下游用户肉眼确认用途。
 # Hedra 用 E（hEdra）：H 已被 Higgsfield 占用。
-CODE_ACCESS_TOKEN_CATEGORIES = ("cursor", "openai", "higgsfield", "hedra")
+# freebeat 用 F。
+CODE_ACCESS_TOKEN_CATEGORIES = (
+    "cursor", "openai", "higgsfield", "hedra", "freebeat",
+)
 CODE_ACCESS_TOKEN_PREFIXES = {
     "cursor": "C",
     "openai": "G",
     "higgsfield": "H",
     "hedra": "E",
+    "freebeat": "F",
 }
 CODE_ACCESS_TOKEN_COLUMNS = {
     "cursor": "access_token_cursor",
     "openai": "access_token_openai",
     "higgsfield": "access_token_higgsfield",
     "hedra": "access_token_hedra",
+    "freebeat": "access_token_freebeat",
 }
 
 # 接码查询日志保留天数
@@ -104,6 +109,7 @@ GROUP_KEYWORDS_BY_CATEGORY: dict[str, tuple[str, ...]] = {
     "openai": ("gpt", "openai", "chatgpt"),
     "higgsfield": ("higgsfield",),
     "hedra": ("hedra",),
+    "freebeat": ("freebeat", "freebrio"),
     "anthropic": ("anthropic", "claude"),
     "google": ("google", "gmail-only"),
     "github": ("github",),
@@ -341,6 +347,7 @@ class DatabaseManager:
                     access_token_openai TEXT DEFAULT '',
                     access_token_higgsfield TEXT DEFAULT '',
                     access_token_hedra TEXT DEFAULT '',
+                    access_token_freebeat TEXT DEFAULT '',
                     UNIQUE (owner_id, email)
                 )
                 """
@@ -422,6 +429,7 @@ class DatabaseManager:
                 ("access_token_openai", "TEXT DEFAULT ''"),
                 ("access_token_higgsfield", "TEXT DEFAULT ''"),
                 ("access_token_hedra", "TEXT DEFAULT ''"),
+                ("access_token_freebeat", "TEXT DEFAULT ''"),
             ):
                 col_name, col_type = col_def
                 if col_name not in existing_cols:
@@ -702,6 +710,51 @@ class DatabaseManager:
                         migrated_by_category["openai"],
                         migrated_by_category["higgsfield"],
                         migrated_by_category["hedra"],
+                    )
+
+            # ── v11 → v12 一次性数据迁移：freebeat 独立凭证 ──
+            if current_version < 12:
+                box = SecretBox.instance()
+                token_cols = ", ".join(
+                    f"COALESCE({col}, '')" for col in CODE_ACCESS_TOKEN_COLUMNS.values()
+                )
+                rows = cur.execute(
+                    f"SELECT id, COALESCE(group_name, ''), "
+                    f"       COALESCE(allowed_categories, ''), {token_cols} "
+                    f"FROM accounts WHERE is_public = 1"
+                ).fetchall()
+                migrated_by_category = {c: 0 for c in CODE_ACCESS_TOKEN_CATEGORIES}
+                col_names = list(CODE_ACCESS_TOKEN_COLUMNS.keys())
+                for row in rows:
+                    aid = row[0]
+                    group_name = row[1]
+                    cats_str = row[2]
+                    existing = {
+                        col_names[i]: row[3 + i] for i in range(len(col_names))
+                    }
+                    for category in _token_categories_for_scope(cats_str, group_name):
+                        if existing.get(category):
+                            continue
+                        token = _generate_category_access_token(category)
+                        cipher = box.encrypt(token) or ""
+                        col = CODE_ACCESS_TOKEN_COLUMNS[category]
+                        cur.execute(
+                            f"UPDATE accounts SET {col} = ? WHERE id = ?",
+                            (cipher, aid),
+                        )
+                        existing[category] = cipher
+                        migrated_by_category[category] += 1
+                migrated = sum(migrated_by_category.values())
+                if migrated:
+                    logger.warning(
+                        "v11→v12 数据迁移：已为公开接码账号生成分类凭证 "
+                        "cursor=%d, openai=%d, higgsfield=%d, hedra=%d, freebeat=%d。"
+                        "freebeat 凭证以 F 开头。",
+                        migrated_by_category["cursor"],
+                        migrated_by_category["openai"],
+                        migrated_by_category["higgsfield"],
+                        migrated_by_category["hedra"],
+                        migrated_by_category["freebeat"],
                     )
 
             # 任意一次升级跑了数据迁移（accounts 实际被 UPDATE 过），都把所有
@@ -1105,7 +1158,7 @@ class DatabaseManager:
         "client_id", "refresh_token", "created_at", "last_check",
         "has_aws_code", "remark", "access_token",
         "access_token_cursor", "access_token_openai", "access_token_higgsfield",
-        "access_token_hedra",
+        "access_token_hedra", "access_token_freebeat",
     )
 
     def _select_account_columns(self, alias: str = "") -> str:

@@ -41,6 +41,7 @@ class Account:
     access_token_openai: str = ''
     access_token_higgsfield: str = ''
     access_token_hedra: str = ''
+    access_token_freebeat: str = ''
 
     # ── 字段顺序，用于 __getitem__ 兼容桥 ──
     _FIELD_ORDER = (
@@ -49,7 +50,7 @@ class Account:
         'client_id', 'refresh_token', 'created_at', 'last_check',
         'has_aws_code', 'remark', 'access_token',
         'access_token_cursor', 'access_token_openai', 'access_token_higgsfield',
-        'access_token_hedra',
+        'access_token_hedra', 'access_token_freebeat',
     )
 
     def to_dict(self) -> dict:
@@ -100,6 +101,7 @@ class Account:
             access_token_openai=padded[18] or '',
             access_token_higgsfield=padded[19] or '',
             access_token_hedra=padded[20] or '',
+            access_token_freebeat=padded[21] or '',
         )
 
     # ── 临时兼容桥（步骤6中删除）──────────────────────────
@@ -111,7 +113,7 @@ class Account:
 
     def __len__(self) -> int:
         """支持 len(acc) > N 守卫。
-        v11 起字段数从 20 增至 21（新增 hedra access_token）。
+        v12 起字段数从 21 增至 22（新增 freebeat access_token）。
         """
         return len(self._FIELD_ORDER)
 

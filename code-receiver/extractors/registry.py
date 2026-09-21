@@ -8,6 +8,7 @@ from typing import Callable, Dict, List, Optional
 
 from extractors.base import Extractor
 from extractors import cursor as _cursor
+from extractors import freebeat as _freebeat
 from extractors import hedra as _hedra
 from extractors import higgsfield as _higgsfield
 from extractors import openai_chatgpt as _openai
@@ -22,6 +23,7 @@ _BUILTIN: Dict[str, Callable[[], List[Extractor]]] = {
     "openai": _openai.default_rules,
     "higgsfield": _higgsfield.default_rules,
     "hedra": _hedra.default_rules,
+    "freebeat": _freebeat.default_rules,
 }
 
 
