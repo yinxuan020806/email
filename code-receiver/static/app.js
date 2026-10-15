@@ -68,6 +68,7 @@
     if (first === 'H') return 'higgsfield';
     if (first === 'E') return 'hedra';
     if (first === 'F') return 'freebeat';
+    if (first === 'N') return 'nimvideo';
     return '';
   }
 

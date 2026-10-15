@@ -60,14 +60,14 @@ SORTABLE_COLUMNS = {
     "last_check",
 }
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # 审计日志保留天数（超过自动清理）
 AUDIT_RETENTION_DAYS = 90
 
 # 接码业务允许的分类标签白名单（写入 extractor_rules.category 时校验）
 ALLOWED_CODE_CATEGORIES = {
-    "cursor", "openai", "higgsfield", "hedra", "freebeat",
+    "cursor", "openai", "higgsfield", "hedra", "freebeat", "nimvideo",
     "anthropic", "google", "github", "generic",
 }
 
@@ -75,8 +75,9 @@ ALLOWED_CODE_CATEGORIES = {
 # 凭证明文用首字母区分，方便站长和下游用户肉眼确认用途。
 # Hedra 用 E（hEdra）：H 已被 Higgsfield 占用。
 # freebeat 用 F。
+# nimvideo 用 N。
 CODE_ACCESS_TOKEN_CATEGORIES = (
-    "cursor", "openai", "higgsfield", "hedra", "freebeat",
+    "cursor", "openai", "higgsfield", "hedra", "freebeat", "nimvideo",
 )
 CODE_ACCESS_TOKEN_PREFIXES = {
     "cursor": "C",
@@ -84,6 +85,7 @@ CODE_ACCESS_TOKEN_PREFIXES = {
     "higgsfield": "H",
     "hedra": "E",
     "freebeat": "F",
+    "nimvideo": "N",
 }
 CODE_ACCESS_TOKEN_COLUMNS = {
     "cursor": "access_token_cursor",
@@ -91,6 +93,7 @@ CODE_ACCESS_TOKEN_COLUMNS = {
     "higgsfield": "access_token_higgsfield",
     "hedra": "access_token_hedra",
     "freebeat": "access_token_freebeat",
+    "nimvideo": "access_token_nimvideo",
 }
 
 # 接码查询日志保留天数
@@ -110,6 +113,7 @@ GROUP_KEYWORDS_BY_CATEGORY: dict[str, tuple[str, ...]] = {
     "higgsfield": ("higgsfield",),
     "hedra": ("hedra",),
     "freebeat": ("freebeat", "freebrio"),
+    "nimvideo": ("nim", "nimvideo"),
     "anthropic": ("anthropic", "claude"),
     "google": ("google", "gmail-only"),
     "github": ("github",),
@@ -348,6 +352,7 @@ class DatabaseManager:
                     access_token_higgsfield TEXT DEFAULT '',
                     access_token_hedra TEXT DEFAULT '',
                     access_token_freebeat TEXT DEFAULT '',
+                    access_token_nimvideo TEXT DEFAULT '',
                     UNIQUE (owner_id, email)
                 )
                 """
@@ -430,6 +435,7 @@ class DatabaseManager:
                 ("access_token_higgsfield", "TEXT DEFAULT ''"),
                 ("access_token_hedra", "TEXT DEFAULT ''"),
                 ("access_token_freebeat", "TEXT DEFAULT ''"),
+                ("access_token_nimvideo", "TEXT DEFAULT ''"),
             ):
                 col_name, col_type = col_def
                 if col_name not in existing_cols:
@@ -755,6 +761,43 @@ class DatabaseManager:
                         migrated_by_category["higgsfield"],
                         migrated_by_category["hedra"],
                         migrated_by_category["freebeat"],
+                    )
+
+            # ── v12 → v13 一次性数据迁移：nimvideo 独立凭证 ──
+            if current_version < 13:
+                box = SecretBox.instance()
+                token_cols = ", ".join(
+                    f"COALESCE({col}, '')" for col in CODE_ACCESS_TOKEN_COLUMNS.values()
+                )
+                rows = cur.execute(
+                    f"SELECT id, COALESCE(group_name, ''), "
+                    f"       COALESCE(allowed_categories, ''), {token_cols} "
+                    f"FROM accounts WHERE is_public = 1"
+                ).fetchall()
+                migrated_nim = 0
+                col_names = list(CODE_ACCESS_TOKEN_COLUMNS.keys())
+                for row in rows:
+                    aid = row[0]
+                    group_name = row[1]
+                    cats_str = row[2]
+                    existing = {
+                        col_names[i]: row[3 + i] for i in range(len(col_names))
+                    }
+                    if "nimvideo" not in _token_categories_for_scope(cats_str, group_name):
+                        continue
+                    if existing.get("nimvideo"):
+                        continue
+                    token = _generate_category_access_token("nimvideo")
+                    cipher = box.encrypt(token) or ""
+                    cur.execute(
+                        "UPDATE accounts SET access_token_nimvideo = ? WHERE id = ?",
+                        (cipher, aid),
+                    )
+                    migrated_nim += 1
+                if migrated_nim:
+                    logger.warning(
+                        "v12→v13 数据迁移：已为 %d 个公开接码账号生成 nimvideo 凭证（N 开头）。",
+                        migrated_nim,
                     )
 
             # 任意一次升级跑了数据迁移（accounts 实际被 UPDATE 过），都把所有
@@ -1158,7 +1201,7 @@ class DatabaseManager:
         "client_id", "refresh_token", "created_at", "last_check",
         "has_aws_code", "remark", "access_token",
         "access_token_cursor", "access_token_openai", "access_token_higgsfield",
-        "access_token_hedra", "access_token_freebeat",
+        "access_token_hedra", "access_token_freebeat", "access_token_nimvideo",
     )
 
     def _select_account_columns(self, alias: str = "") -> str:

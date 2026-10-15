@@ -622,16 +622,17 @@ function tokenCategoryLabel(category) {
   if (category === 'higgsfield') return 'Higgsfield';
   if (category === 'hedra') return 'Hedra';
   if (category === 'freebeat') return 'freebeat';
+  if (category === 'nimvideo') return 'Nim';
   return '';
 }
 
 function publicCategoryLabel(raw) {
   const v = String(raw || '').trim().toLowerCase();
-  if (v === '*') return 'Cursor/GPT/Higgsfield/Hedra/freebeat';
+  if (v === '*') return 'Cursor/GPT/Higgsfield/Hedra/freebeat/Nim';
   if (!v) return '';
   const parts = v.split(',')
     .map((x) => x.trim())
-    .filter((x) => x === 'cursor' || x === 'openai' || x === 'higgsfield' || x === 'hedra' || x === 'freebeat');
+    .filter((x) => x === 'cursor' || x === 'openai' || x === 'higgsfield' || x === 'hedra' || x === 'freebeat' || x === 'nimvideo');
   return parts.map(tokenCategoryLabel).filter(Boolean).join('/');
 }
 
@@ -641,7 +642,7 @@ function normalizeTokenEntries(value) {
     return value ? [{ category: '', token: value }] : [];
   }
   if (typeof value !== 'object') return [];
-  return ['cursor', 'openai', 'higgsfield', 'hedra', 'freebeat']
+  return ['cursor', 'openai', 'higgsfield', 'hedra', 'freebeat', 'nimvideo']
     .map((category) => ({ category, token: String(value[category] || '').trim() }))
     .filter((x) => x.token);
 }
@@ -655,10 +656,11 @@ function tokenEntriesForAccount(account) {
     higgsfield: account.access_token_higgsfield || '',
     hedra: account.access_token_hedra || '',
     freebeat: account.access_token_freebeat || '',
+    nimvideo: account.access_token_nimvideo || '',
   }).concat(
     (!account.access_token_cursor && !account.access_token_openai
       && !account.access_token_higgsfield && !account.access_token_hedra
-      && !account.access_token_freebeat
+      && !account.access_token_freebeat && !account.access_token_nimvideo
       && account.access_token)
       ? [{ category: '', token: account.access_token }]
       : [],
@@ -666,11 +668,11 @@ function tokenEntriesForAccount(account) {
 }
 
 function tokenMapForAccount(account) {
-  const out = { cursor: '', openai: '', higgsfield: '', hedra: '', freebeat: '' };
+  const out = { cursor: '', openai: '', higgsfield: '', hedra: '', freebeat: '', nimvideo: '' };
   for (const entry of tokenEntriesForAccount(account || {})) {
     if (entry.category === 'cursor' || entry.category === 'openai'
       || entry.category === 'higgsfield' || entry.category === 'hedra'
-      || entry.category === 'freebeat') {
+      || entry.category === 'freebeat' || entry.category === 'nimvideo') {
       out[entry.category] = entry.token;
     }
   }
@@ -702,7 +704,7 @@ function choosePublicCategories() {
   if (raw === null) return null;
   const v = String(raw || '').trim().toLowerCase();
   if (!v || v === '3' || v === 'both' || v === 'all' || v === '全部') {
-    return ['cursor', 'openai', 'higgsfield', 'hedra', 'freebeat'];
+    return ['cursor', 'openai', 'higgsfield', 'hedra', 'freebeat', 'nimvideo'];
   }
   if (v === '1' || v === 'c' || v === 'cursor') return ['cursor'];
   if (v === '2' || v === 'g' || v === 'gpt' || v === 'openai' || v === 'chatgpt') {
@@ -711,6 +713,7 @@ function choosePublicCategories() {
   if (v === '4' || v === 'h' || v === 'higgsfield') return ['higgsfield'];
   if (v === '5' || v === 'e' || v === 'hedra') return ['hedra'];
   if (v === '6' || v === 'f' || v === 'freebeat') return ['freebeat'];
+  if (v === '7' || v === 'n' || v === 'nim' || v === 'nimvideo') return ['nimvideo'];
   toast(t('toast_public_categories_invalid'), 'warning');
   return null;
 }
@@ -1609,6 +1612,7 @@ async function showCredentialsModal(account) {
       $('credTokenHiggsfield').value = tokens.higgsfield || '';
       $('credTokenHedra').value = tokens.hedra || '';
       $('credTokenFreebeat').value = tokens.freebeat || '';
+      $('credTokenNimvideo').value = tokens.nimvideo || '';
     }
     $('credErr').textContent = '';
     openModal('credentialsModal');
@@ -1645,6 +1649,7 @@ async function saveCredentials() {
           higgsfield: $('credTokenHiggsfield').value.trim(),
           hedra: $('credTokenHedra').value.trim(),
           freebeat: $('credTokenFreebeat').value.trim(),
+          nimvideo: $('credTokenNimvideo').value.trim(),
         },
       });
     }

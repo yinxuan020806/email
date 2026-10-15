@@ -508,6 +508,80 @@ def test_freebeat_ignores_unrelated_sender():
     assert result is None
 
 
+# ── Nim (nim.video 邮箱 OTP) ────────────────────────────────────────
+
+
+def test_nimvideo_extract_code_from_html_body():
+    """实测邮件：HTML 正文，验证码在大字号 td 中。"""
+    html_body = (
+        '<html><body>'
+        '<table><tbody><tr><td>'
+        '<img src="https://static.nim.video/output/emails/email_nim_logo.png">'
+        '</td></tr>'
+        '<tr><td style="font-size:24px">Your verification code</td></tr>'
+        '<tr><td style="font-size:40px; font-weight:700; letter-spacing:12px">476834</td></tr>'
+        '<tr><td>This code expires in 3 minutes.</td></tr>'
+        '</tbody></table>'
+        '</body></html>'
+    )
+    mails = [
+        {
+            "sender": "Nim",
+            "sender_email": "security@nim.video",
+            "subject": "476834 – verification code",
+            "body": html_body,
+            "preview": html_body[:200],
+            "date": "2026-10-15T05:16:35",
+        }
+    ]
+    extractors = get_extractors("nimvideo")
+    result = first_match(extractors, mails)
+    assert result is not None
+    assert result.code == "476834"
+
+
+def test_nimvideo_extract_code_from_subject():
+    """主题已是 '{code} – verification code' 时，码在关键词前面。"""
+    mails = [
+        make_mail(
+            sender="Nim <security@nim.video>",
+            subject="476834 – verification code",
+            body="If you did not request this code, you can safely ignore this email.",
+        )
+    ]
+    extractors = get_extractors("nimvideo")
+    result = first_match(extractors, mails)
+    assert result is not None
+    assert result.code == "476834"
+
+
+def test_nimvideo_extract_code_from_plain_body():
+    mails = [
+        make_mail(
+            sender="security@nim.video",
+            subject="Your Nim verification code",
+            body="Your verification code is 476834. This code expires in 3 minutes.",
+        )
+    ]
+    extractors = get_extractors("nimvideo")
+    result = first_match(extractors, mails)
+    assert result is not None
+    assert result.code == "476834"
+
+
+def test_nimvideo_ignores_unrelated_sender():
+    mails = [
+        make_mail(
+            sender="random@example.com",
+            subject="Your code is 123456",
+            body="Code: 123456",
+        )
+    ]
+    extractors = get_extractors("nimvideo")
+    result = first_match(extractors, mails)
+    assert result is None
+
+
 def test_safelinks_unwrap_passthrough():
     """非 SafeLinks 原样返回。"""
     raw = "https://example.com/x?y=1"
