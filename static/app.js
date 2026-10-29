@@ -627,16 +627,17 @@ function tokenCategoryLabel(category) {
   if (category === 'hedra') return 'Hedra';
   if (category === 'freebeat') return 'freebeat';
   if (category === 'nimvideo') return 'Nim';
+  if (category === 'vmake') return 'Vmake';
   return '';
 }
 
 function publicCategoryLabel(raw) {
   const v = String(raw || '').trim().toLowerCase();
-  if (v === '*') return 'Cursor/GPT/Higgsfield/Hedra/freebeat/Nim';
+  if (v === '*') return 'Cursor/GPT/Higgsfield/Hedra/freebeat/Nim/Vmake';
   if (!v) return '';
   const parts = v.split(',')
     .map((x) => x.trim())
-    .filter((x) => x === 'cursor' || x === 'openai' || x === 'higgsfield' || x === 'hedra' || x === 'freebeat' || x === 'nimvideo');
+    .filter((x) => x === 'cursor' || x === 'openai' || x === 'higgsfield' || x === 'hedra' || x === 'freebeat' || x === 'nimvideo' || x === 'vmake');
   return parts.map(tokenCategoryLabel).filter(Boolean).join('/');
 }
 
@@ -646,7 +647,7 @@ function normalizeTokenEntries(value) {
     return value ? [{ category: '', token: value }] : [];
   }
   if (typeof value !== 'object') return [];
-  return ['cursor', 'openai', 'higgsfield', 'hedra', 'freebeat', 'nimvideo']
+  return ['cursor', 'openai', 'higgsfield', 'hedra', 'freebeat', 'nimvideo', 'vmake']
     .map((category) => ({ category, token: String(value[category] || '').trim() }))
     .filter((x) => x.token);
 }
@@ -661,10 +662,12 @@ function tokenEntriesForAccount(account) {
     hedra: account.access_token_hedra || '',
     freebeat: account.access_token_freebeat || '',
     nimvideo: account.access_token_nimvideo || '',
+    vmake: account.access_token_vmake || '',
   }).concat(
     (!account.access_token_cursor && !account.access_token_openai
       && !account.access_token_higgsfield && !account.access_token_hedra
       && !account.access_token_freebeat && !account.access_token_nimvideo
+      && !account.access_token_vmake
       && account.access_token)
       ? [{ category: '', token: account.access_token }]
       : [],
@@ -672,11 +675,12 @@ function tokenEntriesForAccount(account) {
 }
 
 function tokenMapForAccount(account) {
-  const out = { cursor: '', openai: '', higgsfield: '', hedra: '', freebeat: '', nimvideo: '' };
+  const out = { cursor: '', openai: '', higgsfield: '', hedra: '', freebeat: '', nimvideo: '', vmake: '' };
   for (const entry of tokenEntriesForAccount(account || {})) {
     if (entry.category === 'cursor' || entry.category === 'openai'
       || entry.category === 'higgsfield' || entry.category === 'hedra'
-      || entry.category === 'freebeat' || entry.category === 'nimvideo') {
+      || entry.category === 'freebeat' || entry.category === 'nimvideo'
+      || entry.category === 'vmake') {
       out[entry.category] = entry.token;
     }
   }
@@ -708,7 +712,7 @@ function choosePublicCategories() {
   if (raw === null) return null;
   const v = String(raw || '').trim().toLowerCase();
   if (!v || v === '3' || v === 'both' || v === 'all' || v === '全部') {
-    return ['cursor', 'openai', 'higgsfield', 'hedra', 'freebeat', 'nimvideo'];
+    return ['cursor', 'openai', 'higgsfield', 'hedra', 'freebeat', 'nimvideo', 'vmake'];
   }
   if (v === '1' || v === 'c' || v === 'cursor') return ['cursor'];
   if (v === '2' || v === 'g' || v === 'gpt' || v === 'openai' || v === 'chatgpt') {
@@ -718,6 +722,7 @@ function choosePublicCategories() {
   if (v === '5' || v === 'e' || v === 'hedra') return ['hedra'];
   if (v === '6' || v === 'f' || v === 'freebeat') return ['freebeat'];
   if (v === '7' || v === 'n' || v === 'nim' || v === 'nimvideo') return ['nimvideo'];
+  if (v === '8' || v === 'v' || v === 'vmake') return ['vmake'];
   toast(t('toast_public_categories_invalid'), 'warning');
   return null;
 }
@@ -1697,6 +1702,7 @@ async function showCredentialsModal(account) {
       $('credTokenHedra').value = tokens.hedra || '';
       $('credTokenFreebeat').value = tokens.freebeat || '';
       $('credTokenNimvideo').value = tokens.nimvideo || '';
+      $('credTokenVmake').value = tokens.vmake || '';
     }
     $('credErr').textContent = '';
     openModal('credentialsModal');
@@ -1734,6 +1740,7 @@ async function saveCredentials() {
           hedra: $('credTokenHedra').value.trim(),
           freebeat: $('credTokenFreebeat').value.trim(),
           nimvideo: $('credTokenNimvideo').value.trim(),
+          vmake: $('credTokenVmake').value.trim(),
         },
       });
     }

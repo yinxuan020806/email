@@ -60,7 +60,7 @@ SORTABLE_COLUMNS = {
     "last_check",
 }
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 # 审计日志保留天数（超过自动清理）
 AUDIT_RETENTION_DAYS = 90
@@ -68,7 +68,7 @@ AUDIT_RETENTION_DAYS = 90
 # 接码业务允许的分类标签白名单（写入 extractor_rules.category 时校验）
 ALLOWED_CODE_CATEGORIES = {
     "cursor", "openai", "higgsfield", "hedra", "freebeat", "nimvideo",
-    "anthropic", "google", "github", "generic",
+    "vmake", "anthropic", "google", "github", "generic",
 }
 
 # 当前接码前台开放的分类。各分类可分别开通、分别轮换；
@@ -76,8 +76,10 @@ ALLOWED_CODE_CATEGORIES = {
 # Hedra 用 E（hEdra）：H 已被 Higgsfield 占用。
 # freebeat 用 F。
 # nimvideo 用 N。
+# vmake 用 V。
 CODE_ACCESS_TOKEN_CATEGORIES = (
     "cursor", "openai", "higgsfield", "hedra", "freebeat", "nimvideo",
+    "vmake",
 )
 CODE_ACCESS_TOKEN_PREFIXES = {
     "cursor": "C",
@@ -86,6 +88,7 @@ CODE_ACCESS_TOKEN_PREFIXES = {
     "hedra": "E",
     "freebeat": "F",
     "nimvideo": "N",
+    "vmake": "V",
 }
 CODE_ACCESS_TOKEN_COLUMNS = {
     "cursor": "access_token_cursor",
@@ -94,6 +97,7 @@ CODE_ACCESS_TOKEN_COLUMNS = {
     "hedra": "access_token_hedra",
     "freebeat": "access_token_freebeat",
     "nimvideo": "access_token_nimvideo",
+    "vmake": "access_token_vmake",
 }
 
 # 接码查询日志保留天数
@@ -114,6 +118,7 @@ GROUP_KEYWORDS_BY_CATEGORY: dict[str, tuple[str, ...]] = {
     "hedra": ("hedra",),
     "freebeat": ("freebeat", "freebrio"),
     "nimvideo": ("nim", "nimvideo"),
+    "vmake": ("vmake",),
     "anthropic": ("anthropic", "claude"),
     "google": ("google", "gmail-only"),
     "github": ("github",),
@@ -353,6 +358,7 @@ class DatabaseManager:
                     access_token_hedra TEXT DEFAULT '',
                     access_token_freebeat TEXT DEFAULT '',
                     access_token_nimvideo TEXT DEFAULT '',
+                    access_token_vmake TEXT DEFAULT '',
                     UNIQUE (owner_id, email)
                 )
                 """
@@ -436,6 +442,7 @@ class DatabaseManager:
                 ("access_token_hedra", "TEXT DEFAULT ''"),
                 ("access_token_freebeat", "TEXT DEFAULT ''"),
                 ("access_token_nimvideo", "TEXT DEFAULT ''"),
+                ("access_token_vmake", "TEXT DEFAULT ''"),
             ):
                 col_name, col_type = col_def
                 if col_name not in existing_cols:
@@ -798,6 +805,43 @@ class DatabaseManager:
                     logger.warning(
                         "v12→v13 数据迁移：已为 %d 个公开接码账号生成 nimvideo 凭证（N 开头）。",
                         migrated_nim,
+                    )
+
+            # ── v13 → v14 一次性数据迁移：vmake 独立凭证 ──
+            if current_version < 14:
+                box = SecretBox.instance()
+                token_cols = ", ".join(
+                    f"COALESCE({col}, '')" for col in CODE_ACCESS_TOKEN_COLUMNS.values()
+                )
+                rows = cur.execute(
+                    f"SELECT id, COALESCE(group_name, ''), "
+                    f"       COALESCE(allowed_categories, ''), {token_cols} "
+                    f"FROM accounts WHERE is_public = 1"
+                ).fetchall()
+                migrated_vmake = 0
+                col_names = list(CODE_ACCESS_TOKEN_COLUMNS.keys())
+                for row in rows:
+                    aid = row[0]
+                    group_name = row[1]
+                    cats_str = row[2]
+                    existing = {
+                        col_names[i]: row[3 + i] for i in range(len(col_names))
+                    }
+                    if "vmake" not in _token_categories_for_scope(cats_str, group_name):
+                        continue
+                    if existing.get("vmake"):
+                        continue
+                    token = _generate_category_access_token("vmake")
+                    cipher = box.encrypt(token) or ""
+                    cur.execute(
+                        "UPDATE accounts SET access_token_vmake = ? WHERE id = ?",
+                        (cipher, aid),
+                    )
+                    migrated_vmake += 1
+                if migrated_vmake:
+                    logger.warning(
+                        "v13→v14 数据迁移：已为 %d 个公开接码账号生成 vmake 凭证（V 开头）。",
+                        migrated_vmake,
                     )
 
             # 任意一次升级跑了数据迁移（accounts 实际被 UPDATE 过），都把所有
@@ -1202,6 +1246,7 @@ class DatabaseManager:
         "has_aws_code", "remark", "access_token",
         "access_token_cursor", "access_token_openai", "access_token_higgsfield",
         "access_token_hedra", "access_token_freebeat", "access_token_nimvideo",
+        "access_token_vmake",
     )
 
     def _select_account_columns(self, alias: str = "") -> str:

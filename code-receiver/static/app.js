@@ -69,6 +69,7 @@
     if (first === 'E') return 'hedra';
     if (first === 'F') return 'freebeat';
     if (first === 'N') return 'nimvideo';
+    if (first === 'V') return 'vmake';
     return '';
   }
 

@@ -43,6 +43,7 @@ class Account:
     access_token_hedra: str = ''
     access_token_freebeat: str = ''
     access_token_nimvideo: str = ''
+    access_token_vmake: str = ''
 
     # ── 字段顺序，用于 __getitem__ 兼容桥 ──
     _FIELD_ORDER = (
@@ -52,6 +53,7 @@ class Account:
         'has_aws_code', 'remark', 'access_token',
         'access_token_cursor', 'access_token_openai', 'access_token_higgsfield',
         'access_token_hedra', 'access_token_freebeat', 'access_token_nimvideo',
+        'access_token_vmake',
     )
 
     def to_dict(self) -> dict:
@@ -104,6 +106,7 @@ class Account:
             access_token_hedra=padded[20] or '',
             access_token_freebeat=padded[21] or '',
             access_token_nimvideo=padded[22] or '',
+            access_token_vmake=padded[23] or '',
         )
 
     # ── 临时兼容桥（步骤6中删除）──────────────────────────
@@ -117,6 +120,7 @@ class Account:
         """支持 len(acc) > N 守卫。
         v12 起字段数从 21 增至 22（新增 freebeat access_token）。
         v13 起字段数从 22 增至 23（新增 nimvideo access_token）。
+        v14 起字段数从 23 增至 24（新增 vmake access_token）。
         """
         return len(self._FIELD_ORDER)
 
