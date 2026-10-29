@@ -582,6 +582,75 @@ def test_nimvideo_ignores_unrelated_sender():
     assert result is None
 
 
+# ── Vmake ─────────────────────────────────────────────────────────
+
+
+def test_vmake_extract_code_from_html_body():
+    """实测邮件：HTML 正文，验证码每个数字是独立 span，strip 后数字间有空格。"""
+    html_body = (
+        '<html><body>'
+        '<table><tbody>'
+        '<tr><td>Hello, </td></tr>'
+        '<tr><td>We received a request to log in to Vmake using this email address. '
+        'Please enter the following login code within 10 minutes to access your account. </td></tr>'
+        '<tr><td>'
+        '<span style="display:inline-block">3</span>'
+        '<span style="display:inline-block">0</span>'
+        '<span style="display:inline-block">3</span>'
+        '<span style="display:inline-block">5</span>'
+        '<span style="display:inline-block">8</span>'
+        '<span style="display:inline-block">2</span>'
+        '</td></tr>'
+        '<tr><td>This login code is used to verify your identity. </td></tr>'
+        '</tbody></table>'
+        '</body></html>'
+    )
+    mails = [
+        {
+            "sender": "Vmake",
+            "sender_email": "account@vmake.ai",
+            "subject": "Vmake verification code",
+            "body": html_body,
+            "preview": html_body[:200],
+            "date": "2026-10-29T08:02:43",
+        }
+    ]
+    extractors = get_extractors("vmake")
+    result = first_match(extractors, mails)
+    assert result is not None
+    assert result.code is not None
+    # HTML span 拆分导致的空格会被 base.py 自动去掉
+    assert result.code == "303582"
+
+
+def test_vmake_extract_code_from_plain_body():
+    """纯文本正文，验证码是连续 6 位数字。"""
+    mails = [
+        make_mail(
+            sender="Vmake <account@vmake.ai>",
+            subject="Vmake verification code",
+            body="Please enter the following login code: 123456. This code expires in 10 minutes.",
+        )
+    ]
+    extractors = get_extractors("vmake")
+    result = first_match(extractors, mails)
+    assert result is not None
+    assert result.code == "123456"
+
+
+def test_vmake_ignores_unrelated_sender():
+    mails = [
+        make_mail(
+            sender="random@example.com",
+            subject="Your code is 123456",
+            body="Code: 123456",
+        )
+    ]
+    extractors = get_extractors("vmake")
+    result = first_match(extractors, mails)
+    assert result is None
+
+
 def test_safelinks_unwrap_passthrough():
     """非 SafeLinks 原样返回。"""
     raw = "https://example.com/x?y=1"

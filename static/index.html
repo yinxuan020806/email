@@ -88,6 +88,23 @@
           <th data-i18n="col_remark">备注</th>
           <th style="width:300px;min-width:240px" data-i18n="col_op">操作</th>
         </tr></thead><tbody id="accBody"></tbody></table>
+        <div class="pagination" id="paginationBar">
+          <div class="page-size-wrap">
+            <label class="page-size-label" data-i18n="page_size">每页</label>
+            <select class="page-size-select" id="pageSizeSelect">
+              <option value="20">20</option>
+              <option value="50" selected>50</option>
+              <option value="100">100</option>
+              <option value="all" data-i18n="page_all">全部</option>
+            </select>
+          </div>
+          <div class="page-info" id="pageInfo"></div>
+          <div class="page-nav">
+            <button class="page-btn" id="pagePrev" type="button" aria-label="上一页">‹</button>
+            <span class="page-numbers" id="pageNumbers"></span>
+            <button class="page-btn" id="pageNext" type="button" aria-label="下一页">›</button>
+          </div>
+        </div>
       </div>
       <div id="dashView" style="display:none"></div>
       <div id="settingsView" style="display:none"></div>

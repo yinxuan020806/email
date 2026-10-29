@@ -13,6 +13,7 @@ from extractors import hedra as _hedra
 from extractors import higgsfield as _higgsfield
 from extractors import nimvideo as _nimvideo
 from extractors import openai_chatgpt as _openai
+from extractors import vmake as _vmake
 
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ _BUILTIN: Dict[str, Callable[[], List[Extractor]]] = {
     "hedra": _hedra.default_rules,
     "freebeat": _freebeat.default_rules,
     "nimvideo": _nimvideo.default_rules,
+    "vmake": _vmake.default_rules,
 }
 
 

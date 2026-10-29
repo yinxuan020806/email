@@ -257,7 +257,11 @@ class Extractor:
             if not m and subject:
                 m = self.code_regex.search(subject)
             if m:
-                result.code = (m.group("code") if "code" in (m.groupdict() or {}) else m.group(0)).strip()
+                raw_code = m.group("code") if "code" in (m.groupdict() or {}) else m.group(0)
+                # 去掉所有空白字符：HTML 邮件里验证码常被拆成多个 span，
+                # strip_html_tags 后数字间会带空格（"3 0 3 5 8 2"），
+                # 最终用户需要的是纯数字（"303582"）。
+                result.code = "".join(raw_code.split()).strip()
 
         # link 同样优先 body 找
         if self.link_regex:

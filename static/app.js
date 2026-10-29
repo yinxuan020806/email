@@ -24,6 +24,9 @@ const S = {
   publicIds: new Set(),
   publicCategories: {},
   codeReceiverRequireToken: true,
+  // 分页状态
+  currentPage: 1,
+  pageSize: 50, // 20 / 50 / 100 / 'all'
 };
 
 // ───────── SPA 路由 ─────────
@@ -533,6 +536,7 @@ function renderGroups() {
 
 function selectGroup(name) {
   S.currentGroup = name;
+  S.currentPage = 1; // 切换分组时重置到第一页
   S.view = 'table';
   document.querySelectorAll('.nav-btn').forEach((b) => b.classList.remove('active'));
   if (name === '全部') $('navAll').classList.add('active');
@@ -720,6 +724,7 @@ function choosePublicCategories() {
 
 function filterAccounts() {
   S.searchText = $('searchInp').value.toLowerCase();
+  S.currentPage = 1; // 搜索时重置到第一页
   renderAccounts();
 }
 
@@ -1296,8 +1301,9 @@ async function helperRowBind(account, titleKey) {
 }
 
 function renderAccounts() {
-  const list = filteredAccounts();
-  $('recCnt').textContent = t('record_count', { n: list.length });
+  const all = filteredAccounts();
+  const total = all.length;
+  $('recCnt').textContent = t('record_count', { n: total });
   const tb = $('accBody');
   clear(tb);
 
@@ -1305,25 +1311,103 @@ function renderAccounts() {
   const isOwner = !!(S.user && S.user.is_owner);
   const colSpan = isOwner ? 11 : 10;
 
-  if (!list.length) {
+  if (!total) {
     tb.appendChild(el('tr', {}, el('td', {
       colspan: colSpan,
       style: 'text-align:center;padding:40px;color:var(--text3)'
     }, t('empty'))));
     syncSelAllCheckbox();
+    renderPagination(0);
     return;
   }
 
-  // DocumentFragment 把 N 次 appendChild 合并成 1 次 DOM 写入：
-  // - 浏览器只在最后 tb.appendChild(frag) 时做一次 reflow / paint
-  // - N=256 实测从 ~30ms 降到 ~5ms（与机器/CPU 强相关，但比例稳定）
-  // - 也减少了"渲染过程中触发 IntersectionObserver / mutation 监听"的边际成本
+  // 计算分页
+  const pageSize = S.pageSize === 'all' ? total : S.pageSize;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  // 边界保护：如果当前页超过总页数（比如搜索后），回退到最后一页
+  if (S.currentPage > totalPages) S.currentPage = totalPages;
+  const start = (S.currentPage - 1) * pageSize;
+  const end = Math.min(start + pageSize, total);
+  const pageData = all.slice(start, end);
+
+  // DocumentFragment 把 N 次 appendChild 合并成 1 次 DOM 写入
   const frag = document.createDocumentFragment();
-  for (let i = 0; i < list.length; i++) {
-    frag.appendChild(buildAccountRow(list[i], i, isOwner));
+  for (let i = 0; i < pageData.length; i++) {
+    // 序号基于全局索引，不是页内索引
+    frag.appendChild(buildAccountRow(pageData[i], start + i, isOwner));
   }
   tb.appendChild(frag);
   syncSelAllCheckbox();
+  renderPagination(total);
+}
+
+/** 渲染分页栏 */
+function renderPagination(total) {
+  const bar = $('paginationBar');
+  if (!bar) return;
+  const pageSize = S.pageSize === 'all' ? total : S.pageSize;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+  // 总数信息
+  const info = $('pageInfo');
+  if (info) {
+    if (total === 0) {
+      info.textContent = '';
+    } else if (S.pageSize === 'all') {
+      info.textContent = `${total} 条`;
+    } else {
+      const start = (S.currentPage - 1) * pageSize + 1;
+      const end = Math.min(S.currentPage * pageSize, total);
+      info.textContent = `${start}-${end} / ${total}`;
+    }
+  }
+
+  // 页码按钮
+  const nums = $('pageNumbers');
+  if (nums) {
+    clear(nums);
+    if (S.pageSize === 'all' || totalPages <= 1) {
+      nums.textContent = '';
+    } else {
+      // 生成页码，最多显示 7 个（首尾 + 当前页附近）
+      const pages = buildPageNumbers(S.currentPage, totalPages);
+      for (const p of pages) {
+        if (p === '...') {
+          nums.appendChild(el('span', { class: 'page-ellipsis' }, '...'));
+        } else {
+          const btn = el('button', {
+            class: 'page-num' + (p === S.currentPage ? ' active' : ''),
+            type: 'button',
+            'data-page': p,
+          }, String(p));
+          btn.addEventListener('click', () => {
+            S.currentPage = p;
+            renderAccounts();
+          });
+          nums.appendChild(btn);
+        }
+      }
+    }
+  }
+
+  // 上一页/下一页按钮状态
+  const prev = $('pagePrev');
+  const next = $('pageNext');
+  if (prev) prev.disabled = S.currentPage <= 1;
+  if (next) next.disabled = S.currentPage >= totalPages;
+}
+
+/** 生成要显示的页码列表（带省略号） */
+function buildPageNumbers(cur, total) {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+  const pages = [1];
+  const left = Math.max(2, cur - 1);
+  const right = Math.min(total - 1, cur + 1);
+  if (left > 2) pages.push('...');
+  for (let i = left; i <= right; i++) pages.push(i);
+  if (right < total - 1) pages.push('...');
+  pages.push(total);
+  return pages;
 }
 
 /** 找到给定 id 的 <tr>。表格不大时直接 querySelector 足够快，无需建 id→tr 映射。 */
@@ -3677,6 +3761,29 @@ $('langBtn').addEventListener('click', toggleLang);
 $('addGroupBtn').addEventListener('click', addGroup);
 $('searchInp').addEventListener('input', filterAccountsDebounced);
 $('selAll').addEventListener('change', (e) => toggleSelAll(e.target.checked));
+// 分页控件事件
+$('pageSizeSelect').addEventListener('change', (e) => {
+  const v = e.target.value;
+  S.pageSize = v === 'all' ? 'all' : parseInt(v, 10);
+  S.currentPage = 1;
+  renderAccounts();
+});
+$('pagePrev').addEventListener('click', () => {
+  if (S.currentPage > 1) {
+    S.currentPage--;
+    renderAccounts();
+  }
+});
+$('pageNext').addEventListener('click', () => {
+  const all = filteredAccounts();
+  const total = all.length;
+  const pageSize = S.pageSize === 'all' ? total : S.pageSize;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  if (S.currentPage < totalPages) {
+    S.currentPage++;
+    renderAccounts();
+  }
+});
 $('accBody').addEventListener('pointerdown', startAccountSelectionDrag);
 $('accBody').addEventListener('click', swallowAccountSelectionClick, true);
 $('btnImport').addEventListener('click', showImportModal);
